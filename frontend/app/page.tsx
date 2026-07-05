@@ -7,6 +7,7 @@ import { AccountSummary, EquityPoint, NewsRiskStatus, Position, RegimeInfo, Syst
 import { StatCard } from "@/components/StatCard";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
+import { ActionBanner } from "@/components/ActionBanner";
 import { useLiveEvents } from "@/lib/useLiveEvents";
 
 export default function OverviewPage() {
@@ -47,6 +48,8 @@ export default function OverviewPage() {
           . New entries are paused.
         </div>
       )}
+
+      <ActionBanner />
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <StatCard label="Account Equity" value={`$${latestEquity.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />

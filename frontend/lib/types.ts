@@ -30,6 +30,7 @@ export interface EquityPoint {
 }
 
 export interface RecommendationScore {
+  id: number;
   time: string;
   symbol: string;
   strategyId: string;
@@ -38,6 +39,17 @@ export interface RecommendationScore {
   decision: string;
   explanation: string;
   tradeId: number | null;
+}
+
+export interface ActionableRecommendation {
+  id: number;
+  time: string;
+  symbol: string;
+  strategyId: string;
+  side: string;
+  probability: number;
+  explanation: string;
+  actionability: "fresh" | "stale";
 }
 
 export interface Position {

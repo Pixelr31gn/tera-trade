@@ -142,20 +142,24 @@ model NewsEvent {
 }
 
 model Score {
-  time         DateTime
-  symbol       String
-  strategyId   String  @map("strategy_id")
-  side         String
-  probability  Decimal @db.Decimal(6, 5)
-  decision     String
-  features     Json
-  explanation  String
-  tradeId      Int?    @map("trade_id")
+  id             Int       @id @default(autoincrement())
+  time           DateTime
+  symbol         String
+  strategyId     String    @map("strategy_id")
+  side           String
+  probability    Decimal   @db.Decimal(6, 5)
+  decision       String
+  features       Json
+  explanation    String
+  tradeId        Int?      @map("trade_id")
+  acknowledged   Boolean   @default(false)
+  acknowledgedAt DateTime? @map("acknowledged_at")
 
   trade Trade? @relation(fields: [tradeId], references: [id])
 
-  @@id([time, symbol, strategyId])
+  @@unique([time, symbol, strategyId])
   @@index([symbol, time])
+  @@index([decision, acknowledged, time])
   @@map("scores")
 }
 
