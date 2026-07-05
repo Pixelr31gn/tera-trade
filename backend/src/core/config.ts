@@ -13,6 +13,12 @@ export const BrokerKind = {
 } as const;
 export type BrokerKind = (typeof BrokerKind)[keyof typeof BrokerKind];
 
+export const PriceSource = { YAHOO: "yahoo", BROWSER: "browser" } as const;
+export type PriceSource = (typeof PriceSource)[keyof typeof PriceSource];
+
+export const AccountSource = { SIMULATED: "simulated", BROWSER: "browser" } as const;
+export type AccountSource = (typeof AccountSource)[keyof typeof AccountSource];
+
 const boolFromEnv = z
   .string()
   .optional()
@@ -66,6 +72,14 @@ const EnvSchema = z.object({
   ENGINE_POLL_SECONDS: numberFromEnv(30),
 
   PORT: numberFromEnv(8000),
+
+  // --- Browser-attach data source (read-only DOM watch of a broker web platform) ---
+  PRICE_SOURCE: z.nativeEnum(PriceSource).default(PriceSource.YAHOO),
+  ACCOUNT_SOURCE: z.nativeEnum(AccountSource).default(AccountSource.SIMULATED),
+  BROWSER_CDP_URL: z.string().default("http://localhost:9222"),
+  BROWSER_URL_MATCH: z.string().default("topstepx.com"),
+  BROWSER_POLL_SECONDS: numberFromEnv(5),
+  BROWSER_SELECTORS_PATH: z.string().optional(),
 });
 
 export interface Settings {
@@ -97,6 +111,12 @@ export interface Settings {
   maxDailyTrades: number;
   enginePollSeconds: number;
   port: number;
+  priceSource: PriceSource;
+  accountSource: AccountSource;
+  browserCdpUrl: string;
+  browserUrlMatch: string;
+  browserPollSeconds: number;
+  browserSelectorsPath: string | undefined;
 }
 
 let cached: Settings | undefined;
@@ -133,6 +153,12 @@ export function getSettings(): Settings {
     maxDailyTrades: env.MAX_DAILY_TRADES,
     enginePollSeconds: env.ENGINE_POLL_SECONDS,
     port: env.PORT,
+    priceSource: env.PRICE_SOURCE,
+    accountSource: env.ACCOUNT_SOURCE,
+    browserCdpUrl: env.BROWSER_CDP_URL,
+    browserUrlMatch: env.BROWSER_URL_MATCH,
+    browserPollSeconds: env.BROWSER_POLL_SECONDS,
+    browserSelectorsPath: env.BROWSER_SELECTORS_PATH,
   };
   return cached;
 }

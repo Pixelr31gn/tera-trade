@@ -77,6 +77,13 @@ and need no database. One integration test (`tests/engineIntegration.test.ts`) e
 full engine loop against a real Postgres and is skipped automatically unless
 `TEST_DATABASE_URL` (or `DATABASE_URL`) points at a reachable, already-migrated database.
 
+## Optional: reading your real account without a ProjectX API key
+
+Don't have a ProjectX Gateway API key yet? Terra Trade can read your account balance/P&L and
+prices directly off the TopstepX web platform in your own logged-in Chrome (read-only, via
+Chrome DevTools Protocol -- nothing automates clicks or order placement). See
+[docs/BROWSER_WATCH.md](docs/BROWSER_WATCH.md).
+
 ## Optional: Docker
 
 If you later install Docker Desktop, `infra/docker-compose.yml` builds and runs the backend

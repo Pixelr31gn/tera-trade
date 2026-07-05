@@ -2,7 +2,9 @@
 import { Decimal } from "decimal.js";
 import { prisma } from "../db/client.js";
 import type { Account } from "@prisma/client";
+import { AccountSource, getSettings } from "../core/config.js";
 import type { AccountRiskState } from "../risk/circuitBreakers.js";
+import { getLatestBrowserAccountSnapshot } from "./liveAccountOverride.js";
 
 export async function computeOpenUnrealizedPnl(accountId: number, lastPrices: Map<string, Decimal>): Promise<Decimal> {
   const openTrades = await prisma.trade.findMany({ where: { accountId, status: "open" } });
@@ -23,6 +25,15 @@ export async function computeOpenUnrealizedPnl(accountId: number, lastPrices: Ma
 }
 
 export async function computeAccountEquity(account: Account, lastPrices: Map<string, Decimal>): Promise<Decimal> {
+  const settings = getSettings();
+  if (settings.accountSource === AccountSource.BROWSER) {
+    const snapshot = getLatestBrowserAccountSnapshot();
+    const scraped = snapshot?.equity ?? snapshot?.balance;
+    if (scraped !== null && scraped !== undefined) return new Decimal(scraped);
+    // No snapshot read yet (watcher hasn't polled, or the page didn't match any label) --
+    // fall through to the simulated calculation rather than block on missing data.
+  }
+
   const closedTrades = await prisma.trade.findMany({ where: { accountId: account.id, status: "closed" }, select: { pnl: true } });
   const realized = closedTrades.reduce((acc, t) => acc.plus(t.pnl?.toString() ?? "0"), new Decimal(0));
   const unrealized = await computeOpenUnrealizedPnl(account.id, lastPrices);

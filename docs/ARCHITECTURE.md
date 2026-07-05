@@ -51,6 +51,7 @@ of the risk engine can place an order, and nothing downstream of the mode gate i
 |---|---|
 | `src/brokers` | `BrokerClient` interface; `SimulatedBroker` (paper fills + bracket simulation); `ProjectXGatewayBroker` (real Topstep API adapter, REST via fetch + SignalR via @microsoft/signalr) |
 | `src/marketData` | Instrument registry, free historical backfill (`bars_daily`, `bars_1m`), live bar polling, application-code bar rollups |
+| `src/browserWatch` | Optional: read-only CDP attach to a broker web platform tab, label-based extraction of account/price data (see [docs/BROWSER_WATCH.md](../docs/BROWSER_WATCH.md)) -- an alternative to the ProjectX API for account/price data, never used for order placement |
 | `src/analytics` | EV, profit factor, Sharpe/Sortino, max drawdown, volatility -- pure functions over number arrays |
 | `src/regime` | ADX/Choppiness/Bollinger/ATR-percentile indicators + the trend×vol regime classifier |
 | `src/news` | Free economic calendar ingestion + news risk-window logic |
