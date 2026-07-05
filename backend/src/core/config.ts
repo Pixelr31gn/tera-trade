@@ -31,7 +31,7 @@ const numberFromEnv = (fallback: number) =>
     .transform((v) => (v !== undefined && v !== "" ? Number(v) : fallback));
 
 const EnvSchema = z.object({
-  APP_NAME: z.string().default("Terra Trade"),
+  APP_NAME: z.string().default("Tera Trade"),
   ENVIRONMENT: z.string().default("development"),
   LOG_LEVEL: z.string().default("info"),
   API_KEY: z.string().default("change-me-dev-key"),

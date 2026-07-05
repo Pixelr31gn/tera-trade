@@ -1,4 +1,4 @@
-# Terra Trade
+# Tera Trade
 
 A trading platform for Topstep-funded futures accounts: real-time market data, a year+ of
 historical price history, statistical performance analysis, market-regime detection,
@@ -79,7 +79,7 @@ full engine loop against a real Postgres and is skipped automatically unless
 
 ## Optional: reading your real account without a ProjectX API key
 
-Don't have a ProjectX Gateway API key yet? Terra Trade can read your account balance/P&L and
+Don't have a ProjectX Gateway API key yet? Tera Trade can read your account balance/P&L and
 prices directly off the TopstepX web platform in your own logged-in Chrome (read-only, via
 Chrome DevTools Protocol -- nothing automates clicks or order placement). See
 [docs/BROWSER_WATCH.md](docs/BROWSER_WATCH.md).

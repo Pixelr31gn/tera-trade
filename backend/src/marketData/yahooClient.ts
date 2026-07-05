@@ -35,7 +35,7 @@ interface YahooChartResponse {
 export async function fetchYahooChart(dataSymbol: string, range: string, interval: string): Promise<YahooBar[]> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(dataSymbol)}?interval=${interval}&range=${range}`;
   try {
-    const resp = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (compatible; TerraTrade/0.1)" } });
+    const resp = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (compatible; TeraTrade/0.1)" } });
     if (!resp.ok) {
       logger.warn({ dataSymbol, status: resp.status }, "yahoo_chart_http_error");
       return [];

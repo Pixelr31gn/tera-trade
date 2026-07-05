@@ -1,6 +1,6 @@
 # Browser Watch: reading TopstepX without an API key
 
-Until you have a ProjectX Gateway API key, Terra Trade can read your account balance/P&L and
+Until you have a ProjectX Gateway API key, Tera Trade can read your account balance/P&L and
 instrument prices directly off the TopstepX web platform running in your own Chrome, instead
 of (or alongside) the free Yahoo Finance price feed. This is **read-only** -- it reads visible
 page text over the Chrome DevTools Protocol (CDP); nothing in this path can click, type, place
@@ -9,8 +9,8 @@ an order, or change anything on the page.
 ## How it works
 
 1. You launch Chrome yourself with a debugging port open and log into TopstepX normally.
-2. Terra Trade's backend attaches to that already-open tab via CDP (`playwright-core`,
-   `connectOverCDP` -- no browser is downloaded or launched by Terra Trade).
+2. Tera Trade's backend attaches to that already-open tab via CDP (`playwright-core`,
+   `connectOverCDP` -- no browser is downloaded or launched by Tera Trade).
 3. On an interval (`BROWSER_POLL_SECONDS`, default 5s) it reads the page's visible text and
    looks for account balance/equity/P&L and instrument prices near known labels ("Balance",
    "Net Liquidation", "Open P&L", the instrument symbol).
@@ -71,7 +71,7 @@ TopstepX page, so this almost certainly needs one round of adjustment together:
   your own account data from your own logged-in session -- reasonable for personal use, but
   worth being aware this isn't an officially supported integration path the way the ProjectX
   Gateway API is.
-- Order execution is out of scope for this path entirely -- Terra Trade never uses browser
+- Order execution is out of scope for this path entirely -- Tera Trade never uses browser
   automation to place trades, only to observe. Execution still only ever happens through the
   `BrokerClient` interface (`SimulatedBroker` or `ProjectXGatewayBroker`), gated by
   `TRADING_MODE` as always.

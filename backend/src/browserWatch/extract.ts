@@ -18,7 +18,7 @@ export interface CalibratedSelectors {
   equitySelector?: string;
   /** CSS selector whose text content is today's or open P&L. */
   pnlSelector?: string;
-  /** Map of Terra Trade symbol (e.g. "ES") -> CSS selector for that instrument's last price. */
+  /** Map of Tera Trade symbol (e.g. "ES") -> CSS selector for that instrument's last price. */
   priceSelectors?: Record<string, string>;
 }
 

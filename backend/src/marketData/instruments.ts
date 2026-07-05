@@ -9,7 +9,7 @@
 import { Decimal } from "decimal.js";
 
 export interface InstrumentSpec {
-  symbol: string; // canonical Terra Trade symbol, e.g. "ES"
+  symbol: string; // canonical Tera Trade symbol, e.g. "ES"
   dataSymbol: string; // Yahoo Finance ticker, e.g. "ES=F"
   exchange: string;
   tickSize: Decimal;

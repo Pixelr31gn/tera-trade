@@ -3,8 +3,8 @@ import "./globals.css";
 import { Nav } from "@/components/Nav";
 
 export const metadata: Metadata = {
-  title: "Terra Trade",
-  description: "Terra Trade trading dashboard",
+  title: "Tera Trade",
+  description: "Tera Trade trading dashboard",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

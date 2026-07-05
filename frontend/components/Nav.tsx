@@ -16,7 +16,7 @@ export function Nav() {
   const pathname = usePathname();
   return (
     <nav className="flex gap-1 border-b border-border px-6 py-3">
-      <span className="mr-6 font-semibold tracking-tight text-white">Terra Trade</span>
+      <span className="mr-6 font-semibold tracking-tight text-white">Tera Trade</span>
       {LINKS.map((link) => {
         const active = pathname === link.href;
         return (

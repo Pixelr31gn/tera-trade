@@ -85,7 +85,7 @@ partitioning. `bars_daily` covers the 1-year+ historical requirement (see below)
   5-minute is the finest granularity available, ~60 trailing days. `bars_1m` (the table name
   is a holdover from the original 1-minute spec) holds this 5-minute intraday data and is the
   live execution resolution; `bars_daily` is the long-horizon analytics resolution.
-- **Single static API key, no user system.** Terra Trade runs on one operator's machine; a
+- **Single static API key, no user system.** Tera Trade runs on one operator's machine; a
   multi-tenant auth system would be unused complexity.
 - **Decimal.js everywhere money is involved.** JavaScript's native `number` is a float and
   unsafe for prices/PnL; every price, size, and PnL calculation uses `Decimal` instead.

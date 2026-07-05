@@ -1,7 +1,7 @@
 /**
  * v1 trade-scoring model: a documented, weighted rule-based scorer.
  *
- * There is no trade history to train a real model on yet, so Terra Trade
+ * There is no trade history to train a real model on yet, so Tera Trade
  * ships with a transparent heuristic instead of a black box. Every factor's
  * contribution is returned alongside the score so the explanation engine can
  * say *why* a setup scored the way it did. Once `trades` has enough labeled

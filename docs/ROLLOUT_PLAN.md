@@ -1,6 +1,6 @@
 # Phased Rollout Plan
 
-Terra Trade is built so that going from "the code runs" to "real money is at risk" requires
+Tera Trade is built so that going from "the code runs" to "real money is at risk" requires
 a sequence of deliberate, explicit steps -- never a default or an accident.
 
 ## Phase 0 -- Analysis only, simulated everything (current state)

@@ -1,4 +1,4 @@
-// Terra Trade database schema (plain PostgreSQL -- e.g. Neon).
+// Tera Trade database schema (plain PostgreSQL -- e.g. Neon).
 //
 // No TimescaleDB extension here (not available on free hosted Postgres), so
 // bars_1m/regime_history/scores/equity_curve are plain indexed tables and
