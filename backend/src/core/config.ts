@@ -51,7 +51,7 @@ const EnvSchema = z.object({
   INSTRUMENT_SYMBOLS: z.string().default("ES,NQ,CL,GC"),
 
   HISTORICAL_BACKFILL_DAYS: numberFromEnv(365),
-  BAR_INTERVAL_MINUTES: numberFromEnv(1),
+  BAR_INTERVAL_MINUTES: numberFromEnv(5),
 
   NEWS_CALENDAR_URL: z.string().default("https://nfs.faireconomy.media/ff_calendar_thisweek.json"),
   NEWS_RISK_WINDOW_MINUTES: numberFromEnv(15),

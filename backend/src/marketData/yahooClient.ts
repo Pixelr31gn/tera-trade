@@ -48,7 +48,14 @@ export async function fetchYahooChart(dataSymbol: string, range: string, interva
     }
 
     const quote = result.indicators.quote[0];
-    if (!quote) return [];
+    // Yahoo returns a "successful" response shape with no `timestamp` field and an
+    // empty quote object when it has no data at this granularity for this symbol
+    // (e.g. requesting interval=1m on a CME futures continuous contract, which the
+    // free endpoint doesn't serve intraday minute bars for -- only 5m and coarser).
+    if (!quote || !result.timestamp) {
+      logger.warn({ dataSymbol, interval, range }, "yahoo_chart_no_data_at_this_granularity");
+      return [];
+    }
 
     const bars: YahooBar[] = [];
     for (let i = 0; i < result.timestamp.length; i++) {

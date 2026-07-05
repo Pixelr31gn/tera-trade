@@ -4,7 +4,7 @@
 // dependency needed.
 import { fileURLToPath } from "node:url";
 
-const envPath = fileURLToPath(new URL("../../.env", import.meta.url));
+const envPath = fileURLToPath(new URL("../.env", import.meta.url));
 
 try {
   process.loadEnvFile(envPath);

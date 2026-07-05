@@ -2,11 +2,16 @@
  * Live bar pipeline for the free-data path.
  *
  * Yahoo Finance has no real push/streaming API, so "live" here means polling
- * for the latest completed 1-minute bar on an interval and treating each new
- * bar as a tick for the engine loop. This is what "real-time" honestly means
- * without a paid market-data vendor or a connected ProjectX Gateway account;
- * once the user has ProjectX credentials, `ProjectXGatewayBroker.startMarketStream()`
+ * for the latest completed bar on an interval and treating each new bar as a
+ * tick for the engine loop. This is what "real-time" honestly means without a
+ * paid market-data vendor or a connected ProjectX Gateway account; once the
+ * user has ProjectX credentials, `ProjectXGatewayBroker.startMarketStream()`
  * should be used instead for true push-based quotes.
+ *
+ * Granularity is 5 minutes, not 1 -- Yahoo's free endpoint doesn't serve
+ * interval=1m for CME futures continuous contracts (only equities), and
+ * range=1d is unreliable for these symbols (frequently returns no data
+ * regardless of interval), so this polls a 5-day window and takes the last bar.
  */
 import { Decimal } from "decimal.js";
 import { prisma } from "../db/client.js";
@@ -63,7 +68,7 @@ export class LiveBarPoller {
   }
 
   private async pollOnce(spec: InstrumentSpec): Promise<void> {
-    const bars = await fetchYahooChart(spec.dataSymbol, "1d", "1m");
+    const bars = await fetchYahooChart(spec.dataSymbol, "5d", "5m");
     if (bars.length === 0) return;
     const last = bars[bars.length - 1]!;
     const lastTime = last.time.getTime();

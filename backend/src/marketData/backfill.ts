@@ -5,7 +5,13 @@ import { fetchYahooChart } from "./yahooClient.js";
 
 const logger = childLogger("backfill");
 
-const MAX_INTRADAY_LOOKBACK_DAYS = 7;
+// Yahoo's free chart endpoint does not serve interval=1m for CME futures
+// continuous contracts (=F symbols) -- only for equities. 5-minute is the
+// finest granularity actually available for these symbols, going back ~60
+// days; `bars_1m` (the table name is a holdover from the original spec)
+// stores this 5-minute data for futures.
+const INTRADAY_INTERVAL = "5m";
+const MAX_INTRADAY_LOOKBACK_DAYS = 60;
 
 export async function ensureInstrumentsSeeded(): Promise<void> {
   for (const spec of DEFAULT_INSTRUMENTS) {
@@ -52,7 +58,7 @@ export async function backfillDaily(spec: InstrumentSpec, days: number): Promise
 }
 
 export async function backfillRecentIntraday(spec: InstrumentSpec): Promise<number> {
-  const bars = await fetchYahooChart(spec.dataSymbol, `${MAX_INTRADAY_LOOKBACK_DAYS}d`, "1m");
+  const bars = await fetchYahooChart(spec.dataSymbol, `${MAX_INTRADAY_LOOKBACK_DAYS}d`, INTRADAY_INTERVAL);
   if (bars.length === 0) {
     logger.warn({ symbol: spec.symbol }, "intraday_backfill_empty");
     return 0;

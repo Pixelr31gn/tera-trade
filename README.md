@@ -53,8 +53,8 @@ swapped out because neither Python nor Docker were available on the target machi
    npm install
    npm run dev
    ```
-6. Kick off the historical backfill (1 year of daily bars + trailing week of 1-minute bars,
-   for ES/NQ/CL/GC) and pull the current economic calendar:
+6. Kick off the historical backfill (1 year of daily bars + trailing ~60 days of 5-minute
+   bars, for ES/NQ/CL/GC) and pull the current economic calendar:
    ```
    curl -X POST http://localhost:8000/api/backfill/run -H "X-API-Key: change-me-dev-key"
    ```
@@ -94,9 +94,10 @@ database container). `docker compose up --build` from `infra/`.
 
 - **No ProjectX Gateway credentials yet.** `ProjectXGatewayBroker` is implemented against
   the documented API but has not been integration-tested against a live account.
-- **Free historical data.** 1-minute bars are only available for the trailing ~7 days
-  (Yahoo Finance's own limit); the 1-year+ history requirement is satisfied at daily
-  granularity (`bars_daily`). See `backend/src/marketData/backfill.ts`.
+- **Free historical data, 5-minute floor.** Yahoo Finance's free endpoint doesn't serve
+  interval=1m for CME futures continuous contracts at all (only equities); 5-minute is the
+  finest granularity available, going back ~60 days. The 1-year+ history requirement is
+  satisfied at daily granularity (`bars_daily`). See `backend/src/marketData/backfill.ts`.
 - **Plain Postgres, not TimescaleDB.** Neon's free tier doesn't support the TimescaleDB
   extension; 5m/15m/1h/1d bar rollups run as scheduled application-code queries
   (`backend/src/marketData/rollup.ts`) instead of native continuous aggregates.
