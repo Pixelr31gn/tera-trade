@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractAccountSnapshot, extractPriceForSymbol, parseMoney } from "../src/browserWatch/extract.js";
+import { computeVolumeDelta, extractAccountSnapshot, extractPriceForSymbol, extractVolumeForSymbol, parseMoney } from "../src/browserWatch/extract.js";
 
 describe("parseMoney", () => {
   it("parses plain and dollar-prefixed amounts", () => {
@@ -112,5 +112,69 @@ describe("extractPriceForSymbol", () => {
 
     expect(extractPriceForSymbol(pageText, "ES")).toBeCloseTo(7557.0);
     expect(extractPriceForSymbol(pageText, "NQ")).toBeCloseTo(29901.75);
+  });
+});
+
+describe("extractVolumeForSymbol", () => {
+  it("reads the Volume column from a TopstepX-style quote row", () => {
+    const pageText = [
+      "Contract",
+      "Last",
+      "Change",
+      "% Chg",
+      "Open",
+      "Bid",
+      "Ask",
+      "High",
+      "Low",
+      "Volume",
+      "Remove",
+      "ESU26",
+      "7,557.00",
+      "28.75",
+      "0.38%",
+      "7,523.75",
+      "7,556.50",
+      "7,557.50",
+      "7,565.25",
+      "7,523.75",
+      "125,430",
+      "NQU26",
+      "29,901.75",
+      "345.75",
+      "1.17%",
+      "29,566.00",
+      "29,896.50",
+      "29,922.25",
+      "29,955.25",
+      "29,522.00",
+      "98,210",
+    ].join("\n");
+
+    expect(extractVolumeForSymbol(pageText, "ES")).toBe(125430);
+    expect(extractVolumeForSymbol(pageText, "NQ")).toBe(98210);
+  });
+
+  it("returns null when there's no volume figure for that row", () => {
+    const pageText = "ESU26\n7,557.00\n28.75";
+    expect(extractVolumeForSymbol(pageText, "ES")).toBeNull();
+  });
+});
+
+describe("computeVolumeDelta", () => {
+  it("returns 0 on the first observation (no prior reading)", () => {
+    expect(computeVolumeDelta(null, 125430)).toBe(0);
+  });
+
+  it("returns the difference between consecutive cumulative readings", () => {
+    expect(computeVolumeDelta(125430, 125900)).toBe(470);
+  });
+
+  it("returns 0 (not a negative spike) on an apparent session rollover", () => {
+    expect(computeVolumeDelta(125430, 50)).toBe(0);
+  });
+
+  it("returns 0 when volume hasn't changed", () => {
+    expect(computeVolumeDelta(125430, 125430)).toBe(0);
   });
 });

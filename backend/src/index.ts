@@ -3,6 +3,7 @@ import "./env.js"; // must be first: populates process.env before config.ts read
 import { Decimal } from "decimal.js";
 import { buildServer } from "./api/server.js";
 import { manager } from "./api/wsManager.js";
+import { computeVolumeDelta } from "./browserWatch/extract.js";
 import { BrowserWatcher } from "./browserWatch/watcher.js";
 import { getBroker } from "./brokers/index.js";
 import { AccountSource, getSettings, PriceSource } from "./core/config.js";
@@ -31,6 +32,7 @@ async function main(): Promise<void> {
     // Read-only DOM watch of a broker web platform tab already open in the
     // user's own Chrome (started with --remote-debugging-port). See
     // docs/BROWSER_WATCH.md. Never clicks/types/submits anything.
+    const lastCumulativeVolume = new Map<string, number>();
     const watcher = new BrowserWatcher(
       {
         cdpUrl: settings.browserCdpUrl,
@@ -40,9 +42,15 @@ async function main(): Promise<void> {
         selectorsPath: settings.browserSelectorsPath,
       },
       async (snapshot) => setLatestBrowserAccountSnapshot(snapshot),
-      async (symbol, price) => {
+      async (symbol, price, cumulativeVolume) => {
         if (settings.priceSource !== PriceSource.BROWSER) return;
         const p = new Decimal(price);
+        // TopstepX's quote table shows cumulative session volume, not a
+        // per-tick figure -- convert to a delta so it behaves like a normal
+        // bar's volume (see computeVolumeDelta's docstring).
+        const delta = computeVolumeDelta(lastCumulativeVolume.get(symbol) ?? null, cumulativeVolume);
+        lastCumulativeVolume.set(symbol, cumulativeVolume);
+        const v = new Decimal(delta);
         const time = new Date();
         // Mirrors LiveBarPoller: the engine loop reads bar history from the
         // DB (loadRecentBars), so a price tick has to actually land in
@@ -50,9 +58,9 @@ async function main(): Promise<void> {
         // which is why regime/scoring silently never saw browser-sourced
         // prices even though extraction itself was working.
         await prisma.bar.create({
-          data: { time, symbol, open: p.toString(), high: p.toString(), low: p.toString(), close: p.toString(), volume: "0" },
+          data: { time, symbol, open: p.toString(), high: p.toString(), low: p.toString(), close: p.toString(), volume: v.toString() },
         });
-        await engine.onNewBar(symbol, time, p, p, p, p, new Decimal(0));
+        await engine.onNewBar(symbol, time, p, p, p, p, v);
       }
     );
     stopDataSource = () => watcher.stop();

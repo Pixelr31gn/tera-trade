@@ -9,12 +9,19 @@ import { existsSync, readFileSync } from "node:fs";
 import type { Browser, Page } from "playwright-core";
 import { childLogger } from "../core/logger.js";
 import { connectToChrome, findPage, readPageText } from "./cdpClient.js";
-import { extractAccountSnapshot, extractPriceForSymbol, parseMoney, type BrowserAccountSnapshot, type CalibratedSelectors } from "./extract.js";
+import {
+  extractAccountSnapshot,
+  extractPriceForSymbol,
+  extractVolumeForSymbol,
+  parseMoney,
+  type BrowserAccountSnapshot,
+  type CalibratedSelectors,
+} from "./extract.js";
 
 const logger = childLogger("browserWatcher");
 
 export type AccountSnapshotHandler = (snapshot: BrowserAccountSnapshot) => Promise<void>;
-export type PriceTickHandler = (symbol: string, price: number) => Promise<void>;
+export type PriceTickHandler = (symbol: string, price: number, volume: number) => Promise<void>;
 
 export interface BrowserWatcherOptions {
   cdpUrl: string;
@@ -115,14 +122,20 @@ export class BrowserWatcher {
     for (const symbol of this.options.symbols) {
       const calibratedSelector = this.selectors?.priceSelectors?.[symbol];
       let price: number | null = null;
+      let volume = 0;
       if (calibratedSelector) {
         const text = await readViaSelector(page, calibratedSelector);
         if (text) price = parseMoney(text);
+        // Calibrated selectors are price-only for now; volume still comes
+        // from the page-text heuristic below if available.
+        const pageText = await readPageText(page);
+        volume = extractVolumeForSymbol(pageText, symbol, this.options.symbolAliases?.[symbol] ?? []) ?? 0;
       } else {
         const pageText = await readPageText(page);
         price = extractPriceForSymbol(pageText, symbol, this.options.symbolAliases?.[symbol] ?? []);
+        volume = extractVolumeForSymbol(pageText, symbol, this.options.symbolAliases?.[symbol] ?? []) ?? 0;
       }
-      if (price !== null) await this.onPriceTick(symbol, price);
+      if (price !== null) await this.onPriceTick(symbol, price, volume);
     }
   }
 }

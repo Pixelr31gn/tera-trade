@@ -138,3 +138,55 @@ export function extractPriceForSymbol(pageText: string, symbol: string, aliases:
 
   return null;
 }
+
+// Matches any CME-style contract code (not just the one we're looking for),
+// used to detect where the current quote row ends and the next one begins.
+const ANY_CONTRACT_CODE_PATTERN = new RegExp(`^[A-Z]{1,3}[${FUTURES_MONTH_CODES}]\\d{2}$`, "i");
+
+/**
+ * Looks for the given instrument symbol's traded volume in a quote table row.
+ *
+ * TopstepX's Quotes panel lists Last/Change/%Chg/Open/Bid/Ask/High/Low/Volume
+ * per contract row -- every column except Volume is either a decimal price or
+ * has a "%" sign, so within one row's line span, the last plain integer
+ * (comma-grouped, no decimal point, no "%") is the volume figure. This is a
+ * heuristic over rendered position, not a named label (TopstepX doesn't put
+ * "Volume:" next to the number the way it does for account fields), so it
+ * only looks within the current row (stops at the next contract code) to
+ * avoid drifting into an unrelated column.
+ */
+export function extractVolumeForSymbol(pageText: string, symbol: string, aliases: string[] = []): number | null {
+  const lines = pageText.split("\n").map((l) => l.trim()).filter(Boolean);
+  const contractCodePattern = new RegExp(`^${symbol}[${FUTURES_MONTH_CODES}]\\d{2}$`, "i");
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!contractCodePattern.test(lines[i]!)) continue;
+
+    let volume: number | null = null;
+    for (let j = i + 1; j < Math.min(i + 12, lines.length); j++) {
+      if (ANY_CONTRACT_CODE_PATTERN.test(lines[j]!)) break; // next row started
+      if (/^[\d,]+$/.test(lines[j]!)) volume = parseMoney(lines[j]!);
+    }
+    if (volume !== null) return volume;
+  }
+
+  return null;
+}
+
+/**
+ * TopstepX's Quotes "Volume" column is cumulative session volume, not
+ * per-tick volume -- feeding that raw number in as a bar's volume would make
+ * it monotonically increase forever and make volume-based scoring features
+ * (which expect "how much traded in this period") meaningless. This turns a
+ * new cumulative reading into a per-tick delta, given the last cumulative
+ * reading seen for that symbol.
+ *
+ * Returns 0 (rather than a spurious spike) on the first observation or a
+ * session rollover (current < previous, e.g. the exchange's daily volume
+ * counter reset).
+ */
+export function computeVolumeDelta(previousCumulative: number | null, currentCumulative: number): number {
+  if (previousCumulative === null) return 0;
+  if (currentCumulative < previousCumulative) return 0;
+  return currentCumulative - previousCumulative;
+}
