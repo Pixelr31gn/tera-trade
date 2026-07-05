@@ -24,9 +24,15 @@ const WEIGHTS = {
   session: 0.3,
   newsRisk: 1.6,
   historicalEdge: 0.9,
+  openingRangeEdge: 0.7,
 };
 
 const BASE_LOGIT = -0.2; // slight negative prior so an empty/neutral setup scores below 0.5
+
+// Below this many historical sessions, the opening-range breakout
+// probability is too noisy to trust -- ignore it rather than let a handful
+// of days swing the score.
+const MIN_OPENING_RANGE_SAMPLE_SIZE = 15;
 
 export interface FactorContribution {
   name: string;
@@ -149,6 +155,21 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
       name: "historicalEdge",
       contribution,
       description: `this strategy's historical win rate is ${(features.strategyHistoricalWinRate * 100).toFixed(0)}%`,
+    });
+  }
+
+  // 9. Opening-range breakout edge -- empirical, not a heuristic weight: how
+  // often has this instrument's first-hour high/low actually gotten broken
+  // later in the session, historically, in this setup's direction? Ignored
+  // until there's enough sessions behind it to be more signal than noise.
+  if (features.openingRangeBreakoutProbability !== null && features.openingRangeSampleSize >= MIN_OPENING_RANGE_SAMPLE_SIZE) {
+    const raw = clip((features.openingRangeBreakoutProbability - 0.5) * 2);
+    const contribution = WEIGHTS.openingRangeEdge * raw;
+    logit += contribution;
+    factors.push({
+      name: "openingRangeEdge",
+      contribution,
+      description: `the first-hour range has broken in this direction ${(features.openingRangeBreakoutProbability * 100).toFixed(0)}% of the last ${features.openingRangeSampleSize} sessions`,
     });
   }
 

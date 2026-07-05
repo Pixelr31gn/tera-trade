@@ -13,6 +13,7 @@ import type { BrokerClient, ClosedSimTrade } from "../brokers/types.js";
 import { SimulatedBroker } from "../brokers/simulatedBroker.js";
 import { computeAccountEquity, computeAccountRiskState, recordEquityPoint } from "./accounting.js";
 import { ensureDefaultAccount, loadRecentBars } from "./bootstrap.js";
+import { getOpeningRangeStats } from "./openingRangeCache.js";
 import { explainKillSwitch, explainRiskRejection, explainScore, explainTradeExit } from "../explain/engine.js";
 import { executeIfApproved } from "../execution/engine.js";
 import { getSystemState, tripKillSwitch } from "../execution/mode.js";
@@ -142,12 +143,21 @@ export class TradingEngine {
 
     const newsStatus = await getNewsRiskStatus(barTime);
     const settings = getSettings();
+    const openingRangeStats = await getOpeningRangeStats(symbol);
 
     for (const strategy of ALL_STRATEGIES) {
       const signal = strategy.generateSignal(symbol, bars);
       if (!signal) continue;
 
-      const features = buildSetupFeatures(bars, symbol, signal.side, regime, barTime, newsStatus.inRiskWindow, newsStatus.minutesToEvent);
+      // Direction-specific: a long setup cares about the historical odds the
+      // *high* gets broken later; a short setup cares about the *low*.
+      const openingRangeBreakoutProbability =
+        signal.side === "long" ? openingRangeStats.probHighBroken : openingRangeStats.probLowBroken;
+
+      const features = buildSetupFeatures(
+        bars, symbol, signal.side, regime, barTime, newsStatus.inRiskWindow, newsStatus.minutesToEvent,
+        null, openingRangeBreakoutProbability, openingRangeStats.sessionsAnalyzed
+      );
       const gated = evaluateSetup(features);
       const explanation = explainScore(symbol, signal.side, gated, settings.minScoreThreshold);
 

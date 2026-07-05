@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(nslookup *)"
+      "Bash(nslookup *)",
+      "Bash(curl -s -A \"Mozilla/5.0 \\(compatible; TeraTrade/0.1\\)\" \"https://query1.finance.yahoo.com/v8/finance/chart/NQ%3DF?interval=5m&range=60d\")",
+      "Bash(node -e ' *)",
+      "Bash(curl -s -X POST -H \"X-API-Key: change-me-dev-key\" http://localhost:8000/api/backfill/run)",
+      "Bash(node check-backfill.mjs)",
+      "Bash(time curl -s -X POST -H \"X-API-Key: change-me-dev-key\" http://localhost:8000/api/backfill/run)",
+      "Bash(taskkill //F //PID 23320)",
+      "Bash(curl -s -H \"X-API-Key: change-me-dev-key\" \"http://localhost:8000/api/analytics/opening-range?symbol=NQ\")"
     ]
   }
 }

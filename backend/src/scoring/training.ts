@@ -32,6 +32,8 @@ export const FEATURE_COLUMNS = [
   "slopeR2",
   "hourOfDayUtc",
   "newsRiskFlag",
+  "openingRangeBreakoutProbability",
+  "openingRangeSampleSize",
 ] as const;
 
 interface TrainedModel {

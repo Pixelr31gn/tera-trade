@@ -3,6 +3,7 @@ import websocketPlugin from "@fastify/websocket";
 import Fastify, { type FastifyInstance } from "fastify";
 import { getSettings } from "../core/config.js";
 import { accountsRoutes } from "./routes/accounts.js";
+import { analyticsRoutes } from "./routes/analytics.js";
 import { backfillRoutes } from "./routes/backfill.js";
 import { newsRoutes } from "./routes/news.js";
 import { performanceRoutes } from "./routes/performance.js";
@@ -28,6 +29,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(performanceRoutes);
   await app.register(regimeRoutes);
   await app.register(newsRoutes);
+  await app.register(analyticsRoutes);
   await app.register(backfillRoutes);
   await app.register(wsRoutes);
 

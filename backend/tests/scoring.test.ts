@@ -22,6 +22,8 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     newsRiskFlag: false,
     newsMinutesToEvent: null,
     strategyHistoricalWinRate: null,
+    openingRangeBreakoutProbability: null,
+    openingRangeSampleSize: 0,
     ...overrides,
   };
 }

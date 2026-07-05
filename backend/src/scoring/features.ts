@@ -26,6 +26,10 @@ export interface SetupFeatures {
   newsRiskFlag: boolean;
   newsMinutesToEvent: number | null;
   strategyHistoricalWinRate: number | null;
+  /** Empirical probability (from computeOpeningRangeStats) that the first-hour range gets broken in this setup's direction. */
+  openingRangeBreakoutProbability: number | null;
+  /** How many historical sessions that probability is based on -- lets the scorer ignore it until there's enough data to trust it. */
+  openingRangeSampleSize: number;
 }
 
 function mean(xs: number[]): number {
@@ -40,7 +44,9 @@ export function buildSetupFeatures(
   now: Date,
   newsRiskFlag: boolean,
   newsMinutesToEvent: number | null,
-  strategyHistoricalWinRate: number | null = null
+  strategyHistoricalWinRate: number | null = null,
+  openingRangeBreakoutProbability: number | null = null,
+  openingRangeSampleSize = 0
 ): SetupFeatures {
   const closes = bars.map((b) => b.close);
   const atrSeries = atr(bars).filter((v) => !Number.isNaN(v));
@@ -96,5 +102,7 @@ export function buildSetupFeatures(
     newsRiskFlag,
     newsMinutesToEvent,
     strategyHistoricalWinRate,
+    openingRangeBreakoutProbability,
+    openingRangeSampleSize,
   };
 }

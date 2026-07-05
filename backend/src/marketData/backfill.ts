@@ -1,7 +1,7 @@
 import { prisma } from "../db/client.js";
 import { childLogger } from "../core/logger.js";
 import { DEFAULT_INSTRUMENTS, type InstrumentSpec } from "./instruments.js";
-import { fetchYahooChart } from "./yahooClient.js";
+import { fetchYahooChart, type YahooBar } from "./yahooClient.js";
 
 const logger = childLogger("backfill");
 
@@ -37,22 +37,19 @@ export async function backfillDaily(spec: InstrumentSpec, days: number): Promise
     return 0;
   }
 
-  for (const bar of bars) {
+  // Historical daily bars for past dates don't change -- bulk-insert and
+  // skip rows that already exist instead of one network round-trip per row
+  // (an N-row loop of individual upserts against a remote DB was the actual
+  // bottleneck behind what first looked like Yahoo rate-limiting).
+  const rows = bars.map((bar: YahooBar) => {
     const date = new Date(Date.UTC(bar.time.getUTCFullYear(), bar.time.getUTCMonth(), bar.time.getUTCDate()));
-    await prisma.dailyBar.upsert({
-      where: { date_symbol: { date, symbol: spec.symbol } },
-      update: { open: bar.open.toString(), high: bar.high.toString(), low: bar.low.toString(), close: bar.close.toString(), volume: bar.volume.toString() },
-      create: {
-        date,
-        symbol: spec.symbol,
-        open: bar.open.toString(),
-        high: bar.high.toString(),
-        low: bar.low.toString(),
-        close: bar.close.toString(),
-        volume: bar.volume.toString(),
-      },
-    });
-  }
+    return {
+      date, symbol: spec.symbol,
+      open: bar.open.toString(), high: bar.high.toString(), low: bar.low.toString(), close: bar.close.toString(), volume: bar.volume.toString(),
+    };
+  });
+  await prisma.dailyBar.createMany({ data: rows, skipDuplicates: true });
+
   logger.info({ symbol: spec.symbol, rows: bars.length }, "daily_backfill_done");
   return bars.length;
 }
@@ -64,23 +61,18 @@ export async function backfillRecentIntraday(spec: InstrumentSpec): Promise<numb
     return 0;
   }
 
-  for (const bar of bars) {
-    await prisma.bar.upsert({
-      where: { time_symbol: { time: bar.time, symbol: spec.symbol } },
-      update: { open: bar.open.toString(), high: bar.high.toString(), low: bar.low.toString(), close: bar.close.toString(), volume: bar.volume.toString() },
-      create: {
-        time: bar.time,
-        symbol: spec.symbol,
-        open: bar.open.toString(),
-        high: bar.high.toString(),
-        low: bar.low.toString(),
-        close: bar.close.toString(),
-        volume: bar.volume.toString(),
-      },
-    });
-  }
+  const rows = bars.map((bar: YahooBar) => ({
+    time: bar.time, symbol: spec.symbol,
+    open: bar.open.toString(), high: bar.high.toString(), low: bar.low.toString(), close: bar.close.toString(), volume: bar.volume.toString(),
+  }));
+  await prisma.bar.createMany({ data: rows, skipDuplicates: true });
+
   logger.info({ symbol: spec.symbol, rows: bars.length }, "intraday_backfill_done");
   return bars.length;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function runFullBackfill(days = 365): Promise<void> {
@@ -88,5 +80,8 @@ export async function runFullBackfill(days = 365): Promise<void> {
   for (const spec of DEFAULT_INSTRUMENTS) {
     await backfillDaily(spec, days);
     await backfillRecentIntraday(spec);
+    // A little breathing room between symbols regardless -- cheap insurance
+    // against bursting Yahoo's unauthenticated endpoint.
+    await sleep(1000);
   }
 }
