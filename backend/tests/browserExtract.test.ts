@@ -57,6 +57,23 @@ describe("extractAccountSnapshot", () => {
     const snapshot = extractAccountSnapshot(pageText);
     expect(snapshot.pnl).toBeCloseTo(-123.45);
   });
+
+  it("reads TopstepX's actual compact HUD notation (BAL/UP&L, no separate equity label)", () => {
+    // Captured verbatim from a real TopstepX account page.
+    const pageText = ["$50K TRADING COMBINE|50KTC-V2-170199-40086833", "BAL: $50,000.00", "MLL: $48,000.00", "RP&L: $0.00", "UP&L: $0.00"].join(
+      "\n"
+    );
+    const snapshot = extractAccountSnapshot(pageText);
+    expect(snapshot.balance).toBeCloseTo(50000);
+    expect(snapshot.pnl).toBeCloseTo(0); // UP&L
+    expect(snapshot.equity).toBeCloseTo(50000); // synthesized: no explicit equity label on this page
+  });
+
+  it("synthesizes equity as balance + unrealized P&L when there's an open position", () => {
+    const pageText = "BAL: $50,000.00\nUP&L: $325.50";
+    const snapshot = extractAccountSnapshot(pageText);
+    expect(snapshot.equity).toBeCloseTo(50325.5);
+  });
 });
 
 describe("extractPriceForSymbol", () => {
@@ -73,5 +90,27 @@ describe("extractPriceForSymbol", () => {
 
   it("returns null when the symbol isn't present", () => {
     expect(extractPriceForSymbol("Some unrelated page text", "ES")).toBeNull();
+  });
+
+  it("matches TopstepX's real contract-code quote table (ESU26/NQU26) and skips the Time and Sales false-positive trap", () => {
+    // "Time and Sales" contains "es" (from "sal-es") and appears before the
+    // real quote row in TopstepX's actual page -- this used to make the
+    // bare substring search give up right there and return null.
+    const pageText = [
+      "Time and Sales",
+      "...",
+      "Contract",
+      "Last",
+      "Change",
+      "ESU26",
+      "7,557.00",
+      "28.75",
+      "NQU26",
+      "29,901.75",
+      "345.75",
+    ].join("\n");
+
+    expect(extractPriceForSymbol(pageText, "ES")).toBeCloseTo(7557.0);
+    expect(extractPriceForSymbol(pageText, "NQ")).toBeCloseTo(29901.75);
   });
 });

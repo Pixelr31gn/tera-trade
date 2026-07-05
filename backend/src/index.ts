@@ -7,6 +7,7 @@ import { BrowserWatcher } from "./browserWatch/watcher.js";
 import { getBroker } from "./brokers/index.js";
 import { AccountSource, getSettings, PriceSource } from "./core/config.js";
 import { logger } from "./core/logger.js";
+import { prisma } from "./db/client.js";
 import { setLatestBrowserAccountSnapshot } from "./engine/liveAccountOverride.js";
 import { TradingEngine } from "./engine/loop.js";
 import { ensureInstrumentsSeeded } from "./marketData/backfill.js";
@@ -42,7 +43,16 @@ async function main(): Promise<void> {
       async (symbol, price) => {
         if (settings.priceSource !== PriceSource.BROWSER) return;
         const p = new Decimal(price);
-        await engine.onNewBar(symbol, new Date(), p, p, p, p, new Decimal(0));
+        const time = new Date();
+        // Mirrors LiveBarPoller: the engine loop reads bar history from the
+        // DB (loadRecentBars), so a price tick has to actually land in
+        // bars_1m before onNewBar can see it -- this was missing entirely,
+        // which is why regime/scoring silently never saw browser-sourced
+        // prices even though extraction itself was working.
+        await prisma.bar.create({
+          data: { time, symbol, open: p.toString(), high: p.toString(), low: p.toString(), close: p.toString(), volume: "0" },
+        });
+        await engine.onNewBar(symbol, time, p, p, p, p, new Decimal(0));
       }
     );
     stopDataSource = () => watcher.stop();

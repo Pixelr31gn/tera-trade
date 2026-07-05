@@ -28,9 +28,12 @@ export interface BrowserAccountSnapshot {
   pnl: number | null;
 }
 
-const BALANCE_LABELS = ["account balance", "cash balance", "balance"];
+// "bal:"/"up&l:" etc. are TopstepX's own compact HUD notation (confirmed
+// against a real account page); the longer-form labels are kept as a
+// fallback for other broker platforms.
+const BALANCE_LABELS = ["bal:", "account balance", "cash balance", "balance"];
 const EQUITY_LABELS = ["net liquidation", "account equity", "equity"];
-const PNL_LABELS = ["net p&l", "open p&l", "unrealized p&l", "day p&l", "total p&l", "p&l"];
+const UNREALIZED_PNL_LABELS = ["up&l:", "unrealized p&l", "open p&l"];
 
 /** Parses a dollar-like string into a number, handling $, commas, and accounting-style negatives like "($1,234.56)". */
 export function parseMoney(raw: string): number | null {
@@ -77,29 +80,61 @@ export function extractLabeledNumber(pageText: string, labels: string[]): number
 }
 
 export function extractAccountSnapshot(pageText: string): BrowserAccountSnapshot {
-  return {
-    balance: extractLabeledNumber(pageText, BALANCE_LABELS),
-    equity: extractLabeledNumber(pageText, EQUITY_LABELS),
-    pnl: extractLabeledNumber(pageText, PNL_LABELS),
-  };
+  const balance = extractLabeledNumber(pageText, BALANCE_LABELS);
+  const explicitEquity = extractLabeledNumber(pageText, EQUITY_LABELS);
+  const unrealizedPnl = extractLabeledNumber(pageText, UNREALIZED_PNL_LABELS);
+
+  // Most platforms (TopstepX included) don't show a separate "equity"/"net
+  // liquidation" figure at all -- equity is balance plus whatever's still
+  // open, so synthesize it when there's no explicit label for it.
+  const equity = explicitEquity ?? (balance !== null && unrealizedPnl !== null ? balance + unrealizedPnl : balance);
+
+  return { balance, equity, pnl: unrealizedPnl };
 }
 
-/** Looks for the given instrument symbol (or a common alias) followed by a plausible price nearby. */
+// CME futures month codes: one letter per month (F=Jan ... Z=Dec).
+const FUTURES_MONTH_CODES = "FGHJKMNQUVXZ";
+
+function findNearbyPrice(lines: string[], startIndex: number): number | null {
+  for (let j = startIndex; j < Math.min(startIndex + 3, lines.length); j++) {
+    const match = lines[j]!.match(/-?[\d,]+\.\d{1,4}/); // prices, not integers (avoids matching contract codes/quantities)
+    if (match) {
+      const value = parseMoney(match[0]);
+      if (value !== null) return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * Looks for the given instrument symbol's price nearby in `pageText`.
+ *
+ * Tries the actual CME contract code first (e.g. "ESU26" for a September
+ * 2026 ES contract, as quote tables actually display it) before falling back
+ * to a loose substring match on the bare symbol/alias -- the loose match
+ * alone is unreliable: e.g. "ES" is a substring of "sal**es**" in a "Time and
+ * Sales" heading, which would false-positive-match well before the real
+ * quote row and return null without ever reaching it. Unlike a single
+ * first-match-wins search, this keeps scanning past any label match that
+ * doesn't yield a nearby price instead of giving up.
+ */
 export function extractPriceForSymbol(pageText: string, symbol: string, aliases: string[] = []): number | null {
-  const labels = [symbol, ...aliases].map((s) => s.toLowerCase());
   const lines = pageText.split("\n").map((l) => l.trim()).filter(Boolean);
 
+  const contractCodePattern = new RegExp(`^${symbol}[${FUTURES_MONTH_CODES}]\\d{2}$`, "i");
+  for (let i = 0; i < lines.length; i++) {
+    if (!contractCodePattern.test(lines[i]!)) continue;
+    const price = findNearbyPrice(lines, i);
+    if (price !== null) return price;
+  }
+
+  const labels = [symbol, ...aliases].map((s) => s.toLowerCase());
   for (let i = 0; i < lines.length; i++) {
     const lineLower = lines[i]!.toLowerCase();
     if (!labels.some((label) => lineLower.includes(label))) continue;
-
-    for (let j = i; j < Math.min(i + 3, lines.length); j++) {
-      const match = lines[j]!.match(/-?[\d,]+\.\d{1,4}/); // prices, not integers (avoids matching contract codes/quantities)
-      if (match) {
-        const value = parseMoney(match[0]);
-        if (value !== null) return value;
-      }
-    }
+    const price = findNearbyPrice(lines, i);
+    if (price !== null) return price;
   }
+
   return null;
 }

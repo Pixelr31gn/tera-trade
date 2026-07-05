@@ -33,9 +33,10 @@ swapped out because neither Python nor Docker were available on the target machi
 
 1. **Create a database**: sign up at [neon.tech](https://neon.tech) (free, no card), create a
    project, and copy its connection string.
-2. Copy the environment template and fill in your `DATABASE_URL`:
+2. Copy the environment template into `backend/.env` and fill in your `DATABASE_URL`
+   (Prisma's CLI only looks for `.env` next to its own project, not a repo-root one):
    ```
-   cp .env.example .env
+   cp .env.example backend/.env
    ```
 3. Install backend dependencies and set up the database schema:
    ```
@@ -47,10 +48,12 @@ swapped out because neither Python nor Docker were available on the target machi
    ```
    npm run dev
    ```
-5. In a second terminal, install and start the frontend:
+5. In a second terminal, set up and start the frontend. It needs its own env file with
+   the *same* API key as the backend, or every dashboard call fails with 401:
    ```
    cd frontend
    npm install
+   cp .env.example .env.local
    npm run dev
    ```
 6. Kick off the historical backfill (1 year of daily bars + trailing ~60 days of 5-minute
