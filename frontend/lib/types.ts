@@ -112,6 +112,15 @@ export interface NewsRiskStatus {
   impact: string | null;
 }
 
+export interface OpeningRangeStats {
+  symbol: string;
+  sessionsAnalyzed: number;
+  probHighBroken: number | null;
+  probLowBroken: number | null;
+  probBothBroken: number | null;
+  probNeitherBroken: number | null;
+}
+
 export interface PerformanceSummary {
   tradeStats: {
     tradeCount: number;
