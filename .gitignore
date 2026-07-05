@@ -1,18 +1,10 @@
-# Python
-__pycache__/
-*.pyc
-.venv/
-venv/
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-backend/app/scoring/artifacts/*.joblib
-
-# Node / Next.js
+# Node / Next.js / TypeScript
 node_modules/
 .next/
+dist/
 frontend/out/
 frontend/.turbo/
+backend/src/scoring/artifacts/*.json
 
 # Env / secrets
 .env

@@ -28,7 +28,7 @@ export default function RecommendationsPage() {
             <tr key={i}>
               <td className="whitespace-nowrap text-gray-400">{new Date(s.time).toLocaleString()}</td>
               <td className="font-medium text-white">{s.symbol}</td>
-              <td className="text-gray-400">{s.strategy_id}</td>
+              <td className="text-gray-400">{s.strategyId}</td>
               <td>
                 <Badge text={s.side} tone={s.side === "long" ? "good" : "bad"} />
               </td>

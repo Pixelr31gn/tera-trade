@@ -1,34 +1,16 @@
+# Optional: only useful if you later install Docker Desktop. The database is
+# Neon (hosted Postgres) via DATABASE_URL in ../.env -- there's no local
+# database container here, so this compose file only runs the backend and
+# frontend. Without Docker, run both natively instead (see README.md).
 services:
-  timescaledb:
-    image: timescale/timescaledb:latest-pg16
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-terra}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terra}
-      POSTGRES_DB: ${POSTGRES_DB:-terra_trade}
-    ports:
-      - "5432:5432"
-    volumes:
-      - timescale_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-terra}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   backend:
     build:
       context: ../backend
     restart: unless-stopped
     env_file:
       - ../.env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-terra}@timescaledb:5432/${POSTGRES_DB:-terra_trade}
     ports:
       - "8000:8000"
-    depends_on:
-      timescaledb:
-        condition: service_healthy
 
   frontend:
     build:
@@ -41,6 +23,3 @@ services:
       - "3000:3000"
     depends_on:
       - backend
-
-volumes:
-  timescale_data:

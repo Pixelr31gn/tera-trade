@@ -18,7 +18,7 @@ a sequence of deliberate, explicit steps -- never a default or an accident.
   Access).
 - Set `PROJECTX_USERNAME` / `PROJECTX_API_KEY`; keep `BROKER_KIND=simulated` and
   `TRADING_MODE=analysis_only` for now, but point market data ingestion at
-  `ProjectXGatewayBroker.start_market_stream()` instead of the Yahoo poller.
+  `ProjectXGatewayBroker.startMarketStream()` instead of the Yahoo poller.
 - Goal: confirm the regime/scoring pipeline behaves the same against true real-time data
   (tighter bars, real bid/ask) as it did against polled Yahoo data.
 
@@ -30,10 +30,10 @@ a sequence of deliberate, explicit steps -- never a default or an accident.
   stop/target/trailing bracket simulation.
 - Every trade is booked, scored, and explained exactly as a live trade would be. Run this
   for long enough to accumulate a statistically meaningful sample (aim for at least the
-  `MIN_TRAINING_ROWS` used by `app/scoring/training.py`, currently 200 closed trades) before
+  `MIN_TRAINING_ROWS` used by `src/scoring/training.ts`, currently 200 closed trades) before
   judging performance or considering Phase 3.
 - This is also the point at which `POST /api/backfill/run`'s accumulated data plus paper
-  trades can train the first real ML scoring model (`app/scoring/training.train_model`),
+  trades can train the first real ML scoring model (`src/scoring/training.ts`'s `trainModel`),
   superseding the v1 rule-based scorer.
 
 ## Phase 3 -- Live trading (optional, explicit opt-in only)
@@ -48,7 +48,8 @@ Reaching `live` requires **all** of:
 
 Recommended practice before flipping this switch:
 
-- Start with the smallest possible position size (`max_position_size: 1` in risk limits).
+- Start with the smallest possible position size (`maxPositionSize: 1` in risk limits, via
+  `PATCH /api/accounts/:id/risk-limits`).
 - Keep a human in the loop initially -- watch the Recommendations feed and be ready to use
   the kill switch (`POST /api/system/kill-switch/clear` only clears it; tripping it happens
   automatically via the risk engine's circuit breakers).
@@ -58,12 +59,12 @@ Recommended practice before flipping this switch:
 
 ## Safety mechanisms active in every phase
 
-- **Mandatory stop-loss.** `app/risk/sizing.py` sizes a position from its stop distance; no
+- **Mandatory stop-loss.** `src/risk/sizing.ts` sizes a position from its stop distance; no
   stop distance means zero contracts, unconditionally.
-- **Circuit breakers** (`app/risk/circuit_breakers.py`): daily loss limit and trailing
+- **Circuit breakers** (`src/risk/circuitBreakers.ts`): daily loss limit and trailing
   drawdown limit trip the kill switch account-wide; consecutive-loss and max-daily-trade
   limits pause new entries without a full kill switch.
 - **News risk window**: no new entries within `NEWS_RISK_WINDOW_MINUTES` of a high-impact
   economic release.
-- **Mode gate**: `app/execution/engine.py` is the only code path that can call
-  `BrokerClient.place_order`, and it checks `TradingMode` before doing so.
+- **Mode gate**: `src/execution/engine.ts` is the only code path that can call
+  `BrokerClient.placeOrder`, and it checks `TradingMode` before doing so.

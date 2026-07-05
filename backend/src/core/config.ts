@@ -1,0 +1,143 @@
+import { z } from "zod";
+
+export const TradingMode = {
+  ANALYSIS_ONLY: "analysis_only",
+  PAPER: "paper",
+  LIVE: "live",
+} as const;
+export type TradingMode = (typeof TradingMode)[keyof typeof TradingMode];
+
+export const BrokerKind = {
+  SIMULATED: "simulated",
+  PROJECTX: "projectx",
+} as const;
+export type BrokerKind = (typeof BrokerKind)[keyof typeof BrokerKind];
+
+const boolFromEnv = z
+  .string()
+  .optional()
+  .transform((v) => v?.toLowerCase() === "true");
+
+const numberFromEnv = (fallback: number) =>
+  z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined && v !== "" ? Number(v) : fallback));
+
+const EnvSchema = z.object({
+  APP_NAME: z.string().default("Terra Trade"),
+  ENVIRONMENT: z.string().default("development"),
+  LOG_LEVEL: z.string().default("info"),
+  API_KEY: z.string().default("change-me-dev-key"),
+
+  DATABASE_URL: z.string(),
+
+  TRADING_MODE: z.nativeEnum(TradingMode).default(TradingMode.ANALYSIS_ONLY),
+  BROKER_KIND: z.nativeEnum(BrokerKind).default(BrokerKind.SIMULATED),
+  LIVE_TRADING_CONFIRMED: boolFromEnv,
+
+  PROJECTX_BASE_URL: z.string().default("https://api.topstepx.com"),
+  PROJECTX_RTC_URL: z.string().default("https://rtc.topstepx.com"),
+  PROJECTX_USERNAME: z.string().default(""),
+  PROJECTX_API_KEY: z.string().default(""),
+  PROJECTX_ACCOUNT_ID: z.string().optional(),
+
+  INSTRUMENT_SYMBOLS: z.string().default("ES,NQ,CL,GC"),
+
+  HISTORICAL_BACKFILL_DAYS: numberFromEnv(365),
+  BAR_INTERVAL_MINUTES: numberFromEnv(1),
+
+  NEWS_CALENDAR_URL: z.string().default("https://nfs.faireconomy.media/ff_calendar_thisweek.json"),
+  NEWS_RISK_WINDOW_MINUTES: numberFromEnv(15),
+  NEWS_HIGH_IMPACT_ONLY: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? true : v.toLowerCase() === "true")),
+
+  MIN_SCORE_THRESHOLD: numberFromEnv(0.65),
+
+  DEFAULT_PER_TRADE_RISK_PCT: numberFromEnv(0.5),
+  DEFAULT_MAX_DAILY_LOSS_PCT: numberFromEnv(3.0),
+  DEFAULT_MAX_TRAILING_DRAWDOWN_PCT: numberFromEnv(6.0),
+  DEFAULT_MAX_POSITION_SIZE: numberFromEnv(3),
+  MAX_CONSECUTIVE_LOSSES: numberFromEnv(3),
+  MAX_DAILY_TRADES: numberFromEnv(8),
+
+  ENGINE_POLL_SECONDS: numberFromEnv(30),
+
+  PORT: numberFromEnv(8000),
+});
+
+export interface Settings {
+  appName: string;
+  environment: string;
+  logLevel: string;
+  apiKey: string;
+  databaseUrl: string;
+  tradingMode: TradingMode;
+  brokerKind: BrokerKind;
+  liveTradingConfirmed: boolean;
+  projectXBaseUrl: string;
+  projectXRtcUrl: string;
+  projectXUsername: string;
+  projectXApiKey: string;
+  projectXAccountId: string | undefined;
+  instrumentSymbols: string[];
+  historicalBackfillDays: number;
+  barIntervalMinutes: number;
+  newsCalendarUrl: string;
+  newsRiskWindowMinutes: number;
+  newsHighImpactOnly: boolean;
+  minScoreThreshold: number;
+  defaultPerTradeRiskPct: number;
+  defaultMaxDailyLossPct: number;
+  defaultMaxTrailingDrawdownPct: number;
+  defaultMaxPositionSize: number;
+  maxConsecutiveLosses: number;
+  maxDailyTrades: number;
+  enginePollSeconds: number;
+  port: number;
+}
+
+let cached: Settings | undefined;
+
+export function getSettings(): Settings {
+  if (cached) return cached;
+  const env = EnvSchema.parse(process.env);
+  cached = {
+    appName: env.APP_NAME,
+    environment: env.ENVIRONMENT,
+    logLevel: env.LOG_LEVEL,
+    apiKey: env.API_KEY,
+    databaseUrl: env.DATABASE_URL,
+    tradingMode: env.TRADING_MODE,
+    brokerKind: env.BROKER_KIND,
+    liveTradingConfirmed: env.LIVE_TRADING_CONFIRMED,
+    projectXBaseUrl: env.PROJECTX_BASE_URL,
+    projectXRtcUrl: env.PROJECTX_RTC_URL,
+    projectXUsername: env.PROJECTX_USERNAME,
+    projectXApiKey: env.PROJECTX_API_KEY,
+    projectXAccountId: env.PROJECTX_ACCOUNT_ID,
+    instrumentSymbols: env.INSTRUMENT_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean),
+    historicalBackfillDays: env.HISTORICAL_BACKFILL_DAYS,
+    barIntervalMinutes: env.BAR_INTERVAL_MINUTES,
+    newsCalendarUrl: env.NEWS_CALENDAR_URL,
+    newsRiskWindowMinutes: env.NEWS_RISK_WINDOW_MINUTES,
+    newsHighImpactOnly: env.NEWS_HIGH_IMPACT_ONLY,
+    minScoreThreshold: env.MIN_SCORE_THRESHOLD,
+    defaultPerTradeRiskPct: env.DEFAULT_PER_TRADE_RISK_PCT,
+    defaultMaxDailyLossPct: env.DEFAULT_MAX_DAILY_LOSS_PCT,
+    defaultMaxTrailingDrawdownPct: env.DEFAULT_MAX_TRAILING_DRAWDOWN_PCT,
+    defaultMaxPositionSize: env.DEFAULT_MAX_POSITION_SIZE,
+    maxConsecutiveLosses: env.MAX_CONSECUTIVE_LOSSES,
+    maxDailyTrades: env.MAX_DAILY_TRADES,
+    enginePollSeconds: env.ENGINE_POLL_SECONDS,
+    port: env.PORT,
+  };
+  return cached;
+}
+
+/** Test-only: clear the cached settings so a test can re-read process.env. */
+export function _resetSettingsCacheForTests(): void {
+  cached = undefined;
+}

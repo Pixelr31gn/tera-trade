@@ -41,12 +41,12 @@ export default function SettingsPage() {
     setError(null);
     try {
       const payload = {
-        per_trade_risk_pct: Number(formData.get("per_trade_risk_pct")),
-        max_daily_loss_pct: Number(formData.get("max_daily_loss_pct")),
-        max_trailing_drawdown_pct: Number(formData.get("max_trailing_drawdown_pct")),
-        max_position_size: Number(formData.get("max_position_size")),
-        max_consecutive_losses: Number(formData.get("max_consecutive_losses")),
-        max_daily_trades: Number(formData.get("max_daily_trades")),
+        perTradeRiskPct: Number(formData.get("perTradeRiskPct")),
+        maxDailyLossPct: Number(formData.get("maxDailyLossPct")),
+        maxTrailingDrawdownPct: Number(formData.get("maxTrailingDrawdownPct")),
+        maxPositionSize: Number(formData.get("maxPositionSize")),
+        maxConsecutiveLosses: Number(formData.get("maxConsecutiveLosses")),
+        maxDailyTrades: Number(formData.get("maxDailyTrades")),
       };
       await apiFetch(`/api/accounts/${account.id}/risk-limits`, { method: "PATCH", body: JSON.stringify(payload) });
       mutateAccounts();
@@ -63,11 +63,11 @@ export default function SettingsPage() {
 
       <Panel
         title="Trading Mode"
-        action={systemState?.kill_switch ? <Badge text="kill switch active" tone="bad" /> : undefined}
+        action={systemState?.killSwitch ? <Badge text="kill switch active" tone="bad" /> : undefined}
       >
         <div className="space-y-3">
           {MODES.map((m) => {
-            const disabled = m.value === "live" && systemState?.broker_kind !== "projectx";
+            const disabled = m.value === "live" && systemState?.brokerKind !== "projectx";
             return (
               <button
                 key={m.value}
@@ -85,7 +85,7 @@ export default function SettingsPage() {
               </button>
             );
           })}
-          {systemState?.kill_switch && (
+          {systemState?.killSwitch && (
             <button onClick={clearKillSwitch} className="rounded-md bg-bad px-4 py-2 text-sm font-medium text-white">
               Clear kill switch
             </button>
@@ -97,12 +97,12 @@ export default function SettingsPage() {
         {account ? (
           <form action={saveRiskLimits} className="grid grid-cols-2 gap-4 md:grid-cols-3">
             {[
-              ["per_trade_risk_pct", "Per-trade risk (%)", account.risk_limits.per_trade_risk_pct],
-              ["max_daily_loss_pct", "Max daily loss (%)", account.risk_limits.max_daily_loss_pct],
-              ["max_trailing_drawdown_pct", "Max trailing drawdown (%)", account.risk_limits.max_trailing_drawdown_pct],
-              ["max_position_size", "Max position size (contracts)", account.risk_limits.max_position_size],
-              ["max_consecutive_losses", "Max consecutive losses", account.risk_limits.max_consecutive_losses],
-              ["max_daily_trades", "Max daily trades", account.risk_limits.max_daily_trades],
+              ["perTradeRiskPct", "Per-trade risk (%)", account.riskLimits.perTradeRiskPct],
+              ["maxDailyLossPct", "Max daily loss (%)", account.riskLimits.maxDailyLossPct],
+              ["maxTrailingDrawdownPct", "Max trailing drawdown (%)", account.riskLimits.maxTrailingDrawdownPct],
+              ["maxPositionSize", "Max position size (contracts)", account.riskLimits.maxPositionSize],
+              ["maxConsecutiveLosses", "Max consecutive losses", account.riskLimits.maxConsecutiveLosses],
+              ["maxDailyTrades", "Max daily trades", account.riskLimits.maxDailyTrades],
             ].map(([name, label, value]) => (
               <label key={name as string} className="text-xs text-gray-400">
                 {label}
@@ -131,7 +131,7 @@ export default function SettingsPage() {
       <Panel title="Scoring Threshold">
         <p className="text-sm text-gray-300">
           Minimum confidence score required to take a trade:{" "}
-          <span className="font-semibold text-white">{((systemState?.min_score_threshold ?? 0.65) * 100).toFixed(0)}%</span>
+          <span className="font-semibold text-white">{((systemState?.minScoreThreshold ?? 0.65) * 100).toFixed(0)}%</span>
         </p>
         <p className="mt-1 text-xs text-gray-500">Set via MIN_SCORE_THRESHOLD in the backend environment; not editable from the dashboard.</p>
       </Panel>

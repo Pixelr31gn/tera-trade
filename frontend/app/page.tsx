@@ -23,27 +23,27 @@ export default function OverviewPage() {
   const { data: systemState } = useSWR<SystemState>("/api/system/state", fetcher, { refreshInterval: 10000 });
   const { events, connected } = useLiveEvents(20);
 
-  const latestEquity = equityCurve?.at(-1)?.equity ?? account?.starting_balance ?? 0;
-  const startingBalance = account?.starting_balance ?? 0;
+  const latestEquity = equityCurve?.at(-1)?.equity ?? account?.startingBalance ?? 0;
+  const startingBalance = account?.startingBalance ?? 0;
   const pnl = latestEquity - startingBalance;
-  const openRisk = positions?.reduce((sum, p) => sum + Math.abs((p.entry_price - p.stop_price) * p.quantity), 0) ?? 0;
+  const openRisk = positions?.reduce((sum, p) => sum + Math.abs((p.entryPrice - p.stopPrice) * p.quantity), 0) ?? 0;
 
   const chartData = (equityCurve ?? []).map((p) => ({ time: new Date(p.time).toLocaleString(), equity: p.equity }));
 
   return (
     <div className="space-y-6">
-      {systemState?.kill_switch && (
+      {systemState?.killSwitch && (
         <div className="rounded-lg border border-bad/40 bg-bad/10 px-4 py-3 text-sm text-bad">
-          Kill switch engaged: {systemState.kill_switch_reason}. New entries are blocked until cleared in Settings.
+          Kill switch engaged: {systemState.killSwitchReason}. New entries are blocked until cleared in Settings.
         </div>
       )}
-      {newsStatus?.in_risk_window && (
+      {newsStatus?.inRiskWindow && (
         <div className="rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-warn">
-          News risk window active: &quot;{newsStatus.nearest_event_name}&quot; ({newsStatus.impact} impact){" "}
-          {newsStatus.minutes_to_event !== null &&
-            (newsStatus.minutes_to_event > 0
-              ? `in ${Math.round(newsStatus.minutes_to_event)} min`
-              : `${Math.abs(Math.round(newsStatus.minutes_to_event))} min ago`)}
+          News risk window active: &quot;{newsStatus.nearestEventName}&quot; ({newsStatus.impact} impact){" "}
+          {newsStatus.minutesToEvent !== null &&
+            (newsStatus.minutesToEvent > 0
+              ? `in ${Math.round(newsStatus.minutesToEvent)} min`
+              : `${Math.abs(Math.round(newsStatus.minutesToEvent))} min ago`)}
           . New entries are paused.
         </div>
       )}
@@ -84,10 +84,10 @@ export default function OverviewPage() {
                   <span className="font-medium text-white">{symbol}</span>
                   <div className="flex gap-1.5">
                     <Badge
-                      text={r.trend_label}
-                      tone={r.trend_label === "up" ? "good" : r.trend_label === "down" ? "bad" : "neutral"}
+                      text={r.trendLabel}
+                      tone={r.trendLabel === "up" ? "good" : r.trendLabel === "down" ? "bad" : "neutral"}
                     />
-                    <Badge text={r.vol_label} tone={r.vol_label === "high" ? "warn" : "neutral"} />
+                    <Badge text={r.volLabel} tone={r.volLabel === "high" ? "warn" : "neutral"} />
                   </div>
                 </div>
               ))}

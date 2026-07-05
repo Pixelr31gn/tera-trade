@@ -1,67 +1,88 @@
 # Architecture
 
+## Why Node.js/TypeScript and Neon, not Python/Docker/TimescaleDB
+
+The system was originally built as a Python/FastAPI backend with TimescaleDB running via
+Docker Compose. Neither Python nor Docker were actually installed on the target Windows
+machine, and installing them hit repeated obstacles. Rather than block on tooling, the
+backend was rewritten in Node.js/TypeScript (Node was already installed) against a free
+hosted Postgres (Neon), which needs nothing installed locally beyond Node itself. The
+design -- module boundaries, database schema, API contracts, mode-gated execution -- is
+unchanged; only the runtime and database engine changed. Two concrete consequences:
+
+- **No TimescaleDB extension.** Neon's free tier is plain Postgres. `bars_1m`,
+  `regime_history`, `scores`, and `equity_curve` are ordinary indexed tables, and 5m/15m/1h/1d
+  bar rollups are computed by scheduled application code (`marketData/rollup.ts`) instead of
+  TimescaleDB continuous aggregates.
+- **No native ML library.** There's no mature, dependency-free equivalent of scikit-learn in
+  the Node ecosystem, so `scoring/training.ts` hand-rolls a logistic regression (gradient
+  descent + L2 regularization) instead of using a boosted-tree library. Logistic regression
+  trained by maximum likelihood is already a properly calibrated probabilistic model, which
+  is what actually matters for the scoring gate.
+
 ## Data flow
 
 ```
-LiveBarPoller (yfinance poll)  ──┐
-ProjectXGatewayBroker stream  ──┼─▶  TradingEngine.on_new_bar()
-                                  │
-                                  ├─▶ manage open trades (stop/target/trailing via SimulatedBroker,
-                                  │     or the live broker's own bracket orders)
-                                  │
-                                  ├─▶ classify_regime()            → regime_history
-                                  ├─▶ get_news_risk_status()       → news risk window check
-                                  ├─▶ Strategy.generate_signal()   → candidate setup
-                                  ├─▶ build_setup_features()       → feature vector
-                                  ├─▶ evaluate_setup()             → probability + taken/skipped
-                                  ├─▶ explain_score()              → plain-English sentence
-                                  ├─▶ RiskEngine.assess_new_trade()→ sizing + stop/target/trailing
-                                  └─▶ execute_if_approved()        → order (unless analysis_only)
-                                  │
-                                  └─▶ websocket broadcast (dashboard live feed)
+LiveBarPoller (Yahoo Finance poll)  ──┐
+ProjectXGatewayBroker stream        ──┼─▶  TradingEngine.onNewBar()
+                                       │
+                                       ├─▶ manage open trades (stop/target/trailing via SimulatedBroker,
+                                       │     or the live broker's own bracket orders)
+                                       │
+                                       ├─▶ classifyRegime()            → regime_history
+                                       ├─▶ getNewsRiskStatus()         → news risk window check
+                                       ├─▶ Strategy.generateSignal()   → candidate setup
+                                       ├─▶ buildSetupFeatures()        → feature vector
+                                       ├─▶ evaluateSetup()             → probability + taken/skipped
+                                       ├─▶ explainScore()              → plain-English sentence
+                                       ├─▶ RiskEngine.assessNewTrade() → sizing + stop/target/trailing
+                                       └─▶ executeIfApproved()         → order (unless analysis_only)
+                                       │
+                                       └─▶ websocket broadcast (dashboard live feed)
 ```
 
 Every arrow above is a call between independently unit-tested modules -- nothing upstream
 of the risk engine can place an order, and nothing downstream of the mode gate in
-`app/execution/engine.py` can be reached except through it.
+`execution/engine.ts` can be reached except through it.
 
 ## Module map
 
 | Module | Responsibility |
 |---|---|
-| `app/brokers` | `BrokerClient` interface; `SimulatedBroker` (paper fills + bracket simulation); `ProjectXGatewayBroker` (real Topstep API adapter) |
-| `app/market_data` | Instrument registry, free historical backfill (`bars_daily`, `bars_1m`), live bar polling |
-| `app/analytics` | EV, profit factor, Sharpe/Sortino, max drawdown, volatility -- pure functions over pandas |
-| `app/regime` | ADX/Choppiness/Bollinger/ATR-percentile indicators + the trend×vol regime classifier |
-| `app/news` | Free economic calendar ingestion + news risk-window logic |
-| `app/scoring` | Feature builder, v1 rule-based scorer, offline ML training pipeline, threshold gate |
-| `app/risk` | Position sizing, stop/target/trailing-stop rules, circuit breakers |
-| `app/strategy` | Pluggable `Strategy` interface + breakout/mean-reversion/trend-following reference strategies |
-| `app/execution` | Mode gate (`analysis_only`/`paper`/`live`) + the only code path allowed to call `BrokerClient.place_order` |
-| `app/explain` | Turns every structured decision into a plain-English sentence |
-| `app/engine` | `TradingEngine` -- the orchestration loop tying everything above together |
-| `app/api` | FastAPI routers + `/ws/live` websocket broadcaster |
+| `src/brokers` | `BrokerClient` interface; `SimulatedBroker` (paper fills + bracket simulation); `ProjectXGatewayBroker` (real Topstep API adapter, REST via fetch + SignalR via @microsoft/signalr) |
+| `src/marketData` | Instrument registry, free historical backfill (`bars_daily`, `bars_1m`), live bar polling, application-code bar rollups |
+| `src/analytics` | EV, profit factor, Sharpe/Sortino, max drawdown, volatility -- pure functions over number arrays |
+| `src/regime` | ADX/Choppiness/Bollinger/ATR-percentile indicators + the trend×vol regime classifier |
+| `src/news` | Free economic calendar ingestion + news risk-window logic |
+| `src/scoring` | Feature builder, v1 rule-based scorer, hand-rolled logistic-regression training pipeline, threshold gate |
+| `src/risk` | Position sizing, stop/target/trailing-stop rules, circuit breakers |
+| `src/strategy` | Pluggable `Strategy` interface + breakout/mean-reversion/trend-following reference strategies |
+| `src/execution` | Mode gate (`analysis_only`/`paper`/`live`) + the only code path allowed to call `BrokerClient.placeOrder` |
+| `src/explain` | Turns every structured decision into a plain-English sentence |
+| `src/engine` | `TradingEngine` -- the orchestration loop tying everything above together |
+| `src/api` | Fastify routes + `/ws/live` websocket broadcaster |
 
 ## Database
 
-TimescaleDB hypertables (`bars_1m`, `regime_history`, `scores`, `equity_curve`) with
-continuous aggregates (`bars_5m/15m/1h/1d`) rolling up from `bars_1m`. `bars_daily` is a
-plain (non-hyper) table used for long-horizon (1+ year) analytics that free 1-minute data
-can't cover. See `backend/app/db/models.py` and `backend/alembic/versions/0001_initial_schema.py`.
+Prisma schema (`backend/prisma/schema.prisma`) against plain Postgres. `bars_1m`,
+`regime_history`, `scores`, and `equity_curve` are large/time-series-shaped tables with
+composite primary keys on `(time, ...)` and secondary indexes on `(symbol, time)` for range
+queries -- the same shape TimescaleDB hypertables would use, just without automatic
+partitioning. `bars_daily` covers the 1-year+ historical requirement (see below).
 
 ## Why these engineering choices
 
 - **Rule-based scorer, not a black box.** No trade history exists yet to fit a model on; a
-  transparent weighted heuristic (`app/scoring/rule_scorer.py`) is honest about that and is
-  designed to be superseded by `app/scoring/training.py`'s calibrated model once enough
-  closed trades accumulate.
-- **HistGradientBoostingClassifier over LightGBM.** Equivalent model family, no native
-  build step, avoids Windows wheel friction for a dataset this size.
+  transparent weighted heuristic (`scoring/ruleScorer.ts`) is honest about that and is
+  designed to be superseded by `scoring/training.ts`'s calibrated model once enough closed
+  trades accumulate.
 - **SimulatedBroker owns its own bracket simulation.** A live broker enforces stop/target
   brackets server-side; the simulated broker has to replicate that behavior locally
-  (`evaluate_bar`/`update_trailing_stop`) so paper trading behaves the same way structurally.
+  (`evaluateBar`/`updateTrailingStop`) so paper trading behaves the same way structurally.
 - **Daily bars for the 1-year+ backfill.** Yahoo Finance only serves 1-minute history for
   ~7 trailing days for free; daily bars go back years. `bars_1m` is the live execution
   resolution, `bars_daily` is the long-horizon analytics resolution.
-- **Single static API key, no user system.** Terra Trade runs on one operator's machine
-  (Docker Desktop); a multi-tenant auth system would be unused complexity.
+- **Single static API key, no user system.** Terra Trade runs on one operator's machine; a
+  multi-tenant auth system would be unused complexity.
+- **Decimal.js everywhere money is involved.** JavaScript's native `number` is a float and
+  unsafe for prices/PnL; every price, size, and PnL calculation uses `Decimal` instead.

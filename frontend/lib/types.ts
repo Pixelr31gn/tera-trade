@@ -1,26 +1,26 @@
 export interface SystemState {
   mode: "analysis_only" | "paper" | "live";
-  kill_switch: boolean;
-  kill_switch_reason: string | null;
-  broker_kind: string;
-  min_score_threshold: number;
-  updated_at: string;
+  killSwitch: boolean;
+  killSwitchReason: string | null;
+  brokerKind: string;
+  minScoreThreshold: number;
+  updatedAt: string;
 }
 
 export interface RiskLimits {
-  per_trade_risk_pct: number;
-  max_daily_loss_pct: number;
-  max_trailing_drawdown_pct: number;
-  max_position_size: number;
-  max_consecutive_losses: number;
-  max_daily_trades: number;
+  perTradeRiskPct: number;
+  maxDailyLossPct: number;
+  maxTrailingDrawdownPct: number;
+  maxPositionSize: number;
+  maxConsecutiveLosses: number;
+  maxDailyTrades: number;
 }
 
 export interface AccountSummary {
   id: number;
   name: string;
-  starting_balance: number;
-  risk_limits: RiskLimits;
+  startingBalance: number;
+  riskLimits: RiskLimits;
 }
 
 export interface EquityPoint {
@@ -32,24 +32,24 @@ export interface EquityPoint {
 export interface RecommendationScore {
   time: string;
   symbol: string;
-  strategy_id: string;
+  strategyId: string;
   side: string;
   probability: number;
   decision: string;
   explanation: string;
-  trade_id: number | null;
+  tradeId: number | null;
 }
 
 export interface Position {
-  trade_id: number;
+  tradeId: number;
   symbol: string;
   side: string;
   quantity: number;
-  entry_price: number;
-  stop_price: number;
-  take_profit_price: number | null;
-  entry_time: string;
-  strategy_id: string;
+  entryPrice: number;
+  stopPrice: number;
+  takeProfitPrice: number | null;
+  entryTime: string;
+  strategyId: string;
   score: number | null;
   explanation: string;
 }
@@ -57,28 +57,28 @@ export interface Position {
 export interface Trade {
   id: number;
   symbol: string;
-  strategy_id: string;
+  strategyId: string;
   side: string;
   quantity: number;
-  entry_time: string;
-  entry_price: number;
-  exit_time: string | null;
-  exit_price: number | null;
-  exit_reason: string | null;
+  entryTime: string;
+  entryPrice: number;
+  exitTime: string | null;
+  exitPrice: number | null;
+  exitReason: string | null;
   pnl: number | null;
   mae: number | null;
   mfe: number | null;
   score: number | null;
-  regime_trend_at_entry: string | null;
-  regime_vol_at_entry: string | null;
+  regimeTrendAtEntry: string | null;
+  regimeVolAtEntry: string | null;
   status: string;
   explanation: string;
 }
 
 export interface RegimeInfo {
   time: string;
-  trend_label: string;
-  vol_label: string;
+  trendLabel: string;
+  volLabel: string;
   confidence: number;
   features: Record<string, number | null>;
 }
@@ -93,34 +93,34 @@ export interface NewsEventItem {
 }
 
 export interface NewsRiskStatus {
-  in_risk_window: boolean;
-  nearest_event_name: string | null;
-  nearest_event_time: string | null;
-  minutes_to_event: number | null;
+  inRiskWindow: boolean;
+  nearestEventName: string | null;
+  nearestEventTime: string | null;
+  minutesToEvent: number | null;
   impact: string | null;
 }
 
 export interface PerformanceSummary {
-  trade_stats: {
-    trade_count: number;
-    win_rate: number;
-    expected_value: number;
-    profit_factor: number | null;
-    avg_win: number;
-    avg_loss: number;
-    avg_mae: number | null;
-    avg_mfe: number | null;
-    largest_win: number;
-    largest_loss: number;
+  tradeStats: {
+    tradeCount: number;
+    winRate: number;
+    expectedValue: number;
+    profitFactor: number | null;
+    avgWin: number;
+    avgLoss: number;
+    avgMae: number | null;
+    avgMfe: number | null;
+    largestWin: number;
+    largestLoss: number;
   };
-  portfolio_stats: {
+  portfolioStats: {
     sharpe: number | null;
     sortino: number | null;
-    max_drawdown_pct: number;
-    max_drawdown_duration_days: number;
-    volatility_annualized: number | null;
+    maxDrawdownPct: number;
+    maxDrawdownDurationDays: number;
+    volatilityAnnualized: number | null;
     cagr: number | null;
   };
-  by_strategy: Record<string, { trade_count: number; total_pnl: number; win_rate: number }>;
-  by_regime: Record<string, { trade_count: number; total_pnl: number; win_rate: number }>;
+  byStrategy: Record<string, { tradeCount: number; totalPnl: number; winRate: number }>;
+  byRegime: Record<string, { tradeCount: number; totalPnl: number; winRate: number }>;
 }

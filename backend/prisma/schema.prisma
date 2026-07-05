@@ -1,0 +1,243 @@
+// Terra Trade database schema (plain PostgreSQL -- e.g. Neon).
+//
+// No TimescaleDB extension here (not available on free hosted Postgres), so
+// bars_1m/regime_history/scores/equity_curve are plain indexed tables and
+// 5m/15m/1h/1d bar rollups are computed by scheduled application code
+// (src/marketData/rollup.ts) instead of TimescaleDB continuous aggregates.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Instrument {
+  id         Int      @id @default(autoincrement())
+  symbol     String   @unique
+  dataSymbol String   @map("data_symbol")
+  exchange   String   @default("CME")
+  contractId String?  @map("contract_id")
+  tickSize   Decimal  @map("tick_size") @db.Decimal(18, 8)
+  pointValue Decimal  @map("point_value") @db.Decimal(18, 8)
+  active     Boolean  @default(true)
+
+  @@map("instruments")
+}
+
+model Bar {
+  time   DateTime
+  symbol String
+  open   Decimal @db.Decimal(18, 8)
+  high   Decimal @db.Decimal(18, 8)
+  low    Decimal @db.Decimal(18, 8)
+  close  Decimal @db.Decimal(18, 8)
+  volume Decimal @default(0) @db.Decimal(20, 4)
+
+  @@id([time, symbol])
+  @@index([symbol, time])
+  @@map("bars_1m")
+}
+
+model BarRollup {
+  bucket     DateTime
+  symbol     String
+  resolution String // "5m" | "15m" | "1h" | "1d"
+  open       Decimal @db.Decimal(18, 8)
+  high       Decimal @db.Decimal(18, 8)
+  low        Decimal @db.Decimal(18, 8)
+  close      Decimal @db.Decimal(18, 8)
+  volume     Decimal @default(0) @db.Decimal(20, 4)
+
+  @@id([resolution, symbol, bucket])
+  @@index([resolution, symbol, bucket])
+  @@map("bars_rollup")
+}
+
+model DailyBar {
+  date   DateTime @db.Date
+  symbol String
+  open   Decimal  @db.Decimal(18, 8)
+  high   Decimal  @db.Decimal(18, 8)
+  low    Decimal  @db.Decimal(18, 8)
+  close  Decimal  @db.Decimal(18, 8)
+  volume Decimal  @default(0) @db.Decimal(20, 4)
+
+  @@id([date, symbol])
+  @@index([symbol, date])
+  @@map("bars_daily")
+}
+
+model Account {
+  id              Int       @id @default(autoincrement())
+  brokerAccountId String?   @map("broker_account_id")
+  name            String    @default("default")
+  startingBalance Decimal   @default(50000) @map("starting_balance") @db.Decimal(18, 2)
+  isActive        Boolean   @default(true) @map("is_active")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  riskLimit    RiskLimit?
+  trades       Trade[]
+  orders       OrderRecord[]
+  positions    PositionRecord[]
+  equityPoints EquityCurvePoint[]
+
+  @@map("accounts")
+}
+
+model RiskLimit {
+  id                     Int     @id @default(autoincrement())
+  accountId              Int     @unique @map("account_id")
+  perTradeRiskPct        Decimal @default(0.5) @map("per_trade_risk_pct") @db.Decimal(6, 3)
+  maxDailyLossPct        Decimal @default(3.0) @map("max_daily_loss_pct") @db.Decimal(6, 3)
+  maxTrailingDrawdownPct Decimal @default(6.0) @map("max_trailing_drawdown_pct") @db.Decimal(6, 3)
+  maxPositionSize        Int     @default(3) @map("max_position_size")
+  maxConsecutiveLosses   Int     @default(3) @map("max_consecutive_losses")
+  maxDailyTrades         Int     @default(8) @map("max_daily_trades")
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@map("risk_limits")
+}
+
+model SystemState {
+  id               Int      @id @default(1)
+  mode             String   @default("analysis_only")
+  killSwitch       Boolean  @default(false) @map("kill_switch")
+  killSwitchReason String?  @map("kill_switch_reason")
+  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("system_state")
+}
+
+model RegimeSnapshot {
+  time       DateTime
+  symbol     String
+  trendLabel String @map("trend_label")
+  volLabel   String @map("vol_label")
+  confidence Decimal @db.Decimal(5, 4)
+  features   Json
+
+  @@id([time, symbol])
+  @@index([symbol, time])
+  @@map("regime_history")
+}
+
+model NewsEvent {
+  id         Int      @id @default(autoincrement())
+  eventTime  DateTime @map("event_time")
+  country    String
+  name       String
+  impact     String
+  actual     String?
+  forecast   String?
+  previous   String?
+  fetchedAt  DateTime @default(now()) @map("fetched_at")
+
+  @@unique([eventTime, country, name])
+  @@index([eventTime])
+  @@map("news_events")
+}
+
+model Score {
+  time         DateTime
+  symbol       String
+  strategyId   String  @map("strategy_id")
+  side         String
+  probability  Decimal @db.Decimal(6, 5)
+  decision     String
+  features     Json
+  explanation  String
+  tradeId      Int?    @map("trade_id")
+
+  trade Trade? @relation(fields: [tradeId], references: [id])
+
+  @@id([time, symbol, strategyId])
+  @@index([symbol, time])
+  @@map("scores")
+}
+
+model Trade {
+  id                  Int       @id @default(autoincrement())
+  accountId           Int       @map("account_id")
+  symbol              String
+  strategyId          String    @map("strategy_id")
+  side                String
+  quantity            Int
+  entryTime           DateTime  @map("entry_time")
+  entryPrice          Decimal   @map("entry_price") @db.Decimal(18, 8)
+  stopPrice           Decimal   @map("stop_price") @db.Decimal(18, 8)
+  takeProfitPrice     Decimal?  @map("take_profit_price") @db.Decimal(18, 8)
+  exitTime            DateTime? @map("exit_time")
+  exitPrice           Decimal?  @map("exit_price") @db.Decimal(18, 8)
+  exitReason          String?   @map("exit_reason")
+  pnl                 Decimal?  @db.Decimal(18, 2)
+  fees                Decimal   @default(0) @db.Decimal(18, 2)
+  mae                 Decimal?  @db.Decimal(18, 8)
+  mfe                 Decimal?  @db.Decimal(18, 8)
+  score               Decimal?  @db.Decimal(6, 5)
+  regimeTrendAtEntry  String?   @map("regime_trend_at_entry")
+  regimeVolAtEntry    String?   @map("regime_vol_at_entry")
+  explanation         String    @default("")
+  status              String    @default("open")
+  brokerOrderId       String?   @map("broker_order_id")
+
+  account Account @relation(fields: [accountId], references: [id])
+  orders  OrderRecord[]
+  scores  Score[]
+
+  @@index([symbol])
+  @@map("trades")
+}
+
+model OrderRecord {
+  id            Int       @id @default(autoincrement())
+  tradeId       Int?      @map("trade_id")
+  brokerOrderId String?   @map("broker_order_id")
+  accountId     Int       @map("account_id")
+  symbol        String
+  orderType     String    @map("order_type")
+  side          String
+  quantity      Int
+  price         Decimal?  @db.Decimal(18, 8)
+  status        String    @default("pending")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  filledAt      DateTime? @map("filled_at")
+  filledPrice   Decimal?  @map("filled_price") @db.Decimal(18, 8)
+
+  account Account @relation(fields: [accountId], references: [id])
+  trade   Trade?  @relation(fields: [tradeId], references: [id])
+
+  @@map("orders")
+}
+
+model PositionRecord {
+  id             Int      @id @default(autoincrement())
+  accountId      Int      @map("account_id")
+  symbol         String
+  side           String
+  quantity       Int
+  avgPrice       Decimal  @map("avg_price") @db.Decimal(18, 8)
+  unrealizedPnl  Decimal  @default(0) @map("unrealized_pnl") @db.Decimal(18, 2)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@unique([accountId, symbol])
+  @@map("positions")
+}
+
+model EquityCurvePoint {
+  time      DateTime
+  accountId Int     @map("account_id")
+  equity    Decimal @db.Decimal(18, 2)
+  balance   Decimal @db.Decimal(18, 2)
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@id([time, accountId])
+  @@index([accountId, time])
+  @@map("equity_curve")
+}

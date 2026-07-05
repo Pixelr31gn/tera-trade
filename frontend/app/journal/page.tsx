@@ -48,21 +48,21 @@ export default function JournalPage() {
         <tbody>
           {data?.map((t) => (
             <tr key={t.id}>
-              <td className="whitespace-nowrap text-gray-400">{new Date(t.entry_time).toLocaleString()}</td>
+              <td className="whitespace-nowrap text-gray-400">{new Date(t.entryTime).toLocaleString()}</td>
               <td className="font-medium text-white">{t.symbol}</td>
               <td>
                 <Badge text={t.side} tone={t.side === "long" ? "good" : "bad"} />
               </td>
               <td>{t.quantity}</td>
-              <td>{t.entry_price}</td>
-              <td>{t.exit_price ?? "-"}</td>
-              <td className="text-gray-400">{t.exit_reason ?? "-"}</td>
+              <td>{t.entryPrice}</td>
+              <td>{t.exitPrice ?? "-"}</td>
+              <td className="text-gray-400">{t.exitReason ?? "-"}</td>
               <td className={(t.pnl ?? 0) >= 0 ? "text-good" : "text-bad"}>{t.pnl != null ? `$${t.pnl.toFixed(2)}` : "-"}</td>
               <td className="text-gray-400">
                 {t.mfe != null ? t.mfe.toFixed(2) : "-"} / {t.mae != null ? t.mae.toFixed(2) : "-"}
               </td>
               <td className="text-gray-400">
-                {t.regime_trend_at_entry}/{t.regime_vol_at_entry}
+                {t.regimeTrendAtEntry}/{t.regimeVolAtEntry}
               </td>
               <td className="max-w-xl text-gray-300">{t.explanation}</td>
             </tr>

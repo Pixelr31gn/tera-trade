@@ -1,10 +1,10 @@
 # Terra Trade
 
 A trading platform for Topstep-funded futures accounts: real-time market data, a year+ of
-historical price history in TimescaleDB, statistical performance analysis, market-regime
-detection, news/economic-calendar risk awareness, a trade scoring engine gated by a strict
-confidence threshold, and a full risk engine with dynamic position sizing and ATR/structure
-stops -- all with a plain-English explanation behind every decision.
+historical price history, statistical performance analysis, market-regime detection,
+news/economic-calendar risk awareness, a trade scoring engine gated by a strict confidence
+threshold, and a full risk engine with dynamic position sizing and ATR/structure stops --
+all with a plain-English explanation behind every decision.
 
 **Status: Phase 0.** The system runs end-to-end against a simulated broker and free market
 data, locked to `analysis_only` mode. See [docs/ROLLOUT_PLAN.md](docs/ROLLOUT_PLAN.md) before
@@ -15,37 +15,51 @@ enabling paper or live trading.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full module breakdown. Short version:
 
 ```
-backend/   FastAPI app -- broker abstraction, market data, analytics, regime, news,
-           scoring, risk, strategy, execution, explanation, and the engine loop that
-           wires them together.
+backend/   Node.js + TypeScript (Fastify) -- broker abstraction, market data, analytics,
+           regime, news, scoring, risk, strategy, execution, explanation, and the engine
+           loop that wires them together. Prisma ORM against a hosted Postgres (Neon).
 frontend/  Next.js dashboard -- overview, recommendations, positions, performance,
            journal, settings.
-infra/     docker-compose.yml (TimescaleDB + backend + frontend).
+infra/     Optional docker-compose.yml, only useful if you install Docker Desktop later.
 ```
 
-## Quick start
+Originally spec'd with a Python/FastAPI backend and local TimescaleDB via Docker; both were
+swapped out because neither Python nor Docker were available on the target machine. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what changed and why.
 
-1. **Prerequisites**: Docker Desktop. (Python 3.11+ and Node 20+ only if you want to run
-   services outside Docker.)
-2. Copy the environment template and fill in values (the defaults work for Phase 0):
+## Quick start (native, no Docker required)
+
+**Prerequisites**: Node.js 20+ (already installed) and a free hosted Postgres database.
+
+1. **Create a database**: sign up at [neon.tech](https://neon.tech) (free, no card), create a
+   project, and copy its connection string.
+2. Copy the environment template and fill in your `DATABASE_URL`:
    ```
    cp .env.example .env
    ```
-3. Bring up the stack:
+3. Install backend dependencies and set up the database schema:
    ```
-   cd infra
-   docker compose up --build
+   cd backend
+   npm install
+   npx prisma migrate dev --name init
    ```
-4. Run database migrations (first time only):
+4. Start the backend:
    ```
-   docker compose exec backend poetry run alembic upgrade head
+   npm run dev
    ```
-5. Kick off the historical backfill (1 year of daily bars + trailing week of 1-minute bars,
+5. In a second terminal, install and start the frontend:
+   ```
+   cd frontend
+   npm install
+   npm run dev
+   ```
+6. Kick off the historical backfill (1 year of daily bars + trailing week of 1-minute bars,
    for ES/NQ/CL/GC) and pull the current economic calendar:
    ```
    curl -X POST http://localhost:8000/api/backfill/run -H "X-API-Key: change-me-dev-key"
    ```
-6. Open the dashboard at http://localhost:3000 and the API docs at http://localhost:8000/docs.
+7. Open the dashboard at http://localhost:3000 and confirm the API is up at
+   http://localhost:8000/health.
 
 The engine starts polling for new bars immediately and will begin producing regime
 snapshots, scored setups, and plain-English explanations in the dashboard's Overview and
@@ -55,15 +69,19 @@ Recommendations pages -- all in `analysis_only` mode, so nothing is ever execute
 
 ```
 cd backend
-poetry install
-poetry run pytest
+npm test
 ```
 
 Most tests are pure unit tests (analytics, risk, regime, scoring, strategies, explanations)
-and need no database. One integration test
-(`tests/test_engine_integration.py`) exercises the full engine loop against a real
-Postgres and is skipped automatically unless `TEST_DATABASE_URL` (or `DATABASE_URL`) points
-at a reachable database.
+and need no database. One integration test (`tests/engineIntegration.test.ts`) exercises the
+full engine loop against a real Postgres and is skipped automatically unless
+`TEST_DATABASE_URL` (or `DATABASE_URL`) points at a reachable, already-migrated database.
+
+## Optional: Docker
+
+If you later install Docker Desktop, `infra/docker-compose.yml` builds and runs the backend
+and frontend as containers (the database stays hosted on Neon either way -- there's no local
+database container). `docker compose up --build` from `infra/`.
 
 ## Known limitations (Phase 0, by design)
 
@@ -71,11 +89,14 @@ at a reachable database.
   the documented API but has not been integration-tested against a live account.
 - **Free historical data.** 1-minute bars are only available for the trailing ~7 days
   (Yahoo Finance's own limit); the 1-year+ history requirement is satisfied at daily
-  granularity (`bars_daily`). See `app/market_data/backfill.py`.
+  granularity (`bars_daily`). See `backend/src/marketData/backfill.ts`.
+- **Plain Postgres, not TimescaleDB.** Neon's free tier doesn't support the TimescaleDB
+  extension; 5m/15m/1h/1d bar rollups run as scheduled application-code queries
+  (`backend/src/marketData/rollup.ts`) instead of native continuous aggregates.
 - **Rule-based scoring model.** There's no trade history to train a real ML model on yet;
-  `app/scoring/rule_scorer.py` is a documented, transparent heuristic. `app/scoring/training.py`
-  is ready to fit a calibrated model once enough closed trades exist.
-- This environment had neither Python nor Docker installed, so the backend test suite and
-  `docker compose up` were not executed end-to-end during this build -- only the frontend
-  (`npm run build`) was verified to compile. Run the Quick Start steps above to validate the
-  rest before trusting it further.
+  `backend/src/scoring/ruleScorer.ts` is a documented, transparent heuristic.
+  `backend/src/scoring/training.ts` (a hand-rolled logistic regression) is ready to fit a
+  calibrated model once enough closed trades exist.
+- This environment had neither Python, Docker, nor a database available, so end-to-end
+  verification (`npm install` / `npm run build` / `npm test` / running the server against a
+  real database) depends on you having created the Neon database and run the steps above.

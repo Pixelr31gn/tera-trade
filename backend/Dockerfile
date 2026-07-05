@@ -1,24 +1,22 @@
-FROM python:3.11-slim AS base
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    POETRY_NO_INTERACTION=1 \
-    POETRY_VIRTUALENVS_IN_PROJECT=true
-
+FROM node:20-slim AS deps
 WORKDIR /app
+COPY package.json ./
+RUN npm install
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN pip install --no-cache-dir poetry==1.8.3
-
-COPY pyproject.toml ./
-RUN poetry install --no-root --only main
-
+FROM node:20-slim AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN poetry install --only main
+RUN npx prisma generate
+RUN npm run build
+
+FROM node:20-slim AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/package.json ./package.json
 
 EXPOSE 8000
-
-CMD ["poetry", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["node", "dist/index.js"]

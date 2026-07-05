@@ -14,7 +14,7 @@ export default function PositionsPage() {
     <div className="space-y-6">
       <Panel
         title="Open Positions"
-        action={<Badge text={`broker: ${systemState?.broker_kind ?? "..."}`} tone="neutral" />}
+        action={<Badge text={`broker: ${systemState?.brokerKind ?? "..."}`} tone="neutral" />}
       >
         <table>
           <thead>
@@ -32,16 +32,16 @@ export default function PositionsPage() {
           </thead>
           <tbody>
             {positions?.map((p) => (
-              <tr key={p.trade_id}>
+              <tr key={p.tradeId}>
                 <td className="font-medium text-white">{p.symbol}</td>
                 <td>
                   <Badge text={p.side} tone={p.side === "long" ? "good" : "bad"} />
                 </td>
                 <td>{p.quantity}</td>
-                <td>{p.entry_price}</td>
-                <td className="text-bad">{p.stop_price}</td>
-                <td className="text-good">{p.take_profit_price ?? "-"}</td>
-                <td className="text-gray-400">{p.strategy_id}</td>
+                <td>{p.entryPrice}</td>
+                <td className="text-bad">{p.stopPrice}</td>
+                <td className="text-good">{p.takeProfitPrice ?? "-"}</td>
+                <td className="text-gray-400">{p.strategyId}</td>
                 <td>{p.score !== null ? `${(p.score * 100).toFixed(0)}%` : "-"}</td>
                 <td className="max-w-xl text-gray-300">{p.explanation}</td>
               </tr>
