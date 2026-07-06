@@ -1,7 +1,24 @@
 import type { FastifyInstance } from "fastify";
+import { Decimal } from "decimal.js";
 import { prisma } from "../../db/client.js";
 import { requireApiKey } from "../../core/security.js";
 import { computeActionability } from "../../scoring/actionability.js";
+import { computeInitialStop } from "../../risk/index.js";
+import { getInstrument } from "../../marketData/instruments.js";
+import type { Score } from "@prisma/client";
+
+// Every score row carries the hypothetical entry/ATR/structure-swing it was
+// signaled at (see engine/loop.ts), so the exact stop/target plan can be
+// recomputed on demand here -- the same computeInitialStop call the engine
+// itself uses -- instead of needing to persist stop/target as their own columns.
+function buildTradePlan(score: Score): { entryPrice: number; stopPrice: number; takeProfitPrice: number } {
+  const instrument = getInstrument(score.symbol);
+  const entryPrice = new Decimal(score.entryPriceAtSignal.toString());
+  const atrValue = new Decimal(score.atrAtSignal.toString());
+  const structureSwingPrice = score.structureSwingPriceAtSignal ? new Decimal(score.structureSwingPriceAtSignal.toString()) : null;
+  const plan = computeInitialStop(entryPrice, score.side as "long" | "short", atrValue, structureSwingPrice, { tickSize: instrument.tickSize });
+  return { entryPrice: entryPrice.toNumber(), stopPrice: plan.stopPrice.toNumber(), takeProfitPrice: plan.takeProfitPrice.toNumber() };
+}
 
 export async function scoresRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", requireApiKey);
@@ -19,6 +36,7 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
       decision: s.decision,
       explanation: s.explanation,
       tradeId: s.tradeId,
+      ...buildTradePlan(s),
     }));
   });
 
@@ -55,6 +73,7 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
       probability: s.probability,
       explanation: s.explanation,
       actionability: computeActionability(s.time, now),
+      ...buildTradePlan(s),
     }));
   });
 

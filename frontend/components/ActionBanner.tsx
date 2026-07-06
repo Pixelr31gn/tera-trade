@@ -12,6 +12,10 @@ function relativeMinutes(iso: string): string {
   return `${minutes} min ago`;
 }
 
+function formatPrice(value: number): string {
+  return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 export function ActionBanner() {
   const { data, mutate } = useSWR<ActionableRecommendation[]>("/api/recommendations/actionable", fetcher, {
     refreshInterval: 8000,
@@ -52,6 +56,22 @@ export function ActionBanner() {
                 I placed this / dismiss
               </button>
             </div>
+            <div className="mt-3 flex flex-wrap gap-4 rounded-md bg-black/20 px-3 py-2 font-mono text-sm">
+              <span className="text-gray-300">
+                Entry <span className="font-semibold text-white">{formatPrice(rec.entryPrice)}</span>
+              </span>
+              <span className="text-bad">
+                Stop <span className="font-semibold">{formatPrice(rec.stopPrice)}</span>
+              </span>
+              <span className="text-good">
+                Target <span className="font-semibold">{formatPrice(rec.takeProfitPrice)}</span>
+              </span>
+            </div>
+            {isStale && (
+              <p className="mt-1 text-xs text-warn">
+                Price was current when this call was made -- confirm the market hasn&apos;t moved away from this entry before placing it.
+              </p>
+            )}
             <p className="mt-2 text-sm text-gray-300">{rec.explanation}</p>
           </div>
         );

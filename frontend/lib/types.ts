@@ -39,6 +39,9 @@ export interface RecommendationScore {
   decision: string;
   explanation: string;
   tradeId: number | null;
+  entryPrice: number;
+  stopPrice: number;
+  takeProfitPrice: number;
 }
 
 export interface ActionableRecommendation {
@@ -50,6 +53,9 @@ export interface ActionableRecommendation {
   probability: number;
   explanation: string;
   actionability: "fresh" | "stale";
+  entryPrice: number;
+  stopPrice: number;
+  takeProfitPrice: number;
 }
 
 export interface Position {
