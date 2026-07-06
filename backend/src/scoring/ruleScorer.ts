@@ -17,6 +17,7 @@ import type { SetupFeatures } from "./features.js";
 // outweighs event risk).
 const WEIGHTS = {
   trendAlignment: 1.1,
+  dailyTrendAlignment: 1.8,
   momentumAlignment: 0.8,
   adxStrength: 0.6,
   volatilityRegime: 0.5,
@@ -73,7 +74,32 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
     factors.push({ name: "trendAlignment", contribution, description: desc });
   }
 
-  // 2. Momentum alignment
+  // 2. Daily trend alignment -- the intraday regime above can flip within a
+  // single session as short-term noise passes through; the daily trend
+  // (computed from ~1yr of daily bars, see engine/dailyTrendCache.ts) is far
+  // stickier and is weighted more heavily than the intraday one deliberately,
+  // so a setup that fights a confident daily trend rarely clears the score
+  // threshold no matter how good it looks on the last few minutes of bars.
+  // This is the main defense against long/short/short/long whipsaw.
+  {
+    let raw: number;
+    let desc: string;
+    if (features.dailyTrendLabel === "none") {
+      raw = -0.2;
+      desc = "no clear daily trend to confirm this setup's direction";
+    } else if ((features.dailyTrendLabel === "up" && direction === 1) || (features.dailyTrendLabel === "down" && direction === -1)) {
+      raw = features.dailyTrendConfidence;
+      desc = `agrees with the daily ${features.dailyTrendLabel} trend (${(features.dailyTrendConfidence * 100).toFixed(0)}% confidence)`;
+    } else {
+      raw = -clip(0.6 + features.dailyTrendConfidence);
+      desc = `fights the daily ${features.dailyTrendLabel} trend (${(features.dailyTrendConfidence * 100).toFixed(0)}% confidence)`;
+    }
+    const contribution = WEIGHTS.dailyTrendAlignment * raw;
+    logit += contribution;
+    factors.push({ name: "dailyTrendAlignment", contribution, description: desc });
+  }
+
+  // 3. Momentum alignment
   if (features.momentum10 !== null) {
     const raw = clip(direction * features.momentum10 * 20);
     const desc = raw > 0 ? "recent momentum supports the setup" : "recent momentum opposes the setup";
@@ -82,7 +108,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
     factors.push({ name: "momentumAlignment", contribution, description: desc });
   }
 
-  // 3. ADX trend strength (only rewarded when trend is aligned)
+  // 4. ADX trend strength (only rewarded when trend is aligned)
   if (features.adx !== null && features.trendLabel !== "none") {
     const aligned = (features.trendLabel === "up") === (direction === 1);
     const raw = aligned ? clip((features.adx - 20) / 30) : 0;
@@ -93,7 +119,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
     }
   }
 
-  // 4. Volatility regime -- high vol adds noise/slippage risk, low vol is cleaner
+  // 5. Volatility regime -- high vol adds noise/slippage risk, low vol is cleaner
   {
     let raw: number;
     let desc: string;
@@ -112,7 +138,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
     factors.push({ name: "volatilityRegime", contribution, description: desc });
   }
 
-  // 5. Volume confirmation
+  // 6. Volume confirmation
   if (features.volumeZscore !== null) {
     const momentumAligned = direction * (features.momentum10 ?? 0) >= 0;
     const raw = momentumAligned ? clip(features.volumeZscore / 2) : 0;
@@ -123,7 +149,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
     }
   }
 
-  // 6. Session
+  // 7. Session
   {
     const raw = features.isRthSession ? 0.3 : -0.3;
     const desc = features.isRthSession
@@ -134,7 +160,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
     factors.push({ name: "session", contribution, description: desc });
   }
 
-  // 7. News risk -- dominant, deliberately punitive
+  // 8. News risk -- dominant, deliberately punitive
   if (features.newsRiskFlag) {
     let proximity = 1.0;
     if (features.newsMinutesToEvent !== null) {
@@ -146,7 +172,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
     factors.push({ name: "newsRisk", contribution, description: "a high-impact news event is imminent or just released" });
   }
 
-  // 8. Strategy's own historical edge, if we have enough trades to know it
+  // 9. Strategy's own historical edge, if we have enough trades to know it
   if (features.strategyHistoricalWinRate !== null) {
     const raw = clip((features.strategyHistoricalWinRate - 0.5) * 2);
     const contribution = WEIGHTS.historicalEdge * raw;
@@ -158,7 +184,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
     });
   }
 
-  // 9. Opening-range breakout edge -- empirical, not a heuristic weight: how
+  // 10. Opening-range breakout edge -- empirical, not a heuristic weight: how
   // often has this instrument's first-hour high/low actually gotten broken
   // later in the session, historically, in this setup's direction? Ignored
   // until there's enough sessions behind it to be more signal than noise.

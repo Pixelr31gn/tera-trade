@@ -13,6 +13,7 @@ import type { BrokerClient, ClosedSimTrade } from "../brokers/types.js";
 import { SimulatedBroker } from "../brokers/simulatedBroker.js";
 import { computeAccountEquity, computeAccountRiskState, recordEquityPoint } from "./accounting.js";
 import { ensureDefaultAccount, loadRecentBars } from "./bootstrap.js";
+import { getDailyTrend } from "./dailyTrendCache.js";
 import { getOpeningRangeStats } from "./openingRangeCache.js";
 import { explainKillSwitch, explainRiskRejection, explainScore, explainTradeExit } from "../explain/engine.js";
 import { executeIfApproved } from "../execution/engine.js";
@@ -144,6 +145,7 @@ export class TradingEngine {
     const newsStatus = await getNewsRiskStatus(barTime);
     const settings = getSettings();
     const openingRangeStats = await getOpeningRangeStats(symbol);
+    const dailyTrend = await getDailyTrend(symbol);
 
     for (const strategy of ALL_STRATEGIES) {
       const signal = strategy.generateSignal(symbol, bars);
@@ -156,7 +158,8 @@ export class TradingEngine {
 
       const features = buildSetupFeatures(
         bars, symbol, signal.side, regime, barTime, newsStatus.inRiskWindow, newsStatus.minutesToEvent,
-        null, openingRangeBreakoutProbability, openingRangeStats.sessionsAnalyzed
+        null, openingRangeBreakoutProbability, openingRangeStats.sessionsAnalyzed,
+        dailyTrend.trendLabel, dailyTrend.confidence
       );
       const gated = evaluateSetup(features);
       const explanation = explainScore(symbol, signal.side, gated, settings.minScoreThreshold);

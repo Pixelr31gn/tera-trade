@@ -37,6 +37,9 @@ export interface SetupFeatures {
   marketStructureLabel: MarketStructureLabel;
   liquidityLabel: LiquidityLabel;
   priceActionLabel: PriceActionLabel;
+  /** Higher-timeframe trend (computed from ~1yr of daily bars, see engine/dailyTrendCache.ts) -- much stickier than the intraday regime, used to filter out countertrend whipsaw. */
+  dailyTrendLabel: "up" | "down" | "none";
+  dailyTrendConfidence: number;
 }
 
 function mean(xs: number[]): number {
@@ -53,7 +56,9 @@ export function buildSetupFeatures(
   newsMinutesToEvent: number | null,
   strategyHistoricalWinRate: number | null = null,
   openingRangeBreakoutProbability: number | null = null,
-  openingRangeSampleSize = 0
+  openingRangeSampleSize = 0,
+  dailyTrendLabel: "up" | "down" | "none" = "none",
+  dailyTrendConfidence = 0
 ): SetupFeatures {
   const closes = bars.map((b) => b.close);
   const atrSeries = atr(bars).filter((v) => !Number.isNaN(v));
@@ -120,5 +125,7 @@ export function buildSetupFeatures(
     marketStructureLabel,
     liquidityLabel,
     priceActionLabel,
+    dailyTrendLabel,
+    dailyTrendConfidence,
   };
 }

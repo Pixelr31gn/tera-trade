@@ -55,6 +55,7 @@ export const FEATURE_COLUMNS = [
   "regimeConfidence",
   "adx",
   "slopeR2",
+  "dailyTrendConfidence",
   "hourOfDayUtc",
   "newsRiskFlag",
   "openingRangeBreakoutProbability",

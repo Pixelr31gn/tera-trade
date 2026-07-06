@@ -28,6 +28,8 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     marketStructureLabel: "weak_uptrend",
     liquidityLabel: "normal",
     priceActionLabel: "normal",
+    dailyTrendLabel: "none",
+    dailyTrendConfidence: 0,
     ...overrides,
   };
 }
@@ -44,6 +46,12 @@ describe("scoreSetup", () => {
     const risky = scoreSetup(features({ newsRiskFlag: true, newsMinutesToEvent: 5 }));
     expect(risky.probability).toBeLessThan(calm.probability);
   });
+
+  it("scores a setup aligned with a confident daily trend higher than one fighting it", () => {
+    const aligned = scoreSetup(features({ side: "long", dailyTrendLabel: "up", dailyTrendConfidence: 0.8 }));
+    const counter = scoreSetup(features({ side: "long", dailyTrendLabel: "down", dailyTrendConfidence: 0.8 }));
+    expect(aligned.probability).toBeGreaterThan(counter.probability);
+  });
 });
 
 describe("evaluateSetup (gate)", () => {
@@ -56,5 +64,12 @@ describe("evaluateSetup (gate)", () => {
     const gated = evaluateSetup(features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9 }));
     expect(gated.decision).toBe("taken");
     expect(gated.probability).toBeGreaterThanOrEqual(0.65);
+  });
+
+  it("blocks a setup that fights a confident daily trend even when everything else looks good", () => {
+    const gated = evaluateSetup(
+      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, dailyTrendLabel: "down", dailyTrendConfidence: 0.9 })
+    );
+    expect(gated.decision).toBe("skipped_score");
   });
 });
