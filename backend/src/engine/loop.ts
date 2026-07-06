@@ -13,7 +13,9 @@ import type { BrokerClient, ClosedSimTrade } from "../brokers/types.js";
 import { SimulatedBroker } from "../brokers/simulatedBroker.js";
 import { computeAccountEquity, computeAccountRiskState, recordEquityPoint } from "./accounting.js";
 import { ensureDefaultAccount, loadRecentBars } from "./bootstrap.js";
+import { classifySession } from "../analytics/session.js";
 import { getDailyTrend } from "./dailyTrendCache.js";
+import { getFixedTargetEdge } from "./fixedTargetEdgeCache.js";
 import { getOpeningRangeStats } from "./openingRangeCache.js";
 import { explainKillSwitch, explainRiskRejection, explainScore, explainTradeExit } from "../explain/engine.js";
 import { executeIfApproved } from "../execution/engine.js";
@@ -146,6 +148,7 @@ export class TradingEngine {
     const settings = getSettings();
     const openingRangeStats = await getOpeningRangeStats(symbol);
     const dailyTrend = await getDailyTrend(symbol);
+    const session = classifySession(barTime);
 
     for (const strategy of ALL_STRATEGIES) {
       const signal = strategy.generateSignal(symbol, bars);
@@ -156,10 +159,15 @@ export class TradingEngine {
       const openingRangeBreakoutProbability =
         signal.side === "long" ? openingRangeStats.probHighBroken : openingRangeStats.probLowBroken;
 
+      // Only long setups are gated on this (see scoring/gate.ts) -- skip the
+      // extra query entirely for shorts rather than computing an unused stat.
+      const longTargetEdge = signal.side === "long" ? await getFixedTargetEdge(symbol, session, "long") : null;
+
       const features = buildSetupFeatures(
         bars, symbol, signal.side, regime, barTime, newsStatus.inRiskWindow, newsStatus.minutesToEvent,
         null, openingRangeBreakoutProbability, openingRangeStats.sessionsAnalyzed,
-        dailyTrend.trendLabel, dailyTrend.confidence
+        dailyTrend.trendLabel, dailyTrend.confidence,
+        longTargetEdge?.winRate ?? null, longTargetEdge?.sampleSize ?? 0
       );
       const gated = evaluateSetup(features);
       const explanation = explainScore(symbol, signal.side, gated, settings.minScoreThreshold);

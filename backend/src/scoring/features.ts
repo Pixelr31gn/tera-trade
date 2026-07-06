@@ -40,6 +40,9 @@ export interface SetupFeatures {
   /** Higher-timeframe trend (computed from ~1yr of daily bars, see engine/dailyTrendCache.ts) -- much stickier than the intraday regime, used to filter out countertrend whipsaw. */
   dailyTrendLabel: "up" | "down" | "none";
   dailyTrendConfidence: number;
+  /** Empirical win rate (see engine/fixedTargetEdgeCache.ts) that a LONG setup in this exact (symbol, session) bucket has historically reached a fixed +20pt move before its stop. Null until there's at least one resolved sample. */
+  longTargetWinRate: number | null;
+  longTargetSampleSize: number;
 }
 
 function mean(xs: number[]): number {
@@ -58,7 +61,9 @@ export function buildSetupFeatures(
   openingRangeBreakoutProbability: number | null = null,
   openingRangeSampleSize = 0,
   dailyTrendLabel: "up" | "down" | "none" = "none",
-  dailyTrendConfidence = 0
+  dailyTrendConfidence = 0,
+  longTargetWinRate: number | null = null,
+  longTargetSampleSize = 0
 ): SetupFeatures {
   const closes = bars.map((b) => b.close);
   const atrSeries = atr(bars).filter((v) => !Number.isNaN(v));
@@ -127,5 +132,7 @@ export function buildSetupFeatures(
     priceActionLabel,
     dailyTrendLabel,
     dailyTrendConfidence,
+    longTargetWinRate,
+    longTargetSampleSize,
   };
 }

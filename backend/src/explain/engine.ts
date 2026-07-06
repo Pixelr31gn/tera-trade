@@ -18,6 +18,9 @@ export function explainScore(symbol: string, side: string, gated: GatedScore, th
   if (gated.decision === "taken") {
     return `${side.toUpperCase()} ${symbol}: scored ${pct} confidence (>= ${Math.round(threshold * 100)}% threshold, model=${gated.modelUsed}). Key factors: ${factorText}.`;
   }
+  if (gated.blockReason) {
+    return `${side.toUpperCase()} ${symbol}: scored ${pct} confidence (cleared the ${Math.round(threshold * 100)}% threshold) but blocked -- ${gated.blockReason}. Key factors: ${factorText}.`;
+  }
   return `${side.toUpperCase()} ${symbol}: scored ${pct} confidence, below the ${Math.round(threshold * 100)}% threshold -- setup skipped, no trade taken. Key factors: ${factorText}.`;
 }
 

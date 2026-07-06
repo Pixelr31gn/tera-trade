@@ -30,6 +30,10 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     priceActionLabel: "normal",
     dailyTrendLabel: "none",
     dailyTrendConfidence: 0,
+    // Generous defaults so existing tests aren't incidentally blocked by the
+    // long-target-edge gate; tests exercising that gate specifically override these.
+    longTargetWinRate: 0.9,
+    longTargetSampleSize: 100,
     ...overrides,
   };
 }
@@ -71,5 +75,37 @@ describe("evaluateSetup (gate)", () => {
       features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, dailyTrendLabel: "down", dailyTrendConfidence: 0.9 })
     );
     expect(gated.decision).toBe("skipped_score");
+  });
+
+  it("blocks an otherwise-qualifying long when the historical 20pt win rate is below 67%, and explains why", () => {
+    const gated = evaluateSetup(
+      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: 0.16, longTargetSampleSize: 339 })
+    );
+    expect(gated.decision).toBe("skipped_score");
+    expect(gated.blockReason).toMatch(/16%/);
+    expect(gated.blockReason).toMatch(/339 samples/);
+  });
+
+  it("blocks an otherwise-qualifying long when there aren't enough historical samples yet", () => {
+    const gated = evaluateSetup(
+      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: null, longTargetSampleSize: 3 })
+    );
+    expect(gated.decision).toBe("skipped_score");
+    expect(gated.blockReason).toMatch(/not enough historical samples/);
+  });
+
+  it("takes an otherwise-qualifying long once the historical 20pt win rate clears 67% with enough samples", () => {
+    const gated = evaluateSetup(
+      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: 0.72, longTargetSampleSize: 40 })
+    );
+    expect(gated.decision).toBe("taken");
+    expect(gated.blockReason).toBeNull();
+  });
+
+  it("does not apply the long-target-edge gate to short setups", () => {
+    const gated = evaluateSetup(
+      features({ trendLabel: "down", side: "short", momentum10: -0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: 0.05, longTargetSampleSize: 500 })
+    );
+    expect(gated.decision).toBe("taken");
   });
 });
