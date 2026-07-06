@@ -7,6 +7,8 @@
  */
 import { atr, realizedVolZscore, type OhlcBar } from "../regime/indicators.js";
 import type { RegimeResult } from "../regime/classifier.js";
+import { classifyLiquidity, classifyMarketStructure, describePriceAction, type LiquidityLabel, type MarketStructureLabel, type PriceActionLabel } from "../analytics/priceAction.js";
+import { classifySession, type TradingSession } from "../analytics/session.js";
 
 export interface SetupFeatures {
   symbol: string;
@@ -30,6 +32,11 @@ export interface SetupFeatures {
   openingRangeBreakoutProbability: number | null;
   /** How many historical sessions that probability is based on -- lets the scorer ignore it until there's enough data to trust it. */
   openingRangeSampleSize: number;
+  /** Trading session at signal time -- also stored as its own indexed Score column, kept here too for convenience when reading the raw features blob. */
+  session: TradingSession;
+  marketStructureLabel: MarketStructureLabel;
+  liquidityLabel: LiquidityLabel;
+  priceActionLabel: PriceActionLabel;
 }
 
 function mean(xs: number[]): number {
@@ -84,6 +91,11 @@ export function buildSetupFeatures(
   const hour = now.getUTCHours();
   const isRth = hour >= 13 && hour < 20; // ~9:30am-4pm ET in UTC, ignoring DST nuance
 
+  const session = classifySession(now);
+  const marketStructureLabel = classifyMarketStructure(regime);
+  const liquidityLabel = classifyLiquidity(volumeZscore, session);
+  const priceActionLabel = describePriceAction(bars);
+
   return {
     symbol,
     side,
@@ -104,5 +116,9 @@ export function buildSetupFeatures(
     strategyHistoricalWinRate,
     openingRangeBreakoutProbability,
     openingRangeSampleSize,
+    session,
+    marketStructureLabel,
+    liquidityLabel,
+    priceActionLabel,
   };
 }

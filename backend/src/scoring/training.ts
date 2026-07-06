@@ -2,24 +2,49 @@
  * Offline ML scoring model training pipeline.
  *
  * Fits a hand-rolled logistic regression (gradient descent + L2
- * regularization) on closed trades, labeled by whether the trade was
- * profitable. A full ML library (scikit-learn equivalent) isn't warranted at
- * this dataset size or model complexity -- logistic regression trained by
- * maximum likelihood is already a properly calibrated probabilistic model,
- * and hand-rolling it avoids any native-build dependency. Only meaningful
- * once `trades` has a non-trivial number of closed rows; until then
- * `scoring/gate.ts` keeps using the rule-based scorer.
+ * regularization) per trading session -- New York, London, and Asian are
+ * modeled entirely separately since each has fundamentally different price
+ * action, volume, volatility, and false-breakout frequency (see
+ * analytics/session.ts). A single universal model would blur those
+ * differences away.
+ *
+ * Trains on *every* labeled setup, not just executed trades: a skipped setup
+ * that would have won or lost (see engine/outcomeEvaluator.ts's
+ * missed_win/missed_loss labels) is just as informative for "should this kind
+ * of setup be taken" as a real trade's outcome is. Rows still pending
+ * evaluation (outcomeLabel null) or that never resolved either way
+ * (no_resolution) are excluded -- there's no clear label to learn from.
+ *
+ * A full ML library (scikit-learn equivalent) isn't warranted at this dataset
+ * size or model complexity -- logistic regression trained by maximum
+ * likelihood is already a properly calibrated probabilistic model, and
+ * hand-rolling it avoids any native-build dependency. Each session's model
+ * only activates once that session has enough labeled rows;
+ * `scoring/gate.ts` falls back to the rule-based scorer for any session that
+ * isn't trained yet.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { prisma } from "../db/client.js";
 import { childLogger } from "../core/logger.js";
+import { TradingSession } from "../analytics/session.js";
 import type { SetupFeatures } from "./features.js";
 
 const logger = childLogger("scoringTraining");
 
-export const MODEL_PATH = fileURLToPath(new URL("./artifacts/trade-scorer.json", import.meta.url));
-export const MIN_TRAINING_ROWS = 200;
+export const MIN_TRAINING_ROWS_PER_SESSION = 200;
+
+const ALL_SESSIONS: TradingSession[] = [TradingSession.NEW_YORK, TradingSession.LONDON, TradingSession.ASIAN];
+
+// A setup "worked" if it was a real winning trade or a skipped setup that
+// simulation shows would have won; symmetrically for "didn't work". Anything
+// else (still pending, or resolved to neither stop nor target) isn't used.
+const POSITIVE_OUTCOME_LABELS = new Set(["executed_win", "missed_win"]);
+const NEGATIVE_OUTCOME_LABELS = new Set(["executed_loss", "missed_loss"]);
+
+function modelPath(session: TradingSession): string {
+  return fileURLToPath(new URL(`./artifacts/trade-scorer-${session}.json`, import.meta.url));
+}
 
 export const FEATURE_COLUMNS = [
   "momentum10",
@@ -45,6 +70,7 @@ interface TrainedModel {
 }
 
 export interface TrainingReport {
+  session: TradingSession;
   rowsUsed: number;
   trained: boolean;
   holdoutAccuracy: number | null;
@@ -109,21 +135,20 @@ function trainLogisticRegression(X: number[][], y: number[], opts: { epochs?: nu
   return { weights, bias };
 }
 
-export async function trainModel(): Promise<TrainingReport> {
+async function trainModelForSession(session: TradingSession): Promise<TrainingReport> {
   const rows = await prisma.score.findMany({
-    where: { trade: { status: "closed", pnl: { not: null } } },
-    include: { trade: true },
+    where: { session, outcomeLabel: { in: [...POSITIVE_OUTCOME_LABELS, ...NEGATIVE_OUTCOME_LABELS] } },
   });
 
-  if (rows.length < MIN_TRAINING_ROWS) {
-    logger.info({ rows: rows.length, required: MIN_TRAINING_ROWS }, "insufficient_data");
-    return { rowsUsed: rows.length, trained: false, holdoutAccuracy: null };
+  if (rows.length < MIN_TRAINING_ROWS_PER_SESSION) {
+    logger.info({ session, rows: rows.length, required: MIN_TRAINING_ROWS_PER_SESSION }, "insufficient_data");
+    return { session, rowsUsed: rows.length, trained: false, holdoutAccuracy: null };
   }
 
   const X = rows.map((r) => toFeatureRow(r.features as Record<string, unknown>));
-  const y = rows.map((r) => (Number(r.trade!.pnl) > 0 ? 1 : 0));
+  const y = rows.map((r) => (POSITIVE_OUTCOME_LABELS.has(r.outcomeLabel!) ? 1 : 0));
 
-  // Simple holdout split (last 20%, data isn't shuffled since trades are naturally time-ordered).
+  // Simple holdout split (last 20%, data isn't shuffled since rows are naturally time-ordered).
   const splitAt = Math.floor(X.length * 0.8);
   const { Z, means, stds } = standardize(X);
   const trainX = Z.slice(0, splitAt);
@@ -143,21 +168,29 @@ export async function trainModel(): Promise<TrainingReport> {
 
   const model: TrainedModel = { weights, bias, featureMeans: means, featureStds: stds, featureColumns: FEATURE_COLUMNS };
   mkdirSync(new URL("./artifacts", import.meta.url), { recursive: true });
-  writeFileSync(MODEL_PATH, JSON.stringify(model, null, 2));
+  writeFileSync(modelPath(session), JSON.stringify(model, null, 2));
 
-  logger.info({ rows: rows.length, accuracy }, "training_done");
-  return { rowsUsed: rows.length, trained: true, holdoutAccuracy: accuracy };
+  logger.info({ session, rows: rows.length, accuracy }, "training_done");
+  return { session, rowsUsed: rows.length, trained: true, holdoutAccuracy: accuracy };
+}
+
+export async function trainModel(): Promise<TrainingReport[]> {
+  const reports: TrainingReport[] = [];
+  for (const session of ALL_SESSIONS) {
+    reports.push(await trainModelForSession(session));
+  }
+  return reports;
 }
 
 export class MLScorer {
   private model: TrainedModel;
 
-  constructor() {
-    this.model = JSON.parse(readFileSync(MODEL_PATH, "utf-8")) as TrainedModel;
+  constructor(session: TradingSession) {
+    this.model = JSON.parse(readFileSync(modelPath(session), "utf-8")) as TrainedModel;
   }
 
-  static isAvailable(): boolean {
-    return existsSync(MODEL_PATH);
+  static isAvailable(session: TradingSession): boolean {
+    return existsSync(modelPath(session));
   }
 
   scoreProbability(features: SetupFeatures): number {

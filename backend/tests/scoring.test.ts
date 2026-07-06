@@ -24,6 +24,10 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     strategyHistoricalWinRate: null,
     openingRangeBreakoutProbability: null,
     openingRangeSampleSize: 0,
+    session: "new_york",
+    marketStructureLabel: "weak_uptrend",
+    liquidityLabel: "normal",
+    priceActionLabel: "normal",
     ...overrides,
   };
 }

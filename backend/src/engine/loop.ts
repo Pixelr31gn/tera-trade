@@ -21,7 +21,7 @@ import { getInstrument } from "../marketData/instruments.js";
 import { getNewsRiskStatus } from "../news/risk.js";
 import { classifyRegime } from "../regime/classifier.js";
 import { atr as computeAtr, type OhlcBar } from "../regime/indicators.js";
-import { RiskEngine, type RiskLimitsConfig } from "../risk/index.js";
+import { computeInitialStop, RiskEngine, type RiskLimitsConfig } from "../risk/index.js";
 import { buildSetupFeatures } from "../scoring/features.js";
 import { evaluateSetup } from "../scoring/gate.js";
 import { ALL_STRATEGIES } from "../strategy/index.js";
@@ -161,11 +161,30 @@ export class TradingEngine {
       const gated = evaluateSetup(features);
       const explanation = explainScore(symbol, signal.side, gated, settings.minScoreThreshold);
 
+      // ATR/instrument/stop-plan are computed for *every* signal, taken or
+      // skipped -- a skipped setup still needs a hypothetical entry/stop/ATR
+      // on record so the outcome evaluator can retrospectively simulate what
+      // would have happened (see engine/outcomeEvaluator.ts). Without this,
+      // only "taken" trades would ever get a labeled outcome.
+      const instrument = getInstrument(symbol);
+      const atrSeries = computeAtr(bars).filter((v) => !Number.isNaN(v));
+      if (atrSeries.length === 0) continue;
+      const atrValue = new Decimal(atrSeries[atrSeries.length - 1]!);
+      const hypotheticalStopPlan = computeInitialStop(closePrice, signal.side, atrValue, signal.structureSwingPrice, { tickSize: instrument.tickSize });
+      const riskRewardRatio = hypotheticalStopPlan.stopDistancePoints.gt(0)
+        ? hypotheticalStopPlan.takeProfitPrice.minus(closePrice).abs().dividedBy(hypotheticalStopPlan.stopDistancePoints).toNumber()
+        : null;
+
       await prisma.score.create({
         data: {
           time: barTime, symbol, strategyId: signal.strategyId, side: signal.side,
           probability: gated.probability.toString(), decision: gated.decision,
           features: JSON.parse(JSON.stringify(features)), explanation,
+          session: features.session,
+          entryPriceAtSignal: closePrice.toString(),
+          structureSwingPriceAtSignal: signal.structureSwingPrice.toString(),
+          atrAtSignal: atrValue.toString(),
+          riskRewardRatio: riskRewardRatio?.toString(),
         },
       });
       await this.emit({ type: "score", symbol, side: signal.side, probability: gated.probability, decision: gated.decision, explanation });
@@ -184,10 +203,6 @@ export class TradingEngine {
 
       const equity = await computeAccountEquity(account, new Map([[symbol, closePrice]]));
       const accountState = await computeAccountRiskState(account, equity);
-      const instrument = getInstrument(symbol);
-      const atrSeries = computeAtr(bars).filter((v) => !Number.isNaN(v));
-      if (atrSeries.length === 0) continue;
-      const atrValue = new Decimal(atrSeries[atrSeries.length - 1]!);
 
       const assessment = this.riskEngine.assessNewTrade({
         side: signal.side, entryPrice: closePrice, atrValue,

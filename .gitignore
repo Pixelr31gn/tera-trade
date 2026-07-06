@@ -4,6 +4,7 @@ node_modules/
 dist/
 frontend/out/
 frontend/.turbo/
+*.tsbuildinfo
 backend/src/scoring/artifacts/*.json
 
 # Env / secrets

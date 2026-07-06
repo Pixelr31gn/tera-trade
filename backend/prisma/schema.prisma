@@ -155,11 +155,33 @@ model Score {
   acknowledged   Boolean   @default(false)
   acknowledgedAt DateTime? @map("acknowledged_at")
 
+  /// Trading session at signal time -- "new_york" | "london" | "asian". Kept
+  /// as its own indexed column (not just inside `features`) since per-session
+  /// datasets must never be queried/trained together.
+  session String
+
+  /// Hypothetical entry/stop/ATR captured at signal time so a *skipped*
+  /// setup's outcome can still be retrospectively simulated later -- without
+  /// these, only "taken" trades would ever be labeled.
+  entryPriceAtSignal          Decimal  @map("entry_price_at_signal") @db.Decimal(18, 8)
+  structureSwingPriceAtSignal Decimal? @map("structure_swing_price_at_signal") @db.Decimal(18, 8)
+  atrAtSignal                 Decimal  @map("atr_at_signal") @db.Decimal(18, 8)
+  riskRewardRatio             Decimal? @map("risk_reward_ratio") @db.Decimal(6, 3)
+
+  /// Filled in later by the outcome evaluator (engine/outcomeEvaluator.ts):
+  /// "executed_win" | "executed_loss" | "missed_win" | "missed_loss" |
+  /// "no_resolution" | null (still pending -- not enough time/bars have
+  /// passed yet to judge).
+  outcomeLabel       String?   @map("outcome_label")
+  outcomeRMultiple   Decimal?  @map("outcome_r_multiple") @db.Decimal(8, 3)
+  outcomeEvaluatedAt DateTime? @map("outcome_evaluated_at")
+
   trade Trade? @relation(fields: [tradeId], references: [id])
 
   @@unique([time, symbol, strategyId])
   @@index([symbol, time])
   @@index([decision, acknowledged, time])
+  @@index([session, outcomeLabel])
   @@map("scores")
 }
 

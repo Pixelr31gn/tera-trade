@@ -121,6 +121,27 @@ export interface OpeningRangeStats {
   probNeitherBroken: number | null;
 }
 
+export interface SessionLabelBreakdown {
+  sampleSize: number;
+  resolvedCount: number;
+  winRate: number | null;
+  avgRMultiple: number | null;
+}
+
+export interface SessionPerformance {
+  session: "new_york" | "london" | "asian";
+  totalScores: number;
+  outcomeCounts: Record<string, number>;
+  resolvedCount: number;
+  winRate: number | null;
+  avgRMultiple: number | null;
+  modelTrained: boolean;
+  minRowsRequiredForModel: number;
+  byMarketStructure: Record<string, SessionLabelBreakdown>;
+  byLiquidity: Record<string, SessionLabelBreakdown>;
+  byPriceAction: Record<string, SessionLabelBreakdown>;
+}
+
 export interface PerformanceSummary {
   tradeStats: {
     tradeCount: number;

@@ -11,6 +11,7 @@ import { logger } from "./core/logger.js";
 import { prisma } from "./db/client.js";
 import { setLatestBrowserAccountSnapshot } from "./engine/liveAccountOverride.js";
 import { TradingEngine } from "./engine/loop.js";
+import { evaluatePendingOutcomes } from "./engine/outcomeEvaluator.js";
 import { ensureInstrumentsSeeded } from "./marketData/backfill.js";
 import { DEFAULT_INSTRUMENTS } from "./marketData/instruments.js";
 import { LiveBarPoller } from "./marketData/live.js";
@@ -83,8 +84,20 @@ async function main(): Promise<void> {
     "terra_trade_started"
   );
 
+  // Retrospectively labels every scored setup (taken and skipped alike) with
+  // win/loss/no_resolution once enough bars have accumulated -- see
+  // engine/outcomeEvaluator.ts. Runs on a timer rather than per-bar since it
+  // scans across all pending scores, not just the symbol that just ticked.
+  const OUTCOME_EVALUATION_INTERVAL_MS = 5 * 60_000;
+  const runOutcomeEvaluation = (): void => {
+    evaluatePendingOutcomes().catch((err) => logger.error({ err: String(err) }, "outcome_evaluation_failed"));
+  };
+  runOutcomeEvaluation();
+  const outcomeEvaluationTimer = setInterval(runOutcomeEvaluation, OUTCOME_EVALUATION_INTERVAL_MS);
+
   const shutdown = async () => {
     logger.info("terra_trade_stopping");
+    clearInterval(outcomeEvaluationTimer);
     stopDataSource();
     await dataSourcePromise;
     await broker.disconnect();
