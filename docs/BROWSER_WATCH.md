@@ -71,7 +71,6 @@ TopstepX page, so this almost certainly needs one round of adjustment together:
   your own account data from your own logged-in session -- reasonable for personal use, but
   worth being aware this isn't an officially supported integration path the way the ProjectX
   Gateway API is.
-- Order execution is out of scope for this path entirely -- Tera Trade never uses browser
-  automation to place trades, only to observe. Execution still only ever happens through the
-  `BrokerClient` interface (`SimulatedBroker` or `ProjectXGatewayBroker`), gated by
-  `TRADING_MODE` as always.
+- This module itself never clicks, types, or submits anything -- it only observes. Real order
+  placement via browser automation exists as a separate, explicitly-gated capability; see
+  [BROWSER_CONTROL.md](BROWSER_CONTROL.md).

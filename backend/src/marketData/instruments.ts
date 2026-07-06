@@ -17,13 +17,24 @@ export interface InstrumentSpec {
   /** Regular trading hours open, in US Eastern local wall-clock time (DST-aware via Intl). */
   rthOpenHourET: number;
   rthOpenMinuteET: number;
+  /**
+   * CME contract-code prefix actually configured on the account for browser-driven
+   * order placement (see brokers/browserControlBroker.ts), e.g. "MNQ" for Micro
+   * E-mini Nasdaq. Micro contracts share the exact same underlying price series
+   * as their full-size counterparts (same tick size, same Yahoo feed) -- only
+   * the multiplier (pointValue) and the real order-entry contract differ, which
+   * is why this is a separate field rather than changing `symbol`/`dataSymbol`
+   * (that would orphan all historical bars/scores/trades already keyed by the
+   * full-size symbol).
+   */
+  brokerContractPrefix: string;
 }
 
 export const DEFAULT_INSTRUMENTS: InstrumentSpec[] = [
-  { symbol: "ES", dataSymbol: "ES=F", exchange: "CME", tickSize: new Decimal("0.25"), pointValue: new Decimal(50), rthOpenHourET: 9, rthOpenMinuteET: 30 },
-  { symbol: "NQ", dataSymbol: "NQ=F", exchange: "CME", tickSize: new Decimal("0.25"), pointValue: new Decimal(20), rthOpenHourET: 9, rthOpenMinuteET: 30 },
-  { symbol: "CL", dataSymbol: "CL=F", exchange: "NYMEX", tickSize: new Decimal("0.01"), pointValue: new Decimal(1000), rthOpenHourET: 9, rthOpenMinuteET: 0 },
-  { symbol: "GC", dataSymbol: "GC=F", exchange: "COMEX", tickSize: new Decimal("0.10"), pointValue: new Decimal(100), rthOpenHourET: 8, rthOpenMinuteET: 20 },
+  { symbol: "ES", dataSymbol: "ES=F", exchange: "CME", tickSize: new Decimal("0.25"), pointValue: new Decimal(5), rthOpenHourET: 9, rthOpenMinuteET: 30, brokerContractPrefix: "MES" },
+  { symbol: "NQ", dataSymbol: "NQ=F", exchange: "CME", tickSize: new Decimal("0.25"), pointValue: new Decimal(2), rthOpenHourET: 9, rthOpenMinuteET: 30, brokerContractPrefix: "MNQ" },
+  { symbol: "CL", dataSymbol: "CL=F", exchange: "NYMEX", tickSize: new Decimal("0.01"), pointValue: new Decimal(100), rthOpenHourET: 9, rthOpenMinuteET: 0, brokerContractPrefix: "MCL" },
+  { symbol: "GC", dataSymbol: "GC=F", exchange: "COMEX", tickSize: new Decimal("0.10"), pointValue: new Decimal(10), rthOpenHourET: 8, rthOpenMinuteET: 20, brokerContractPrefix: "MGC" },
 ];
 
 const bySymbol = new Map(DEFAULT_INSTRUMENTS.map((i) => [i.symbol, i]));

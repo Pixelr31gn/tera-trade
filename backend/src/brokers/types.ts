@@ -90,4 +90,6 @@ export interface BrokerClient {
   getHistoricalBars(symbol: string, start: Date, end: Date, unitMinutes?: number, limit?: number): Promise<HistoricalBar[]>;
   startMarketStream?(symbols: string[], handler: MarketDataHandler): Promise<void>;
   startAccountStream?(accountId: string, handler: AccountUpdateHandler): Promise<void>;
+  /** Closes the open position in `symbol` entirely. Only implemented by brokers that support it (e.g. BrowserControlBroker). */
+  requestClosePosition?(symbol: string): Promise<OrderResult>;
 }

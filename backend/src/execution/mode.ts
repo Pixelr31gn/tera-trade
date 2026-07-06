@@ -24,9 +24,19 @@ export async function getSystemState(): Promise<SystemState> {
 
 export async function setMode(mode: TradingMode): Promise<SystemState> {
   const settings = getSettings();
+
+  // PAPER must never place a real order -- executeIfApproved calls
+  // broker.placeOrder() for any mode other than ANALYSIS_ONLY, so without this
+  // check, "paper" was only a naming convention, not an enforced guarantee:
+  // BROKER_KIND=projectx or browser_control + TRADING_MODE=paper would have
+  // silently placed real orders under a label that implies zero real risk.
+  if (mode === TradingMode.PAPER && settings.brokerKind !== BrokerKind.SIMULATED) {
+    throw new ModeChangeError("Cannot switch to PAPER mode: BROKER_KIND must be 'simulated' -- paper mode guarantees no real orders are placed");
+  }
+
   if (mode === TradingMode.LIVE) {
-    if (settings.brokerKind !== BrokerKind.PROJECTX) {
-      throw new ModeChangeError("Cannot switch to LIVE mode: BROKER_KIND is not set to 'projectx'");
+    if (settings.brokerKind !== BrokerKind.PROJECTX && settings.brokerKind !== BrokerKind.BROWSER_CONTROL) {
+      throw new ModeChangeError("Cannot switch to LIVE mode: BROKER_KIND must be 'projectx' or 'browser_control'");
     }
     if (!settings.liveTradingConfirmed) {
       throw new ModeChangeError(

@@ -10,6 +10,7 @@ export type TradingMode = (typeof TradingMode)[keyof typeof TradingMode];
 export const BrokerKind = {
   SIMULATED: "simulated",
   PROJECTX: "projectx",
+  BROWSER_CONTROL: "browser_control",
 } as const;
 export type BrokerKind = (typeof BrokerKind)[keyof typeof BrokerKind];
 
@@ -23,6 +24,12 @@ const boolFromEnv = z
   .string()
   .optional()
   .transform((v) => v?.toLowerCase() === "true");
+
+const boolFromEnvDefault = (fallback: boolean) =>
+  z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined || v === "" ? fallback : v.toLowerCase() === "true"));
 
 const numberFromEnv = (fallback: number) =>
   z
@@ -80,6 +87,11 @@ const EnvSchema = z.object({
   BROWSER_URL_MATCH: z.string().default("topstepx.com"),
   BROWSER_POLL_SECONDS: numberFromEnv(5),
   BROWSER_SELECTORS_PATH: z.string().optional(),
+
+  // --- Browser-control (real mouse/click order placement via BrowserControlBroker) ---
+  // Defaults to true (dry-run) so real clicks require an explicit, separate opt-in
+  // on top of TRADING_MODE=live + BROKER_KIND=browser_control + LIVE_TRADING_CONFIRMED.
+  DRY_RUN_ORDERS: boolFromEnvDefault(true),
 });
 
 export interface Settings {
@@ -117,6 +129,7 @@ export interface Settings {
   browserUrlMatch: string;
   browserPollSeconds: number;
   browserSelectorsPath: string | undefined;
+  dryRunOrders: boolean;
 }
 
 let cached: Settings | undefined;
@@ -159,6 +172,7 @@ export function getSettings(): Settings {
     browserUrlMatch: env.BROWSER_URL_MATCH,
     browserPollSeconds: env.BROWSER_POLL_SECONDS,
     browserSelectorsPath: env.BROWSER_SELECTORS_PATH,
+    dryRunOrders: env.DRY_RUN_ORDERS,
   };
   return cached;
 }

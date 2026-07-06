@@ -17,7 +17,18 @@ export async function ensureInstrumentsSeeded(): Promise<void> {
   for (const spec of DEFAULT_INSTRUMENTS) {
     await prisma.instrument.upsert({
       where: { symbol: spec.symbol },
-      update: {},
+      // tickSize/pointValue must stay in sync with DEFAULT_INSTRUMENTS on every
+      // boot, not just at first creation -- engine/accounting.ts reads
+      // pointValue from this table (unlike the rest of the engine, which reads
+      // getInstrument() directly), so a stale DB row after a contract-spec
+      // change (e.g. switching from full-size to micro contracts) would
+      // silently miscalculate live unrealized P&L.
+      update: {
+        dataSymbol: spec.dataSymbol,
+        exchange: spec.exchange,
+        tickSize: spec.tickSize.toString(),
+        pointValue: spec.pointValue.toString(),
+      },
       create: {
         symbol: spec.symbol,
         dataSymbol: spec.dataSymbol,

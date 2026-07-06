@@ -1,14 +1,24 @@
 "use client";
 
 import useSWR from "swr";
-import { fetcher } from "@/lib/api";
+import { apiFetch, fetcher } from "@/lib/api";
 import { Position, SystemState } from "@/lib/types";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
 
 export default function PositionsPage() {
-  const { data: positions } = useSWR<Position[]>("/api/positions", fetcher, { refreshInterval: 5000 });
+  const { data: positions, mutate } = useSWR<Position[]>("/api/positions", fetcher, { refreshInterval: 5000 });
   const { data: systemState } = useSWR<SystemState>("/api/system/state", fetcher, { refreshInterval: 10000 });
+
+  async function closePosition(tradeId: number, symbol: string) {
+    if (!confirm(`Close the open ${symbol} position? This clicks "Close Position" on your real account.`)) return;
+    try {
+      await apiFetch(`/api/positions/${tradeId}/close`, { method: "POST" });
+      mutate();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to close position");
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -28,6 +38,7 @@ export default function PositionsPage() {
               <th>Strategy</th>
               <th>Score</th>
               <th>Explanation</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -44,6 +55,14 @@ export default function PositionsPage() {
                 <td className="text-gray-400">{p.strategyId}</td>
                 <td>{p.score !== null ? `${(p.score * 100).toFixed(0)}%` : "-"}</td>
                 <td className="max-w-xl text-gray-300">{p.explanation}</td>
+                <td>
+                  <button
+                    onClick={() => closePosition(p.tradeId, p.symbol)}
+                    className="whitespace-nowrap rounded-md bg-bad/20 px-2.5 py-1 text-xs font-medium text-bad hover:bg-bad/30"
+                  >
+                    Close
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
