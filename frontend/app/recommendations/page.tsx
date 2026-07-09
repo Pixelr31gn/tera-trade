@@ -20,6 +20,7 @@ export default function RecommendationsPage() {
             <th>Side</th>
             <th>Score</th>
             <th>Decision</th>
+            <th>Qty</th>
             <th>Entry</th>
             <th>Stop</th>
             <th>Target</th>
@@ -39,6 +40,7 @@ export default function RecommendationsPage() {
               <td>
                 <Badge text={s.decision} tone={s.decision === "taken" ? "good" : "neutral"} />
               </td>
+              <td className="font-mono text-gray-300">{s.quantity}</td>
               <td className="font-mono text-gray-300">{s.entryPrice.toFixed(2)}</td>
               <td className="font-mono text-bad">{s.stopPrice.toFixed(2)}</td>
               <td className="font-mono text-good">{s.takeProfitPrice.toFixed(2)}</td>

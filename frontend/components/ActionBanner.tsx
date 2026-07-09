@@ -43,7 +43,7 @@ export function ActionBanner() {
             <div className="flex items-center justify-between gap-4">
               <div className="flex items-center gap-3">
                 <span className={`text-lg font-bold ${isLong ? "text-good" : "text-bad"}`}>
-                  {isStale ? "CONSIDER" : "PLACE"} {rec.side.toUpperCase()} {rec.symbol}
+                  {isStale ? "CONSIDER" : "PLACE"} {rec.side.toUpperCase()} {rec.quantity} {rec.symbol}
                 </span>
                 <Badge text={`${Math.round(rec.probability * 100)}% confidence`} tone={isStale ? "warn" : isLong ? "good" : "bad"} />
                 {isStale && <Badge text="stale -- recheck the market" tone="warn" />}

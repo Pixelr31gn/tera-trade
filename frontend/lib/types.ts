@@ -45,6 +45,7 @@ export interface RecommendationScore {
   entryPrice: number;
   stopPrice: number;
   takeProfitPrice: number;
+  quantity: number;
 }
 
 export interface ActionableRecommendation {
@@ -59,6 +60,7 @@ export interface ActionableRecommendation {
   entryPrice: number;
   stopPrice: number;
   takeProfitPrice: number;
+  quantity: number;
 }
 
 export interface Position {

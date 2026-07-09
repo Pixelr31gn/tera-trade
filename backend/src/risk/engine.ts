@@ -10,8 +10,7 @@
 import { Decimal } from "decimal.js";
 import type { NewsRiskStatus } from "../news/risk.js";
 import { checkCircuitBreakers, type AccountRiskState, type RiskLimitsConfig } from "./circuitBreakers.js";
-import { computePositionSize } from "./sizing.js";
-import { computeInitialStop } from "./stops.js";
+import { computeTradePlan } from "./tradePlan.js";
 
 export interface RiskAssessment {
   approved: boolean;
@@ -56,31 +55,23 @@ export class RiskEngine {
       };
     }
 
-    const stopPlan = computeInitialStop(entryPrice, side, atrValue, structureSwingPrice, { tickSize });
-
     // Fixed-dollar risk overrides percentage-of-equity when configured, so
     // the risk budget stays constant regardless of intraday equity swings.
     const riskAmount = limits.perTradeRiskDollars ?? accountState.currentEquity.times(limits.perTradeRiskPct).dividedBy(100);
-    const sizing = computePositionSize(riskAmount, stopPlan.stopDistancePoints, pointValue, limits.maxPositionSize);
 
-    // A fixed-dollar profit target must reflect the actual sized quantity
-    // (points needed = dollars / (pointValue * quantity)), so it can only be
-    // computed once sizing is known -- this replaces the stop plan's default
-    // R:R-multiple-based target when configured.
-    let takeProfitPrice = stopPlan.takeProfitPrice;
-    if (limits.perTradeProfitDollars != null && sizing.quantity > 0) {
-      const profitDistance = limits.perTradeProfitDollars.dividedBy(pointValue.times(sizing.quantity));
-      takeProfitPrice = side === "long" ? entryPrice.plus(profitDistance) : entryPrice.minus(profitDistance);
-    }
+    const plan = computeTradePlan({
+      side, entryPrice, atrValue, structureSwingPrice, tickSize, pointValue,
+      riskAmount, profitDollars: limits.perTradeProfitDollars ?? null, maxPositionSize: limits.maxPositionSize,
+    });
 
     return {
-      approved: sizing.quantity > 0,
-      quantity: sizing.quantity,
-      stopPrice: stopPlan.stopPrice,
-      takeProfitPrice,
-      trailTicks: stopPlan.trailTicks,
-      stopDistancePoints: stopPlan.stopDistancePoints,
-      reason: sizing.reason,
+      approved: plan.quantity > 0,
+      quantity: plan.quantity,
+      stopPrice: plan.stopPrice,
+      takeProfitPrice: plan.takeProfitPrice,
+      trailTicks: plan.trailTicks,
+      stopDistancePoints: plan.stopDistancePoints,
+      reason: plan.sizingReason,
       tripKillSwitch: false,
     };
   }

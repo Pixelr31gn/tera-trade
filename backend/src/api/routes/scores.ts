@@ -3,21 +3,57 @@ import { Decimal } from "decimal.js";
 import { prisma } from "../../db/client.js";
 import { requireApiKey } from "../../core/security.js";
 import { computeActionability } from "../../scoring/actionability.js";
-import { computeInitialStop } from "../../risk/index.js";
-import { getInstrument } from "../../marketData/instruments.js";
-import type { Score } from "@prisma/client";
+import { computeTradePlan } from "../../risk/index.js";
+import { DEFAULT_INSTRUMENTS, getInstrument } from "../../marketData/instruments.js";
+import { computeAccountEquity } from "../../engine/accounting.js";
+import { ensureDefaultAccount } from "../../engine/bootstrap.js";
+import type { Score, RiskLimit } from "@prisma/client";
 
 // Every score row carries the hypothetical entry/ATR/structure-swing it was
-// signaled at (see engine/loop.ts), so the exact stop/target plan can be
-// recomputed on demand here -- the same computeInitialStop call the engine
-// itself uses -- instead of needing to persist stop/target as their own columns.
-function buildTradePlan(score: Score): { entryPrice: number; stopPrice: number; takeProfitPrice: number } {
+// signaled at (see engine/loop.ts), so the exact stop/target/quantity plan
+// can be recomputed on demand here -- via the same computeTradePlan the real
+// execution path (risk/engine.ts) uses -- instead of needing to persist the
+// plan as its own columns. This must stay in sync with the account's actual
+// risk limits (fixed-dollar or percentage) so what's displayed always
+// matches what would actually be traded.
+function buildTradePlan(score: Score, riskLimits: RiskLimit, equity: Decimal): { entryPrice: number; stopPrice: number; takeProfitPrice: number; quantity: number } {
   const instrument = getInstrument(score.symbol);
   const entryPrice = new Decimal(score.entryPriceAtSignal.toString());
   const atrValue = new Decimal(score.atrAtSignal.toString());
   const structureSwingPrice = score.structureSwingPriceAtSignal ? new Decimal(score.structureSwingPriceAtSignal.toString()) : null;
-  const plan = computeInitialStop(entryPrice, score.side as "long" | "short", atrValue, structureSwingPrice, { tickSize: instrument.tickSize });
-  return { entryPrice: entryPrice.toNumber(), stopPrice: plan.stopPrice.toNumber(), takeProfitPrice: plan.takeProfitPrice.toNumber() };
+
+  const riskAmount = riskLimits.perTradeRiskDollars
+    ? new Decimal(riskLimits.perTradeRiskDollars.toString())
+    : equity.times(riskLimits.perTradeRiskPct.toString()).dividedBy(100);
+  const profitDollars = riskLimits.perTradeProfitDollars ? new Decimal(riskLimits.perTradeProfitDollars.toString()) : null;
+
+  const plan = computeTradePlan({
+    side: score.side as "long" | "short",
+    entryPrice,
+    atrValue,
+    structureSwingPrice,
+    tickSize: instrument.tickSize,
+    pointValue: instrument.pointValue,
+    riskAmount,
+    profitDollars,
+    maxPositionSize: riskLimits.maxPositionSize,
+  });
+
+  return { entryPrice: entryPrice.toNumber(), stopPrice: plan.stopPrice.toNumber(), takeProfitPrice: plan.takeProfitPrice.toNumber(), quantity: plan.quantity };
+}
+
+async function loadRiskContext(): Promise<{ riskLimits: RiskLimit; equity: Decimal }> {
+  const account = await ensureDefaultAccount();
+  const riskLimits = await prisma.riskLimit.findUniqueOrThrow({ where: { accountId: account.id } });
+
+  const lastPrices = new Map<string, Decimal>();
+  for (const spec of DEFAULT_INSTRUMENTS) {
+    const lastBar = await prisma.bar.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } });
+    if (lastBar) lastPrices.set(spec.symbol, new Decimal(lastBar.close.toString()));
+  }
+  const equity = await computeAccountEquity(account, lastPrices);
+
+  return { riskLimits, equity };
 }
 
 export async function scoresRoutes(app: FastifyInstance): Promise<void> {
@@ -26,6 +62,7 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Querystring: { limit?: string } }>("/api/recommendations", async (request) => {
     const limit = Math.min(Number(request.query.limit ?? 100), 500);
     const rows = await prisma.score.findMany({ orderBy: { time: "desc" }, take: limit });
+    const { riskLimits, equity } = await loadRiskContext();
     return rows.map((s) => ({
       id: s.id,
       time: s.time,
@@ -36,7 +73,7 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
       decision: s.decision,
       explanation: s.explanation,
       tradeId: s.tradeId,
-      ...buildTradePlan(s),
+      ...buildTradePlan(s, riskLimits, equity),
     }));
   });
 
@@ -64,6 +101,7 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
       bestPerSymbol.set(score.symbol, score);
     }
 
+    const { riskLimits, equity } = await loadRiskContext();
     return [...bestPerSymbol.values()].map((s) => ({
       id: s.id,
       time: s.time,
@@ -73,7 +111,7 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
       probability: s.probability,
       explanation: s.explanation,
       actionability: computeActionability(s.time, now),
-      ...buildTradePlan(s),
+      ...buildTradePlan(s, riskLimits, equity),
     }));
   });
 
