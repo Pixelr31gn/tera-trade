@@ -5,6 +5,7 @@ import { getSettings } from "../core/config.js";
 import { accountsRoutes } from "./routes/accounts.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { backfillRoutes } from "./routes/backfill.js";
+import { marketRoutes } from "./routes/market.js";
 import { newsRoutes } from "./routes/news.js";
 import { performanceRoutes } from "./routes/performance.js";
 import { positionsRoutes } from "./routes/positions.js";
@@ -31,6 +32,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(newsRoutes);
   await app.register(analyticsRoutes);
   await app.register(backfillRoutes);
+  await app.register(marketRoutes);
   await app.register(wsRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));

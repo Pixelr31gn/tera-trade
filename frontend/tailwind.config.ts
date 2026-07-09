@@ -6,13 +6,21 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        background: "#0b0f14",
-        surface: "#121820",
-        border: "#232c38",
-        accent: "#4f9cff",
-        good: "#2fbf71",
-        bad: "#e5484d",
+        background: "#0a0c10",
+        surface: "#12151b",
+        border: "#232a35",
+        accent: "#3b9dff",
+        good: "#10b981",
+        bad: "#ef4444",
         warn: "#f5a623",
+      },
+      boxShadow: {
+        glass: "0 8px 32px rgba(0,0,0,0.45)",
+        "glow-accent": "0 0 24px rgba(59,157,255,0.25)",
+        "glow-good": "0 0 24px rgba(16,185,129,0.25)",
+      },
+      backdropBlur: {
+        xs: "2px",
       },
     },
   },

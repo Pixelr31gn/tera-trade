@@ -148,6 +148,18 @@ export interface SessionPerformance {
   byPriceAction: Record<string, SessionLabelBreakdown>;
 }
 
+export interface MarketSnapshot {
+  symbol: string;
+  tickSize: string;
+  pointValue: string;
+  lastPrice: string | null;
+  lastPriceTime: string | null;
+  trendLabel: string | null;
+  volLabel: string | null;
+  regimeConfidence: string | null;
+  session: string;
+}
+
 export interface PerformanceSummary {
   tradeStats: {
     tradeCount: number;

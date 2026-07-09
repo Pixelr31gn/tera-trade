@@ -10,7 +10,7 @@ import { Badge } from "@/components/Badge";
 const MODES: Array<{ value: "analysis_only" | "paper" | "live"; label: string; description: string }> = [
   { value: "analysis_only", label: "Analysis Only", description: "Scores and regime detection run, but no orders are ever placed." },
   { value: "paper", label: "Paper Trading", description: "Qualifying setups are executed against the simulated broker." },
-  { value: "live", label: "Live Trading", description: "Requires a configured ProjectX Gateway broker and an explicit server-side confirmation flag." },
+  { value: "live", label: "Live Trading", description: "Requires a real broker (ProjectX Gateway or browser-control) and an explicit server-side confirmation flag." },
 ];
 
 export default function SettingsPage() {
@@ -67,7 +67,7 @@ export default function SettingsPage() {
       >
         <div className="space-y-3">
           {MODES.map((m) => {
-            const disabled = m.value === "live" && systemState?.brokerKind !== "projectx";
+            const disabled = m.value === "live" && systemState?.brokerKind !== "projectx" && systemState?.brokerKind !== "browser_control";
             return (
               <button
                 key={m.value}
