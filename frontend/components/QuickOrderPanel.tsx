@@ -111,6 +111,22 @@ export function QuickOrderPanel() {
           <span className="font-mono font-semibold text-white">{lastPrice !== null ? fmt(lastPrice) : "..."}</span>
         </div>
 
+        {row?.maStack && (
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-gray-400">MA 8/20/200 trend</span>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-gray-500">
+                {row.maStack.maFast !== null ? fmt(row.maStack.maFast) : "-"} / {row.maStack.maMid !== null ? fmt(row.maStack.maMid) : "-"} /{" "}
+                {row.maStack.maSlow !== null ? fmt(row.maStack.maSlow) : "-"}
+              </span>
+              <Badge
+                text={row.maStack.direction}
+                tone={row.maStack.direction === "up" ? "good" : row.maStack.direction === "down" ? "bad" : "neutral"}
+              />
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-3 gap-2">
           <label className="text-xs text-gray-400">
             Qty
@@ -165,6 +181,46 @@ export function QuickOrderPanel() {
             <span className="font-mono text-white">{riskReward !== null ? riskReward.toFixed(2) : "n/a"}</span>
           </div>
         </div>
+
+        {row && row.fibLevels.length > 0 && (
+          <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2.5 text-xs">
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                Fib levels ({row.swingDirection === "up" ? "up" : "down"}-swing, 30d)
+              </span>
+              <span className="text-[10px] text-gray-600">
+                {row.swingLow !== null && fmt(row.swingLow)} &ndash; {row.swingHigh !== null && fmt(row.swingHigh)}
+              </span>
+            </div>
+            <div className="max-h-40 space-y-1 overflow-y-auto">
+              {row.fibLevels.map((level) => {
+                const points = lastPrice !== null ? Math.abs(lastPrice - level.price) : null;
+                return (
+                  <div key={level.label} className="flex items-center justify-between gap-2">
+                    <span className="w-14 text-gray-500">{level.label}</span>
+                    <span className="flex-1 font-mono text-gray-300">{fmt(level.price)}</span>
+                    {points !== null && (
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => setStopPoints(Number(points.toFixed(2)))}
+                          className="rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-bad hover:bg-bad/10"
+                        >
+                          stop
+                        </button>
+                        <button
+                          onClick={() => setTargetPoints(Number(points.toFixed(2)))}
+                          className="rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-good hover:bg-good/10"
+                        >
+                          target
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {error && <p className="text-xs text-bad">{error}</p>}
 

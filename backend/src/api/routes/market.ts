@@ -3,6 +3,7 @@ import { prisma } from "../../db/client.js";
 import { requireApiKey } from "../../core/security.js";
 import { DEFAULT_INSTRUMENTS } from "../../marketData/instruments.js";
 import { classifySession } from "../../analytics/session.js";
+import { getTrendLevels } from "../../engine/trendLevelsCache.js";
 
 export async function marketRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", requireApiKey);
@@ -17,9 +18,10 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
 
     const out = [];
     for (const spec of DEFAULT_INSTRUMENTS) {
-      const [lastBar, regimeRow] = await Promise.all([
+      const [lastBar, regimeRow, trendLevels] = await Promise.all([
         prisma.bar.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }),
         prisma.regimeSnapshot.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }),
+        getTrendLevels(spec.symbol),
       ]);
 
       out.push({
@@ -32,6 +34,11 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
         volLabel: regimeRow?.volLabel ?? null,
         regimeConfidence: regimeRow?.confidence ?? null,
         session,
+        maStack: trendLevels.maStack,
+        swingHigh: trendLevels.swingHigh,
+        swingLow: trendLevels.swingLow,
+        swingDirection: trendLevels.swingDirection,
+        fibLevels: trendLevels.fibLevels,
       });
     }
     return out;

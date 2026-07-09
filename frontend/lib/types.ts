@@ -148,6 +148,19 @@ export interface SessionPerformance {
   byPriceAction: Record<string, SessionLabelBreakdown>;
 }
 
+export interface MaStack {
+  maFast: number | null;
+  maMid: number | null;
+  maSlow: number | null;
+  direction: "up" | "down" | "mixed";
+}
+
+export interface FibLevel {
+  ratio: number;
+  label: string;
+  price: number;
+}
+
 export interface MarketSnapshot {
   symbol: string;
   tickSize: string;
@@ -158,6 +171,11 @@ export interface MarketSnapshot {
   volLabel: string | null;
   regimeConfidence: string | null;
   session: string;
+  maStack: MaStack;
+  swingHigh: number | null;
+  swingLow: number | null;
+  swingDirection: "up" | "down" | null;
+  fibLevels: FibLevel[];
 }
 
 export interface PerformanceSummary {
