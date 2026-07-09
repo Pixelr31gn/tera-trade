@@ -61,6 +61,7 @@ export async function tradesRoutes(app: FastifyInstance): Promise<void> {
       maxConsecutiveLosses: riskLimitsRow.maxConsecutiveLosses,
       maxDailyTrades: riskLimitsRow.maxDailyTrades,
       maxPositionSize: riskLimitsRow.maxPositionSize,
+      maxDailyLossDollars: riskLimitsRow.maxDailyLossDollars ? new Decimal(riskLimitsRow.maxDailyLossDollars.toString()) : null,
     };
     const equity = await computeAccountEquity(account, new Map([[symbol, referencePrice]]));
     const accountState = await computeAccountRiskState(account, equity);

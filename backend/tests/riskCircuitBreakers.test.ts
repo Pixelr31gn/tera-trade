@@ -50,4 +50,18 @@ describe("checkCircuitBreakers", () => {
     expect(decision.allowed).toBe(false);
     expect(decision.tripKillSwitch).toBe(false);
   });
+
+  it("trips the kill switch on a fixed-dollar daily loss breach, checked ahead of the percentage limit", () => {
+    const limitsWithDollarCap: RiskLimitsConfig = { ...LIMITS, maxDailyLossDollars: new Decimal("650") };
+    // $700 down today -- breaches the $650 cap even though the % loss alone is well under maxDailyLossPct.
+    const decision = checkCircuitBreakers(state({ currentEquity: new Decimal(49500), dailyStartingEquity: new Decimal(50200) }), limitsWithDollarCap);
+    expect(decision.allowed).toBe(false);
+    expect(decision.tripKillSwitch).toBe(true);
+    expect(decision.reason).toContain("$650");
+  });
+
+  it("does not apply the fixed-dollar daily loss cap when it isn't configured", () => {
+    const decision = checkCircuitBreakers(state({ currentEquity: new Decimal(49500), dailyStartingEquity: new Decimal(50200) }), LIMITS);
+    expect(decision.allowed).toBe(true);
+  });
 });

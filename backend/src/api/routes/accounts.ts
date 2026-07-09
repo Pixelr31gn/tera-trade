@@ -10,6 +10,9 @@ interface RiskLimitsUpdateBody {
   maxPositionSize: number;
   maxConsecutiveLosses: number;
   maxDailyTrades: number;
+  perTradeRiskDollars: number | null;
+  perTradeProfitDollars: number | null;
+  maxDailyLossDollars: number | null;
 }
 
 export async function accountsRoutes(app: FastifyInstance): Promise<void> {
@@ -30,6 +33,9 @@ export async function accountsRoutes(app: FastifyInstance): Promise<void> {
           maxPositionSize: limits.maxPositionSize,
           maxConsecutiveLosses: limits.maxConsecutiveLosses,
           maxDailyTrades: limits.maxDailyTrades,
+          perTradeRiskDollars: limits.perTradeRiskDollars,
+          perTradeProfitDollars: limits.perTradeProfitDollars,
+          maxDailyLossDollars: limits.maxDailyLossDollars,
         },
       },
     ];
@@ -50,6 +56,9 @@ export async function accountsRoutes(app: FastifyInstance): Promise<void> {
         maxPositionSize: b.maxPositionSize,
         maxConsecutiveLosses: b.maxConsecutiveLosses,
         maxDailyTrades: b.maxDailyTrades,
+        perTradeRiskDollars: b.perTradeRiskDollars?.toString() ?? null,
+        perTradeProfitDollars: b.perTradeProfitDollars?.toString() ?? null,
+        maxDailyLossDollars: b.maxDailyLossDollars?.toString() ?? null,
       },
     });
     return { status: "updated" };

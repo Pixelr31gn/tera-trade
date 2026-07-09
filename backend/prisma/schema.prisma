@@ -97,6 +97,14 @@ model RiskLimit {
   maxConsecutiveLosses   Int     @default(3) @map("max_consecutive_losses")
   maxDailyTrades         Int     @default(8) @map("max_daily_trades")
 
+  // Fixed-dollar overrides -- when set, these take priority over the
+  // percentage-of-equity fields above, since a funded account's per-trade
+  // risk/profit targets are usually meant to stay fixed regardless of how
+  // equity fluctuates intraday (see risk/engine.ts).
+  perTradeRiskDollars   Decimal? @map("per_trade_risk_dollars") @db.Decimal(10, 2)
+  perTradeProfitDollars Decimal? @map("per_trade_profit_dollars") @db.Decimal(10, 2)
+  maxDailyLossDollars   Decimal? @map("max_daily_loss_dollars") @db.Decimal(10, 2)
+
   account Account @relation(fields: [accountId], references: [id])
 
   @@map("risk_limits")

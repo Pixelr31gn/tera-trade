@@ -58,13 +58,26 @@ export class RiskEngine {
 
     const stopPlan = computeInitialStop(entryPrice, side, atrValue, structureSwingPrice, { tickSize });
 
-    const sizing = computePositionSize(accountState.currentEquity, limits.perTradeRiskPct, stopPlan.stopDistancePoints, pointValue, limits.maxPositionSize);
+    // Fixed-dollar risk overrides percentage-of-equity when configured, so
+    // the risk budget stays constant regardless of intraday equity swings.
+    const riskAmount = limits.perTradeRiskDollars ?? accountState.currentEquity.times(limits.perTradeRiskPct).dividedBy(100);
+    const sizing = computePositionSize(riskAmount, stopPlan.stopDistancePoints, pointValue, limits.maxPositionSize);
+
+    // A fixed-dollar profit target must reflect the actual sized quantity
+    // (points needed = dollars / (pointValue * quantity)), so it can only be
+    // computed once sizing is known -- this replaces the stop plan's default
+    // R:R-multiple-based target when configured.
+    let takeProfitPrice = stopPlan.takeProfitPrice;
+    if (limits.perTradeProfitDollars != null && sizing.quantity > 0) {
+      const profitDistance = limits.perTradeProfitDollars.dividedBy(pointValue.times(sizing.quantity));
+      takeProfitPrice = side === "long" ? entryPrice.plus(profitDistance) : entryPrice.minus(profitDistance);
+    }
 
     return {
       approved: sizing.quantity > 0,
       quantity: sizing.quantity,
       stopPrice: stopPlan.stopPrice,
-      takeProfitPrice: stopPlan.takeProfitPrice,
+      takeProfitPrice,
       trailTicks: stopPlan.trailTicks,
       stopDistancePoints: stopPlan.stopDistancePoints,
       reason: sizing.reason,

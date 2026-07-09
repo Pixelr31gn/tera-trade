@@ -35,6 +35,13 @@ export default function SettingsPage() {
     mutateState();
   }
 
+  function optionalNumber(formData: FormData, name: string): number | null {
+    const raw = formData.get(name);
+    if (raw === null || raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+
   async function saveRiskLimits(formData: FormData) {
     if (!account) return;
     setSaving(true);
@@ -47,6 +54,9 @@ export default function SettingsPage() {
         maxPositionSize: Number(formData.get("maxPositionSize")),
         maxConsecutiveLosses: Number(formData.get("maxConsecutiveLosses")),
         maxDailyTrades: Number(formData.get("maxDailyTrades")),
+        perTradeRiskDollars: optionalNumber(formData, "perTradeRiskDollars"),
+        perTradeProfitDollars: optionalNumber(formData, "perTradeProfitDollars"),
+        maxDailyLossDollars: optionalNumber(formData, "maxDailyLossDollars"),
       };
       await apiFetch(`/api/accounts/${account.id}/risk-limits`, { method: "PATCH", body: JSON.stringify(payload) });
       mutateAccounts();
@@ -95,30 +105,58 @@ export default function SettingsPage() {
 
       <Panel title="Risk Limits">
         {account ? (
-          <form action={saveRiskLimits} className="grid grid-cols-2 gap-4 md:grid-cols-3">
-            {[
-              ["perTradeRiskPct", "Per-trade risk (%)", account.riskLimits.perTradeRiskPct],
-              ["maxDailyLossPct", "Max daily loss (%)", account.riskLimits.maxDailyLossPct],
-              ["maxTrailingDrawdownPct", "Max trailing drawdown (%)", account.riskLimits.maxTrailingDrawdownPct],
-              ["maxPositionSize", "Max position size (contracts)", account.riskLimits.maxPositionSize],
-              ["maxConsecutiveLosses", "Max consecutive losses", account.riskLimits.maxConsecutiveLosses],
-              ["maxDailyTrades", "Max daily trades", account.riskLimits.maxDailyTrades],
-            ].map(([name, label, value]) => (
-              <label key={name as string} className="text-xs text-gray-400">
-                {label}
-                <input
-                  name={name as string}
-                  type="number"
-                  step="any"
-                  defaultValue={value as number}
-                  className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-sm text-white"
-                />
-              </label>
-            ))}
+          <form action={saveRiskLimits} className="space-y-4">
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+              {[
+                ["perTradeRiskPct", "Per-trade risk (%)", account.riskLimits.perTradeRiskPct],
+                ["maxDailyLossPct", "Max daily loss (%)", account.riskLimits.maxDailyLossPct],
+                ["maxTrailingDrawdownPct", "Max trailing drawdown (%)", account.riskLimits.maxTrailingDrawdownPct],
+                ["maxPositionSize", "Max position size (contracts)", account.riskLimits.maxPositionSize],
+                ["maxConsecutiveLosses", "Max consecutive losses", account.riskLimits.maxConsecutiveLosses],
+                ["maxDailyTrades", "Max daily trades", account.riskLimits.maxDailyTrades],
+              ].map(([name, label, value]) => (
+                <label key={name as string} className="text-xs text-gray-400">
+                  {label}
+                  <input
+                    name={name as string}
+                    type="number"
+                    step="any"
+                    defaultValue={value as number}
+                    className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-sm text-white"
+                  />
+                </label>
+              ))}
+            </div>
+
+            <div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                Fixed-dollar overrides (leave blank to use the percentage fields above)
+              </div>
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                {[
+                  ["perTradeRiskDollars", "Per-trade risk ($)", account.riskLimits.perTradeRiskDollars],
+                  ["perTradeProfitDollars", "Per-trade profit target ($)", account.riskLimits.perTradeProfitDollars],
+                  ["maxDailyLossDollars", "Max daily loss ($)", account.riskLimits.maxDailyLossDollars],
+                ].map(([name, label, value]) => (
+                  <label key={name as string} className="text-xs text-gray-400">
+                    {label}
+                    <input
+                      name={name as string}
+                      type="number"
+                      step="any"
+                      defaultValue={value ?? ""}
+                      placeholder="unset"
+                      className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-sm text-white"
+                    />
+                  </label>
+                ))}
+              </div>
+            </div>
+
             <button
               type="submit"
               disabled={saving}
-              className="col-span-full mt-2 w-fit rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              className="w-fit rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
             >
               {saving ? "Saving..." : "Save risk limits"}
             </button>

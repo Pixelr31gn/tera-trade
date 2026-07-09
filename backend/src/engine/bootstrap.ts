@@ -20,6 +20,9 @@ export async function ensureDefaultAccount(): Promise<Account> {
       maxPositionSize: settings.defaultMaxPositionSize,
       maxConsecutiveLosses: settings.maxConsecutiveLosses,
       maxDailyTrades: settings.maxDailyTrades,
+      perTradeRiskDollars: settings.defaultPerTradeRiskDollars?.toString(),
+      perTradeProfitDollars: settings.defaultPerTradeProfitDollars?.toString(),
+      maxDailyLossDollars: settings.defaultMaxDailyLossDollars?.toString(),
     },
   });
 

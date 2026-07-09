@@ -14,6 +14,9 @@ export interface RiskLimits {
   maxPositionSize: number;
   maxConsecutiveLosses: number;
   maxDailyTrades: number;
+  perTradeRiskDollars: number | null;
+  perTradeProfitDollars: number | null;
+  maxDailyLossDollars: number | null;
 }
 
 export interface AccountSummary {

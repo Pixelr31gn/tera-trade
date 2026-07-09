@@ -37,6 +37,12 @@ const numberFromEnv = (fallback: number) =>
     .optional()
     .transform((v) => (v !== undefined && v !== "" ? Number(v) : fallback));
 
+const optionalNumberFromEnv = () =>
+  z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined && v !== "" ? Number(v) : undefined));
+
 const EnvSchema = z.object({
   APP_NAME: z.string().default("Tera Trade"),
   ENVIRONMENT: z.string().default("development"),
@@ -75,6 +81,12 @@ const EnvSchema = z.object({
   DEFAULT_MAX_POSITION_SIZE: numberFromEnv(3),
   MAX_CONSECUTIVE_LOSSES: numberFromEnv(3),
   MAX_DAILY_TRADES: numberFromEnv(8),
+
+  // Fixed-dollar overrides for new accounts -- unset by default, falling
+  // back to the percentage-based fields above (see risk/engine.ts).
+  DEFAULT_PER_TRADE_RISK_DOLLARS: optionalNumberFromEnv(),
+  DEFAULT_PER_TRADE_PROFIT_DOLLARS: optionalNumberFromEnv(),
+  DEFAULT_MAX_DAILY_LOSS_DOLLARS: optionalNumberFromEnv(),
 
   ENGINE_POLL_SECONDS: numberFromEnv(30),
 
@@ -121,6 +133,9 @@ export interface Settings {
   defaultMaxPositionSize: number;
   maxConsecutiveLosses: number;
   maxDailyTrades: number;
+  defaultPerTradeRiskDollars: number | undefined;
+  defaultPerTradeProfitDollars: number | undefined;
+  defaultMaxDailyLossDollars: number | undefined;
   enginePollSeconds: number;
   port: number;
   priceSource: PriceSource;
@@ -164,6 +179,9 @@ export function getSettings(): Settings {
     defaultMaxPositionSize: env.DEFAULT_MAX_POSITION_SIZE,
     maxConsecutiveLosses: env.MAX_CONSECUTIVE_LOSSES,
     maxDailyTrades: env.MAX_DAILY_TRADES,
+    defaultPerTradeRiskDollars: env.DEFAULT_PER_TRADE_RISK_DOLLARS,
+    defaultPerTradeProfitDollars: env.DEFAULT_PER_TRADE_PROFIT_DOLLARS,
+    defaultMaxDailyLossDollars: env.DEFAULT_MAX_DAILY_LOSS_DOLLARS,
     enginePollSeconds: env.ENGINE_POLL_SECONDS,
     port: env.PORT,
     priceSource: env.PRICE_SOURCE,

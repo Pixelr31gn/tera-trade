@@ -25,6 +25,10 @@ export interface RiskLimitsConfig {
   maxConsecutiveLosses: number;
   maxDailyTrades: number;
   maxPositionSize: number;
+  /** Fixed-dollar overrides -- when set, perTradeRiskDollars/perTradeProfitDollars take priority over the percentage fields (see risk/engine.ts). */
+  perTradeRiskDollars?: Decimal | null;
+  perTradeProfitDollars?: Decimal | null;
+  maxDailyLossDollars?: Decimal | null;
 }
 
 export interface CircuitBreakerDecision {
@@ -34,9 +38,19 @@ export interface CircuitBreakerDecision {
 }
 
 export function checkCircuitBreakers(state: AccountRiskState, limits: RiskLimitsConfig): CircuitBreakerDecision {
-  const dailyLossPct = state.dailyStartingEquity.gt(0)
-    ? state.dailyStartingEquity.minus(state.currentEquity).dividedBy(state.dailyStartingEquity).times(100)
-    : new Decimal(0);
+  const dailyLossDollars = state.dailyStartingEquity.minus(state.currentEquity);
+
+  // Fixed-dollar daily loss cap, checked first when configured -- an absolute
+  // limit that doesn't drift with equity the way the percentage check does.
+  if (limits.maxDailyLossDollars != null && dailyLossDollars.gte(limits.maxDailyLossDollars)) {
+    return {
+      allowed: false,
+      tripKillSwitch: true,
+      reason: `daily loss of $${dailyLossDollars.toFixed(2)} has reached the $${limits.maxDailyLossDollars} daily loss limit`,
+    };
+  }
+
+  const dailyLossPct = state.dailyStartingEquity.gt(0) ? dailyLossDollars.dividedBy(state.dailyStartingEquity).times(100) : new Decimal(0);
 
   if (dailyLossPct.gte(limits.maxDailyLossPct)) {
     return {

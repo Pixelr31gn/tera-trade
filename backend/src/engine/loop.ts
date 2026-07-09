@@ -210,6 +210,9 @@ export class TradingEngine {
         maxConsecutiveLosses: riskLimitsRow.maxConsecutiveLosses,
         maxDailyTrades: riskLimitsRow.maxDailyTrades,
         maxPositionSize: riskLimitsRow.maxPositionSize,
+        perTradeRiskDollars: riskLimitsRow.perTradeRiskDollars ? new Decimal(riskLimitsRow.perTradeRiskDollars.toString()) : null,
+        perTradeProfitDollars: riskLimitsRow.perTradeProfitDollars ? new Decimal(riskLimitsRow.perTradeProfitDollars.toString()) : null,
+        maxDailyLossDollars: riskLimitsRow.maxDailyLossDollars ? new Decimal(riskLimitsRow.maxDailyLossDollars.toString()) : null,
       };
 
       const equity = await computeAccountEquity(account, new Map([[symbol, closePrice]]));
