@@ -17,11 +17,34 @@ export async function connectToChrome(cdpUrl: string): Promise<Browser> {
   return chromium.connectOverCDP(cdpUrl);
 }
 
+// Without an explicit application-level dialog listener, Playwright's own
+// internal auto-dismiss logic can race a native browser dialog (window.
+// confirm/alert/beforeunload -- e.g. an order-confirmation prompt) closing
+// through some other path, throwing an unhandled "No dialog is showing"
+// protocol error from deep inside Playwright's own event handling -- outside
+// any try/catch a caller could write, which crashed the entire backend
+// process the one time this happened live. Registering our own handler here
+// gives Playwright a definitive, immediate handler instead of relying on its
+// race-prone default.
+const dialogHandledPages = new WeakSet<Page>();
+
+function ensureDialogHandler(page: Page): void {
+  if (dialogHandledPages.has(page)) return;
+  dialogHandledPages.add(page);
+  page.on("dialog", (dialog) => {
+    logger.warn({ type: dialog.type(), message: dialog.message() }, "js_dialog_auto_dismissed");
+    dialog.dismiss().catch((err) => logger.warn({ err: String(err) }, "dialog_dismiss_failed"));
+  });
+}
+
 /** Finds the first open tab whose URL contains `urlMatch` (e.g. "topstepx.com"). */
 export async function findPage(browser: Browser, urlMatch: string): Promise<Page | null> {
   for (const context of browser.contexts()) {
     for (const page of context.pages()) {
-      if (page.url().includes(urlMatch)) return page;
+      if (page.url().includes(urlMatch)) {
+        ensureDialogHandler(page);
+        return page;
+      }
     }
   }
   logger.warn({ urlMatch }, "no_matching_tab_found");

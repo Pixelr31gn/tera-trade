@@ -16,6 +16,24 @@ import { ensureInstrumentsSeeded } from "./marketData/backfill.js";
 import { DEFAULT_INSTRUMENTS } from "./marketData/instruments.js";
 import { LiveBarPoller } from "./marketData/live.js";
 
+// Defense in depth: a crashed backend means zero risk oversight (no kill
+// switch enforcement, no position monitoring, nothing) until someone notices
+// and manually restarts it -- strictly worse than surviving a narrow,
+// non-critical error. This isn't hypothetical: an unhandled Playwright
+// dialog-handling race (thrown from deep inside its own internal CDP event
+// listener, entirely outside any try/catch a caller could write) once
+// crashed the whole process this way. Node's default behavior for an
+// uncaught exception is to exit; for this specific app, staying up and
+// logging loudly is the safer failure mode, since nothing here touches core
+// state (DB connections, the HTTP server, the trading engine's own loop) --
+// it's almost always a narrowly-scoped browser-automation hiccup.
+process.on("uncaughtException", (err) => {
+  logger.error({ err: String(err), stack: err.stack }, "uncaught_exception_survived");
+});
+process.on("unhandledRejection", (reason) => {
+  logger.error({ err: String(reason) }, "unhandled_rejection_survived");
+});
+
 async function main(): Promise<void> {
   const settings = getSettings();
 
