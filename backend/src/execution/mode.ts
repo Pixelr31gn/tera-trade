@@ -9,6 +9,7 @@
  */
 import { prisma } from "../db/client.js";
 import { BrokerKind, getSettings, TradingMode } from "../core/config.js";
+import type { StrategyVersion } from "../scoring/ruleScorer.js";
 import type { SystemState } from "@prisma/client";
 
 export class ModeChangeError extends Error {}
@@ -57,4 +58,14 @@ export async function clearKillSwitch(): Promise<SystemState> {
 export async function tripKillSwitch(reason: string): Promise<SystemState> {
   await getSystemState();
   return prisma.systemState.update({ where: { id: 1 }, data: { killSwitch: true, killSwitchReason: reason } });
+}
+
+// Both strategy versions are always shadow-scored on every signal (see
+// engine/loop.ts) -- this only controls which version's decisions are
+// allowed to actually reach execution, so switching is instant and never
+// loses data: the version you switch away from just keeps quietly
+// accumulating comparison data in the background.
+export async function setActiveStrategyVersion(version: StrategyVersion): Promise<SystemState> {
+  await getSystemState();
+  return prisma.systemState.update({ where: { id: 1 }, data: { activeStrategyVersion: version } });
 }

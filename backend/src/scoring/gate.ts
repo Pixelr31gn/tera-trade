@@ -14,7 +14,7 @@ import { getSettings } from "../core/config.js";
 import type { TradingSession } from "../analytics/session.js";
 import { LONG_TARGET_POINTS, MIN_LONG_TARGET_SAMPLE_SIZE, MIN_LONG_TARGET_WIN_RATE } from "../engine/fixedTargetEdgeCache.js";
 import type { SetupFeatures } from "./features.js";
-import { scoreSetup, type FactorContribution } from "./ruleScorer.js";
+import { scoreSetup, type FactorContribution, type StrategyVersion } from "./ruleScorer.js";
 import { MLScorer } from "./training.js";
 
 export interface GatedScore {
@@ -36,11 +36,11 @@ function getMlScorer(session: TradingSession): MLScorer | null {
   return scorer;
 }
 
-export function evaluateSetup(features: SetupFeatures): GatedScore {
+export function evaluateSetup(features: SetupFeatures, version: StrategyVersion = "v1"): GatedScore {
   const settings = getSettings();
   const mlScorer = getMlScorer(features.session);
 
-  const ruleResult = scoreSetup(features);
+  const ruleResult = scoreSetup(features, version);
   const probability = mlScorer ? mlScorer.scoreProbability(features) : ruleResult.probability;
   const modelUsed: "rule_v1" | "ml_v1" = mlScorer ? "ml_v1" : "rule_v1";
 

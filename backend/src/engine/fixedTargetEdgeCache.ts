@@ -38,8 +38,17 @@ async function loadBarsAfter(symbol: string, after: Date, limit: number): Promis
 }
 
 async function computeFixedTargetEdge(symbol: string, session: TradingSession, side: "long" | "short"): Promise<FixedTargetEdgeStats> {
+  // A symbol outside the static instrument list (e.g. a synthetic test
+  // fixture) has no known tick size to compute a stop plan against --
+  // report "no evidence yet" rather than crashing the whole engine loop.
+  let instrument;
+  try {
+    instrument = getInstrument(symbol);
+  } catch {
+    return summarizeFixedTargetOutcomes([]);
+  }
+
   const scores = await prisma.score.findMany({ where: { symbol, session, side } });
-  const instrument = getInstrument(symbol);
 
   const labels: OutcomeLabel[] = [];
   for (const score of scores) {

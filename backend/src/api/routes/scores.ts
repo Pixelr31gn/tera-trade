@@ -7,6 +7,7 @@ import { computeTradePlan } from "../../risk/index.js";
 import { DEFAULT_INSTRUMENTS, getInstrument } from "../../marketData/instruments.js";
 import { computeAccountEquity } from "../../engine/accounting.js";
 import { ensureDefaultAccount } from "../../engine/bootstrap.js";
+import { getSystemState } from "../../execution/mode.js";
 import type { Score, RiskLimit } from "@prisma/client";
 
 // Every score row carries the hypothetical entry/ATR/structure-swing it was
@@ -73,6 +74,7 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
       decision: s.decision,
       explanation: s.explanation,
       tradeId: s.tradeId,
+      strategyVersion: s.strategyVersion,
       ...buildTradePlan(s, riskLimits, equity),
     }));
   });
@@ -82,13 +84,17 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
   // skipped if there's already an open position in that symbol. This is
   // meant to be read as "you should place this trade," distinct from the
   // full /api/recommendations history table which includes everything
-  // taken *and* skipped.
+  // taken *and* skipped. Restricted to the ACTIVE strategy version only --
+  // the shadow (inactive) version's "taken" setups never actually execute,
+  // so surfacing them here would suggest a manual trade the real active
+  // strategy wouldn't have taken.
   app.get("/api/recommendations/actionable", async () => {
     const now = new Date();
+    const systemState = await getSystemState();
     const openSymbols = new Set((await prisma.trade.findMany({ where: { status: "open" }, select: { symbol: true } })).map((t) => t.symbol));
 
     const candidates = await prisma.score.findMany({
-      where: { decision: "taken", acknowledged: false },
+      where: { decision: "taken", acknowledged: false, strategyVersion: systemState.activeStrategyVersion },
       orderBy: { time: "desc" },
     });
 
@@ -111,6 +117,7 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
       probability: s.probability,
       explanation: s.explanation,
       actionability: computeActionability(s.time, now),
+      strategyVersion: s.strategyVersion,
       ...buildTradePlan(s, riskLimits, equity),
     }));
   });

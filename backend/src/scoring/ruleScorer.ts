@@ -1,21 +1,34 @@
 /**
- * v1 trade-scoring model: a documented, weighted rule-based scorer.
+ * Rule-based trade-scoring models: documented, weighted heuristics, not a
+ * black box. Every factor's contribution is returned alongside the score so
+ * the explanation engine can say *why* a setup scored the way it did.
  *
- * There is no trade history to train a real model on yet, so Tera Trade
- * ships with a transparent heuristic instead of a black box. Every factor's
- * contribution is returned alongside the score so the explanation engine can
- * say *why* a setup scored the way it did. Once `trades` has enough labeled
- * rows, scoring/training.ts can fit a calibrated model that supersedes this
- * scorer without changing anything downstream (both implement the same
- * `score(features) -> ScoreResult` contract).
+ * Two versions run in parallel on every signal (shadow scoring, see
+ * engine/loop.ts) so their performance stays directly comparable over the
+ * exact same market conditions -- only SystemState.activeStrategyVersion
+ * controls which one's decisions actually reach execution.
+ *
+ * - v1: the original scorer. Trend/momentum/volatility/news/historical-edge/
+ *   opening-range factors. Left unchanged as the baseline to compare against.
+ * - v2: v1 plus two new factors -- marketStructureEdge and liquidityEdge --
+ *   added after `/api/analytics/session-performance` showed real, sizable
+ *   win-rate gaps by marketStructureLabel and liquidityLabel that v1 never
+ *   used at all despite collecting them on every row. Directionally set from
+ *   the observed gaps (e.g. "ranging" structure was the worst-performing,
+ *   highest-volume bucket in both sessions; "high" liquidity meaningfully
+ *   outperformed "normal"/"low"), not a fitted regression -- same
+ *   hand-set-prior philosophy as the rest of this scorer, just informed by
+ *   real data instead of a starting guess.
  */
 import type { SetupFeatures } from "./features.js";
+
+export type StrategyVersion = "v1" | "v2";
 
 // Weights are hand-set, documented priors -- not fit to data. Magnitudes
 // reflect how strongly each factor should move the pre-threshold
 // probability; news risk dominates deliberately (never assume a clean setup
 // outweighs event risk).
-const WEIGHTS = {
+const WEIGHTS_V1 = {
   trendAlignment: 1.1,
   dailyTrendAlignment: 1.8,
   momentumAlignment: 0.8,
@@ -26,6 +39,12 @@ const WEIGHTS = {
   newsRisk: 1.6,
   historicalEdge: 0.9,
   openingRangeEdge: 0.7,
+};
+
+const WEIGHTS_V2 = {
+  ...WEIGHTS_V1,
+  marketStructureEdge: 1.3,
+  liquidityEdge: 0.7,
 };
 
 const BASE_LOGIT = -0.2; // slight negative prior so an empty/neutral setup scores below 0.5
@@ -50,9 +69,10 @@ function clip(x: number, lo = -1, hi = 1): number {
   return Math.max(lo, Math.min(hi, x));
 }
 
-export function scoreSetup(features: SetupFeatures): ScoreResult {
+export function scoreSetup(features: SetupFeatures, version: StrategyVersion = "v1"): ScoreResult {
   const direction = features.side === "long" ? 1 : -1;
   const factors: FactorContribution[] = [];
+  const weights = version === "v2" ? WEIGHTS_V2 : WEIGHTS_V1;
   let logit = BASE_LOGIT;
 
   // 1. Trend alignment
@@ -69,7 +89,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
       raw = -1.0;
       desc = `setup direction fights the prevailing ${features.trendLabel} trend`;
     }
-    const contribution = WEIGHTS.trendAlignment * raw;
+    const contribution = weights.trendAlignment * raw;
     logit += contribution;
     factors.push({ name: "trendAlignment", contribution, description: desc });
   }
@@ -94,7 +114,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
       raw = -clip(0.6 + features.dailyTrendConfidence);
       desc = `fights the daily ${features.dailyTrendLabel} trend (${(features.dailyTrendConfidence * 100).toFixed(0)}% confidence)`;
     }
-    const contribution = WEIGHTS.dailyTrendAlignment * raw;
+    const contribution = weights.dailyTrendAlignment * raw;
     logit += contribution;
     factors.push({ name: "dailyTrendAlignment", contribution, description: desc });
   }
@@ -103,7 +123,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
   if (features.momentum10 !== null) {
     const raw = clip(direction * features.momentum10 * 20);
     const desc = raw > 0 ? "recent momentum supports the setup" : "recent momentum opposes the setup";
-    const contribution = WEIGHTS.momentumAlignment * raw;
+    const contribution = weights.momentumAlignment * raw;
     logit += contribution;
     factors.push({ name: "momentumAlignment", contribution, description: desc });
   }
@@ -113,7 +133,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
     const aligned = (features.trendLabel === "up") === (direction === 1);
     const raw = aligned ? clip((features.adx - 20) / 30) : 0;
     if (raw) {
-      const contribution = WEIGHTS.adxStrength * raw;
+      const contribution = weights.adxStrength * raw;
       logit += contribution;
       factors.push({ name: "adxStrength", contribution, description: `ADX=${features.adx.toFixed(1)} confirms trend strength` });
     }
@@ -133,7 +153,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
       raw = 0.0;
       desc = "volatility regime is normal";
     }
-    const contribution = WEIGHTS.volatilityRegime * raw;
+    const contribution = weights.volatilityRegime * raw;
     logit += contribution;
     factors.push({ name: "volatilityRegime", contribution, description: desc });
   }
@@ -143,7 +163,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
     const momentumAligned = direction * (features.momentum10 ?? 0) >= 0;
     const raw = momentumAligned ? clip(features.volumeZscore / 2) : 0;
     if (raw) {
-      const contribution = WEIGHTS.volumeConfirmation * raw;
+      const contribution = weights.volumeConfirmation * raw;
       logit += contribution;
       factors.push({ name: "volumeConfirmation", contribution, description: "above-average volume confirms the move" });
     }
@@ -155,7 +175,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
     const desc = features.isRthSession
       ? "regular trading hours favor liquidity and tighter spreads"
       : "outside regular trading hours, liquidity is thinner";
-    const contribution = WEIGHTS.session * raw;
+    const contribution = weights.session * raw;
     logit += contribution;
     factors.push({ name: "session", contribution, description: desc });
   }
@@ -167,7 +187,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
       proximity = clip(1 - Math.abs(features.newsMinutesToEvent) / 30, 0, 1) + 0.3;
     }
     const raw = -clip(proximity);
-    const contribution = WEIGHTS.newsRisk * raw;
+    const contribution = weights.newsRisk * raw;
     logit += contribution;
     factors.push({ name: "newsRisk", contribution, description: "a high-impact news event is imminent or just released" });
   }
@@ -175,7 +195,7 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
   // 9. Strategy's own historical edge, if we have enough trades to know it
   if (features.strategyHistoricalWinRate !== null) {
     const raw = clip((features.strategyHistoricalWinRate - 0.5) * 2);
-    const contribution = WEIGHTS.historicalEdge * raw;
+    const contribution = weights.historicalEdge * raw;
     logit += contribution;
     factors.push({
       name: "historicalEdge",
@@ -190,13 +210,72 @@ export function scoreSetup(features: SetupFeatures): ScoreResult {
   // until there's enough sessions behind it to be more signal than noise.
   if (features.openingRangeBreakoutProbability !== null && features.openingRangeSampleSize >= MIN_OPENING_RANGE_SAMPLE_SIZE) {
     const raw = clip((features.openingRangeBreakoutProbability - 0.5) * 2);
-    const contribution = WEIGHTS.openingRangeEdge * raw;
+    const contribution = weights.openingRangeEdge * raw;
     logit += contribution;
     factors.push({
       name: "openingRangeEdge",
       contribution,
       description: `the first-hour range has broken in this direction ${(features.openingRangeBreakoutProbability * 100).toFixed(0)}% of the last ${features.openingRangeSampleSize} sessions`,
     });
+  }
+
+  if (version === "v2") {
+    // 11. Market structure edge -- session-performance data showed "ranging"
+    // structure was the worst-performing bucket in both New York (13.5% win
+    // rate) and Asian (19.8%) sessions, while also being the highest-volume
+    // bucket by far (~80% of all setups) -- v1 never penalized this beyond
+    // the much coarser, intraday-only trendLabel factor above.
+    {
+      let raw: number;
+      let desc: string;
+      switch (features.marketStructureLabel) {
+        case "ranging":
+          raw = -0.9;
+          desc = "market structure is ranging -- the weakest-performing structure bucket historically";
+          break;
+        case "strong_uptrend":
+        case "strong_downtrend": {
+          const alignedStrong =
+            (features.marketStructureLabel === "strong_uptrend" && direction === 1) ||
+            (features.marketStructureLabel === "strong_downtrend" && direction === -1);
+          raw = alignedStrong ? 0.6 : -0.6;
+          desc = alignedStrong ? `market structure (${features.marketStructureLabel}) agrees with the setup` : `market structure (${features.marketStructureLabel}) opposes the setup`;
+          break;
+        }
+        default: {
+          // weak_uptrend / weak_downtrend
+          const alignedWeak =
+            (features.marketStructureLabel === "weak_uptrend" && direction === 1) ||
+            (features.marketStructureLabel === "weak_downtrend" && direction === -1);
+          raw = alignedWeak ? 0.3 : -0.3;
+          desc = alignedWeak ? `market structure (${features.marketStructureLabel}) agrees with the setup` : `market structure (${features.marketStructureLabel}) opposes the setup`;
+        }
+      }
+      const contribution = WEIGHTS_V2.marketStructureEdge * raw;
+      logit += contribution;
+      factors.push({ name: "marketStructureEdge", contribution, description: desc });
+    }
+
+    // 12. Liquidity edge -- "high" liquidity outperformed "normal"/"low" by a
+    // wide margin in both sessions (NY: 27.6% vs 14.7%; Asian: 29.3% vs
+    // 20.6%) -- a dimension v1 collected but never scored on at all.
+    {
+      let raw: number;
+      let desc: string;
+      if (features.liquidityLabel === "high") {
+        raw = 0.6;
+        desc = "high liquidity has historically outperformed in this session";
+      } else if (features.liquidityLabel === "low") {
+        raw = -0.2;
+        desc = "low liquidity, thinner participation";
+      } else {
+        raw = -0.1;
+        desc = "normal liquidity";
+      }
+      const contribution = WEIGHTS_V2.liquidityEdge * raw;
+      logit += contribution;
+      factors.push({ name: "liquidityEdge", contribution, description: desc });
+    }
   }
 
   const probability = 1 / (1 + Math.exp(-logit));

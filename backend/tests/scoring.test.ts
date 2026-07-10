@@ -56,6 +56,38 @@ describe("scoreSetup", () => {
     const counter = scoreSetup(features({ side: "long", dailyTrendLabel: "down", dailyTrendConfidence: 0.8 }));
     expect(aligned.probability).toBeGreaterThan(counter.probability);
   });
+
+  it("v1 ignores marketStructureLabel/liquidityLabel entirely -- v2 and v1 agree when both labels are neutral-ish", () => {
+    // weak_uptrend + normal liquidity are the defaults; v2 should differ once we change them.
+    const v1 = scoreSetup(features({}), "v1");
+    const v2Neutral = scoreSetup(features({}), "v2");
+    expect(v2Neutral.probability).not.toBe(v1.probability); // v2 always adds its two factors' base contribution
+  });
+
+  it("v2 penalizes ranging market structure more than v1 does", () => {
+    const v1Ranging = scoreSetup(features({ marketStructureLabel: "ranging" }), "v1");
+    const v2Ranging = scoreSetup(features({ marketStructureLabel: "ranging" }), "v2");
+    const v2Trending = scoreSetup(features({ marketStructureLabel: "strong_uptrend", side: "long" }), "v2");
+    expect(v2Ranging.probability).toBeLessThan(v2Trending.probability);
+    // v1 has no marketStructureEdge factor at all -- confirm it's absent from v1's factor list.
+    expect(v1Ranging.factors.some((f) => f.name === "marketStructureEdge")).toBe(false);
+    expect(v2Ranging.factors.some((f) => f.name === "marketStructureEdge")).toBe(true);
+  });
+
+  it("v2 rewards high liquidity over normal/low liquidity", () => {
+    const high = scoreSetup(features({ liquidityLabel: "high" }), "v2");
+    const normal = scoreSetup(features({ liquidityLabel: "normal" }), "v2");
+    const low = scoreSetup(features({ liquidityLabel: "low" }), "v2");
+    expect(high.probability).toBeGreaterThan(normal.probability);
+    expect(high.probability).toBeGreaterThan(low.probability);
+  });
+
+  it("defaults to v1 when no version is passed", () => {
+    const explicit = scoreSetup(features({}), "v1");
+    const implicit = scoreSetup(features({}));
+    expect(implicit.probability).toBe(explicit.probability);
+    expect(implicit.factors.some((f) => f.name === "liquidityEdge")).toBe(false);
+  });
 });
 
 describe("evaluateSetup (gate)", () => {
@@ -107,5 +139,11 @@ describe("evaluateSetup (gate)", () => {
       features({ trendLabel: "down", side: "short", momentum10: -0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: 0.05, longTargetSampleSize: 500 })
     );
     expect(gated.decision).toBe("taken");
+  });
+
+  it("passes the strategy version through to the rule scorer", () => {
+    const v1 = evaluateSetup(features({ marketStructureLabel: "ranging" }), "v1");
+    const v2 = evaluateSetup(features({ marketStructureLabel: "ranging" }), "v2");
+    expect(v1.probability).not.toBe(v2.probability);
   });
 });

@@ -26,9 +26,12 @@ import { classifyRegime } from "../regime/classifier.js";
 import { atr as computeAtr, type OhlcBar } from "../regime/indicators.js";
 import { computeInitialStop, RiskEngine, type RiskLimitsConfig } from "../risk/index.js";
 import { buildSetupFeatures } from "../scoring/features.js";
-import { evaluateSetup } from "../scoring/gate.js";
+import { evaluateSetup, type GatedScore } from "../scoring/gate.js";
+import type { StrategyVersion } from "../scoring/ruleScorer.js";
 import { ALL_STRATEGIES } from "../strategy/index.js";
 import type { Account } from "@prisma/client";
+
+const STRATEGY_VERSIONS: StrategyVersion[] = ["v1", "v2"];
 
 const logger = childLogger("engineLoop");
 
@@ -57,13 +60,14 @@ export class TradingEngine {
     const account = await ensureDefaultAccount();
     const systemState = await getSystemState();
     const mode = systemState.mode as TradingMode;
+    const activeVersion = systemState.activeStrategyVersion as StrategyVersion;
 
     await this.manageOpenTrades(account, symbol, barTime, h, l, c);
 
     if (systemState.killSwitch) {
       await this.emit({ type: "kill_switch_active", reason: systemState.killSwitchReason });
     } else {
-      await this.evaluateNewSignals(account, mode, symbol, barTime, c);
+      await this.evaluateNewSignals(account, mode, activeVersion, symbol, barTime, c);
     }
 
     const equity = await computeAccountEquity(account, new Map([[symbol, c]]));
@@ -128,7 +132,7 @@ export class TradingEngine {
     await this.emit({ type: "trade_closed", tradeId: trade.id, symbol: trade.symbol, pnl: pnl.toString(), explanation });
   }
 
-  private async evaluateNewSignals(account: Account, mode: TradingMode, symbol: string, barTime: Date, closePrice: Decimal): Promise<void> {
+  private async evaluateNewSignals(account: Account, mode: TradingMode, activeVersion: StrategyVersion, symbol: string, barTime: Date, closePrice: Decimal): Promise<void> {
     const bars: OhlcBar[] = await loadRecentBars(symbol, 300);
     if (bars.length < MIN_BARS_FOR_REGIME) return;
 
@@ -169,14 +173,12 @@ export class TradingEngine {
         dailyTrend.trendLabel, dailyTrend.confidence,
         longTargetEdge?.winRate ?? null, longTargetEdge?.sampleSize ?? 0
       );
-      const gated = evaluateSetup(features);
-      const explanation = explainScore(symbol, signal.side, gated, settings.minScoreThreshold);
 
-      // ATR/instrument/stop-plan are computed for *every* signal, taken or
-      // skipped -- a skipped setup still needs a hypothetical entry/stop/ATR
-      // on record so the outcome evaluator can retrospectively simulate what
-      // would have happened (see engine/outcomeEvaluator.ts). Without this,
-      // only "taken" trades would ever get a labeled outcome.
+      // ATR/instrument/stop-plan are version-independent (same underlying
+      // market data) and computed once for *every* signal, taken or skipped --
+      // a skipped setup still needs a hypothetical entry/stop/ATR on record so
+      // the outcome evaluator can retrospectively simulate what would have
+      // happened (see engine/outcomeEvaluator.ts).
       const instrument = getInstrument(symbol);
       const atrSeries = computeAtr(bars).filter((v) => !Number.isNaN(v));
       if (atrSeries.length === 0) continue;
@@ -186,21 +188,36 @@ export class TradingEngine {
         ? hypotheticalStopPlan.takeProfitPrice.minus(closePrice).abs().dividedBy(hypotheticalStopPlan.stopDistancePoints).toNumber()
         : null;
 
-      await prisma.score.create({
-        data: {
-          time: barTime, symbol, strategyId: signal.strategyId, side: signal.side,
-          probability: gated.probability.toString(), decision: gated.decision,
-          features: JSON.parse(JSON.stringify(features)), explanation,
-          session: features.session,
-          entryPriceAtSignal: closePrice.toString(),
-          structureSwingPriceAtSignal: signal.structureSwingPrice.toString(),
-          atrAtSignal: atrValue.toString(),
-          riskRewardRatio: riskRewardRatio?.toString(),
-        },
-      });
-      await this.emit({ type: "score", symbol, side: signal.side, probability: gated.probability, decision: gated.decision, explanation });
+      // Shadow-score every signal under both strategy versions in parallel --
+      // same features, same bar, same market conditions -- so their
+      // hypothetical performance stays directly comparable. Only the row
+      // matching the account's active version can ever reach execution.
+      const gatedByVersion = new Map<StrategyVersion, GatedScore>();
+      let activeScoreId: number | null = null;
+      for (const version of STRATEGY_VERSIONS) {
+        const gated = evaluateSetup(features, version);
+        const explanation = explainScore(symbol, signal.side, gated, settings.minScoreThreshold);
+        gatedByVersion.set(version, gated);
 
-      if (gated.decision !== "taken") continue;
+        const scoreRow = await prisma.score.create({
+          data: {
+            time: barTime, symbol, strategyId: signal.strategyId, side: signal.side,
+            probability: gated.probability.toString(), decision: gated.decision,
+            features: JSON.parse(JSON.stringify(features)), explanation,
+            session: features.session,
+            strategyVersion: version,
+            entryPriceAtSignal: closePrice.toString(),
+            structureSwingPriceAtSignal: signal.structureSwingPrice.toString(),
+            atrAtSignal: atrValue.toString(),
+            riskRewardRatio: riskRewardRatio?.toString(),
+          },
+        });
+        if (version === activeVersion) activeScoreId = scoreRow.id;
+        await this.emit({ type: "score", symbol, side: signal.side, strategyVersion: version, probability: gated.probability, decision: gated.decision, explanation });
+      }
+
+      const activeGated = gatedByVersion.get(activeVersion)!;
+      if (activeGated.decision !== "taken") continue;
 
       const riskLimitsRow = await prisma.riskLimit.findUniqueOrThrow({ where: { accountId: account.id } });
       const limits: RiskLimitsConfig = {
@@ -236,10 +253,11 @@ export class TradingEngine {
         continue;
       }
 
+      const activeExplanation = explainScore(symbol, signal.side, activeGated, settings.minScoreThreshold);
       const brokerAccountId = (await this.broker.getAccounts())[0]!.accountId;
       const result = await executeIfApproved(
-        this.broker, mode, account.id, brokerAccountId, signal, gated, assessment,
-        closePrice, regime.trendLabel, regime.volLabel, explanation, barTime
+        this.broker, mode, account.id, brokerAccountId, signal, activeGated, assessment,
+        closePrice, regime.trendLabel, regime.volLabel, activeExplanation, barTime, activeScoreId
       );
       await this.emit({ type: "execution", symbol, executed: result.executed, reason: result.reason, tradeId: result.tradeId });
       return; // one new position per symbol per bar

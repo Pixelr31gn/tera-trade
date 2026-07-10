@@ -31,6 +31,23 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
     }
     return results;
   });
+
+  // v1 vs v2 side-by-side, per session -- both versions are shadow-scored on
+  // every signal (see engine/loop.ts), so this is a true apples-to-apples
+  // comparison over the exact same market conditions, not two different time
+  // periods. Used to decide when/whether to actually switch the active version.
+  app.get("/api/analytics/strategy-comparison", async () => {
+    const sessions: TradingSession[] = [TradingSession.NEW_YORK, TradingSession.LONDON, TradingSession.ASIAN];
+    const versions = ["v1", "v2"] as const;
+    const results: Record<string, Record<string, Awaited<ReturnType<typeof computeSessionPerformance>>>> = {};
+    for (const version of versions) {
+      results[version] = {};
+      for (const session of sessions) {
+        results[version]![session] = await computeSessionPerformance(session, version);
+      }
+    }
+    return results;
+  });
 }
 
 const POSITIVE_OUTCOME_LABELS = new Set(["executed_win", "missed_win"]);
@@ -62,9 +79,9 @@ function labelBreakdown(rows: { label: string; outcomeLabel: string | null; rMul
   );
 }
 
-async function computeSessionPerformance(session: TradingSession) {
+async function computeSessionPerformance(session: TradingSession, strategyVersion?: "v1" | "v2") {
   const rows = await prisma.score.findMany({
-    where: { session },
+    where: { session, ...(strategyVersion ? { strategyVersion } : {}) },
     select: { outcomeLabel: true, outcomeRMultiple: true, features: true },
   });
 

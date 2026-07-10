@@ -48,6 +48,16 @@ describe.skipIf(!hasRealDb)("engine integration", () => {
     const scores = await prisma.score.findMany({ where: { symbol } });
     expect(scores.length).toBeGreaterThanOrEqual(1);
 
+    // Every signal is shadow-scored under both strategy versions (see
+    // engine/loop.ts) -- confirm both actually land in the DB with distinct
+    // rows, not just one version silently winning or the second insert
+    // failing against the (time, symbol, strategyId, strategyVersion) unique
+    // constraint.
+    const versions = new Set(scores.map((s) => s.strategyVersion));
+    expect(versions.has("v1")).toBe(true);
+    expect(versions.has("v2")).toBe(true);
+    expect(scores.length % 2).toBe(0); // exactly one v1 + one v2 per signal
+
     // cleanup
     await prisma.score.deleteMany({ where: { symbol } });
     await prisma.trade.deleteMany({ where: { symbol } });

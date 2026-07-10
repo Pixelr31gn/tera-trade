@@ -4,6 +4,7 @@ export interface SystemState {
   killSwitchReason: string | null;
   brokerKind: string;
   minScoreThreshold: number;
+  activeStrategyVersion: "v1" | "v2";
   updatedAt: string;
 }
 
@@ -42,6 +43,7 @@ export interface RecommendationScore {
   decision: string;
   explanation: string;
   tradeId: number | null;
+  strategyVersion: "v1" | "v2";
   entryPrice: number;
   stopPrice: number;
   takeProfitPrice: number;
@@ -57,6 +59,7 @@ export interface ActionableRecommendation {
   probability: number;
   explanation: string;
   actionability: "fresh" | "stale";
+  strategyVersion: "v1" | "v2";
   entryPrice: number;
   stopPrice: number;
   takeProfitPrice: number;
@@ -152,6 +155,8 @@ export interface SessionPerformance {
   byLiquidity: Record<string, SessionLabelBreakdown>;
   byPriceAction: Record<string, SessionLabelBreakdown>;
 }
+
+export type StrategyComparison = Record<"v1" | "v2", Record<string, SessionPerformance>>;
 
 export interface MaStack {
   maFast: number | null;

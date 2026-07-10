@@ -117,6 +117,12 @@ model SystemState {
   killSwitchReason String?  @map("kill_switch_reason")
   updatedAt        DateTime @default(now()) @updatedAt @map("updated_at")
 
+  /// Which scoring strategy version (see scoring/ruleScorer.ts) actually
+  /// executes trades. Both versions are scored on every signal regardless
+  /// (see engine/loop.ts) so their hypothetical performance stays directly
+  /// comparable -- this only controls which one is allowed to place real orders.
+  activeStrategyVersion String @default("v1") @map("active_strategy_version")
+
   @@map("system_state")
 }
 
@@ -184,12 +190,20 @@ model Score {
   outcomeRMultiple   Decimal?  @map("outcome_r_multiple") @db.Decimal(8, 3)
   outcomeEvaluatedAt DateTime? @map("outcome_evaluated_at")
 
+  /// Which scoring strategy version produced this row -- "v1" | "v2". Both
+  /// versions are scored on every signal in parallel (shadow scoring, see
+  /// engine/loop.ts) so their outcomes stay directly comparable over the
+  /// exact same market conditions; only one version's rows ever reach real
+  /// execution (see SystemState.activeStrategyVersion).
+  strategyVersion String @default("v1") @map("strategy_version")
+
   trade Trade? @relation(fields: [tradeId], references: [id])
 
-  @@unique([time, symbol, strategyId])
+  @@unique([time, symbol, strategyId, strategyVersion])
   @@index([symbol, time])
   @@index([decision, acknowledged, time])
   @@index([session, outcomeLabel])
+  @@index([strategyVersion, session, outcomeLabel])
   @@map("scores")
 }
 

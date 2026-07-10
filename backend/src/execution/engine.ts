@@ -37,7 +37,8 @@ export async function executeIfApproved(
   regimeTrend: string,
   regimeVol: string,
   explanation: string,
-  entryTime: Date = new Date()
+  entryTime: Date = new Date(),
+  scoreId: number | null = null
 ): Promise<ExecutionResult> {
   if (gated.decision !== "taken") {
     return { executed: false, tradeId: null, reason: "setup did not clear the scoring threshold" };
@@ -106,6 +107,14 @@ export async function executeIfApproved(
       filledPrice: fillPrice.toString(),
     },
   });
+
+  // Links the Score row back to the Trade it produced, so the outcome
+  // evaluator (engine/outcomeEvaluator.ts) labels it from the trade's real
+  // fill/exit/PnL instead of falling back to the same retrospective
+  // simulation used for setups that were never actually taken.
+  if (scoreId !== null) {
+    await prisma.score.update({ where: { id: scoreId }, data: { tradeId: trade.id } });
+  }
 
   logger.info({ tradeId: trade.id, symbol: signal.symbol, side: signal.side, quantity: assessment.quantity }, "trade_opened");
   return { executed: true, tradeId: trade.id, reason: "order placed" };

@@ -138,8 +138,11 @@ function trainLogisticRegression(X: number[][], y: number[], opts: { epochs?: nu
 }
 
 async function trainModelForSession(session: TradingSession): Promise<TrainingReport> {
+  // strategyVersion: "v1" only -- v1 and v2 shadow-score the exact same
+  // signal (identical features/entry/outcome, see engine/loop.ts), so
+  // including both would just train on the same examples twice.
   const rows = await prisma.score.findMany({
-    where: { session, outcomeLabel: { in: [...POSITIVE_OUTCOME_LABELS, ...NEGATIVE_OUTCOME_LABELS] } },
+    where: { session, strategyVersion: "v1", outcomeLabel: { in: [...POSITIVE_OUTCOME_LABELS, ...NEGATIVE_OUTCOME_LABELS] } },
   });
 
   if (rows.length < MIN_TRAINING_ROWS_PER_SESSION) {

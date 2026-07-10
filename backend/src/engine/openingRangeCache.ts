@@ -21,11 +21,28 @@ async function loadWideBarHistory(symbol: string): Promise<OhlcBar[]> {
   return rows.map((r) => ({ time: r.time, open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close), volume: Number(r.volume) }));
 }
 
+const EMPTY_STATS_TEMPLATE: Omit<OpeningRangeStats, "symbol"> = {
+  sessionsAnalyzed: 0,
+  probHighBroken: null,
+  probLowBroken: null,
+  probBothBroken: null,
+  probNeitherBroken: null,
+};
+
 export async function getOpeningRangeStats(symbol: string): Promise<OpeningRangeStats> {
   const cached = cache.get(symbol);
   if (cached && Date.now() - cached.computedAt < CACHE_TTL_MS) return cached.stats;
 
-  const instrument = getInstrument(symbol);
+  // A symbol outside the static instrument list (e.g. a synthetic test
+  // fixture) has no rthOpen hours to analyze against -- report "not enough
+  // data" rather than crashing the whole engine loop over one stat.
+  let instrument;
+  try {
+    instrument = getInstrument(symbol);
+  } catch {
+    return { symbol, ...EMPTY_STATS_TEMPLATE };
+  }
+
   const bars = await loadWideBarHistory(symbol);
   const stats = computeOpeningRangeStats(bars, symbol, instrument.rthOpenHourET, instrument.rthOpenMinuteET);
 
