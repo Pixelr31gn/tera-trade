@@ -21,9 +21,13 @@ describe("computePositionSize", () => {
     expect(result.reason).toContain("no stop distance");
   });
 
-  it("sizes to zero when the risk budget is too small for the stop distance", () => {
+  it("still sizes to 1 contract (never 0) when the risk budget doesn't fully cover the stop distance", () => {
+    // $5 budget, 100pt stop, $50/point -> $5000/contract risk, far above the
+    // nominal budget -- must still take 1 contract rather than skip a valid,
+    // structure-validated setup entirely.
     const result = computePositionSize(new Decimal(5), new Decimal(100), new Decimal(50), 10);
-    expect(result.quantity).toBe(0);
+    expect(result.quantity).toBe(1);
+    expect(result.reason).toContain("doesn't fully cover");
   });
 
   it("sizes correctly for a fixed-dollar risk budget (e.g. $50 risk per trade)", () => {

@@ -1,5 +1,5 @@
 /**
- * Multi-timeframe trend direction (8/20/200-day MA stack) plus Fibonacci
+ * Multi-timeframe trend direction (9/50/200-day MA stack) plus Fibonacci
  * retracement/extension levels from the most recent daily swing -- a manual
  * decision-support reference for where to place a stop-loss/take-profit on
  * a live trade (see components/QuickOrderPanel.tsx), not an automated

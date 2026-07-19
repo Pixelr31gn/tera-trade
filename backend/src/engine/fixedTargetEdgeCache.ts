@@ -29,6 +29,14 @@ export const MIN_LONG_TARGET_WIN_RATE = 0.67;
 const CACHE_TTL_MS = 60 * 60 * 1000; // this stat moves slowly -- no need to recompute every tick
 const MAX_BARS_TO_WALK = 500;
 const MIN_BARS_TO_JUDGE = 50;
+// The scores query below used to be unbounded, and each matching row fires
+// its own separate loadBarsAfter query -- a classic N+1: with the Score
+// table now carrying v1/v2/v3 shadow-scoring (3x the rows) plus the
+// continuous scan, a single (symbol, session, side) bucket could match
+// thousands of rows, each triggering its own round-trip. Capped to the most
+// recent 300 -- already a generous sample for an empirical win rate, well
+// above MIN_LONG_TARGET_SAMPLE_SIZE (30).
+const MAX_SCORES_TO_EVALUATE = 300;
 
 const cache = new Map<string, { stats: FixedTargetEdgeStats; computedAt: number }>();
 
@@ -48,21 +56,33 @@ async function computeFixedTargetEdge(symbol: string, session: TradingSession, s
     return summarizeFixedTargetOutcomes([]);
   }
 
-  const scores = await prisma.score.findMany({ where: { symbol, session, side } });
+  const scores = await prisma.score.findMany({ where: { symbol, session, side }, orderBy: { time: "desc" }, take: MAX_SCORES_TO_EVALUATE });
 
+  // Still fundamentally one loadBarsAfter query per score (each needs a
+  // different bar window), but run with bounded concurrency instead of one
+  // at a time -- measured at 24s sequential for ~230 scores; the earlier
+  // parallelize-everything attempt elsewhere this session caused Neon pool
+  // contention when many *different* endpoints fired dozens of concurrent
+  // queries each, so this caps concurrency rather than firing all 300 at once.
+  const CONCURRENCY = 15;
   const labels: OutcomeLabel[] = [];
-  for (const score of scores) {
-    const bars = await loadBarsAfter(symbol, score.time, MAX_BARS_TO_WALK);
-    if (bars.length < MIN_BARS_TO_JUDGE) continue;
+  for (let i = 0; i < scores.length; i += CONCURRENCY) {
+    const batch = scores.slice(i, i + CONCURRENCY);
+    const batchOutcomes = await Promise.all(
+      batch.map(async (score) => {
+        const bars = await loadBarsAfter(symbol, score.time, MAX_BARS_TO_WALK);
+        if (bars.length < MIN_BARS_TO_JUDGE) return null;
 
-    const entryPrice = new Decimal(score.entryPriceAtSignal.toString());
-    const atrValue = new Decimal(score.atrAtSignal.toString());
-    const structureSwingPrice = score.structureSwingPriceAtSignal ? new Decimal(score.structureSwingPriceAtSignal.toString()) : null;
-    const stopPlan = computeInitialStop(entryPrice, side, atrValue, structureSwingPrice, { tickSize: instrument.tickSize });
-    const targetPrice = side === "long" ? entryPrice.plus(LONG_TARGET_POINTS) : entryPrice.minus(LONG_TARGET_POINTS);
+        const entryPrice = new Decimal(score.entryPriceAtSignal.toString());
+        const atrValue = new Decimal(score.atrAtSignal.toString());
+        const structureSwingPrice = score.structureSwingPriceAtSignal ? new Decimal(score.structureSwingPriceAtSignal.toString()) : null;
+        const stopPlan = computeInitialStop(entryPrice, side, atrValue, structureSwingPrice, { tickSize: instrument.tickSize });
+        const targetPrice = side === "long" ? entryPrice.plus(LONG_TARGET_POINTS) : entryPrice.minus(LONG_TARGET_POINTS);
 
-    const outcome = evaluateHypotheticalOutcome(side, entryPrice.toNumber(), stopPlan.stopPrice.toNumber(), targetPrice.toNumber(), bars);
-    labels.push(outcome.label);
+        return evaluateHypotheticalOutcome(side, entryPrice.toNumber(), stopPlan.stopPrice.toNumber(), targetPrice.toNumber(), bars).label;
+      })
+    );
+    for (const label of batchOutcomes) if (label !== null) labels.push(label);
   }
 
   return summarizeFixedTargetOutcomes(labels);

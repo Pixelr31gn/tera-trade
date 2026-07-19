@@ -37,6 +37,7 @@ export class TrendFollowingStrategy implements Strategy {
         symbol,
         side: "long",
         structureSwingPrice: new Decimal(Math.min(...swingWindow.map((b) => b.low))),
+        signalKind: "reversal",
         reason: `${FAST}-EMA crossed above the ${SLOW}-EMA, signaling a new up-trend`,
       };
     }
@@ -46,6 +47,7 @@ export class TrendFollowingStrategy implements Strategy {
         symbol,
         side: "short",
         structureSwingPrice: new Decimal(Math.max(...swingWindow.map((b) => b.high))),
+        signalKind: "reversal",
         reason: `${FAST}-EMA crossed below the ${SLOW}-EMA, signaling a new down-trend`,
       };
     }

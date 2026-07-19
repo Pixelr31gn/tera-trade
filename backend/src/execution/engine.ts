@@ -10,7 +10,7 @@
 import { Decimal } from "decimal.js";
 import { prisma } from "../db/client.js";
 import { childLogger } from "../core/logger.js";
-import { TradingMode } from "../core/config.js";
+import { TradingMode, type BrokerKind } from "../core/config.js";
 import type { BrokerClient, OrderRequest } from "../brokers/types.js";
 import { OrderSide, OrderType } from "../brokers/types.js";
 import type { RiskAssessment } from "../risk/engine.js";
@@ -27,6 +27,7 @@ export interface ExecutionResult {
 
 export async function executeIfApproved(
   broker: BrokerClient,
+  brokerKind: BrokerKind,
   mode: TradingMode,
   accountId: number,
   brokerAccountId: string,
@@ -89,6 +90,7 @@ export async function executeIfApproved(
       explanation,
       status: "open",
       brokerOrderId: result.brokerOrderId,
+      brokerKind,
     },
   });
 

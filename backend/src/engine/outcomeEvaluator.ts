@@ -24,6 +24,15 @@ const logger = childLogger("outcomeEvaluator");
 // call it (see analytics/outcomeSimulation.ts's "no_resolution" case).
 const MIN_BARS_TO_JUDGE = 50;
 const MAX_BARS_TO_WALK = 500;
+// Bounds a single pass regardless of how large the pending backlog gets (e.g.
+// after extended downtime) -- oldest-first, so a big backlog just drains over
+// subsequent 5-minute ticks instead of one tick doing unbounded work.
+const MAX_ROWS_PER_PASS = 200;
+// Same bounded-concurrency shape as engine/fixedTargetEdgeCache.ts's identical
+// per-row loadBarsAfter-per-row pattern (tuned there against real Neon pool
+// contention) -- each pending row needs its own bar-window fetch, so this
+// batches that fan-out instead of firing all of them (or none of them) at once.
+const CONCURRENCY = 15;
 
 async function loadBarsAfter(symbol: string, after: Date, limit: number): Promise<OhlcBar[]> {
   const rows = await prisma.bar.findMany({
@@ -38,6 +47,8 @@ async function evaluateTakenScores(): Promise<number> {
   const pending = await prisma.score.findMany({
     where: { outcomeLabel: null, decision: "taken", tradeId: { not: null } },
     include: { trade: true },
+    orderBy: { time: "asc" },
+    take: MAX_ROWS_PER_PASS,
   });
 
   let updated = 0;
@@ -68,37 +79,45 @@ async function evaluateTakenScores(): Promise<number> {
 async function evaluateSkippedScores(): Promise<number> {
   const pending = await prisma.score.findMany({
     where: { outcomeLabel: null, tradeId: null },
+    orderBy: { time: "asc" },
+    take: MAX_ROWS_PER_PASS,
   });
 
   let updated = 0;
-  for (const score of pending) {
-    const bars = await loadBarsAfter(score.symbol, score.time, MAX_BARS_TO_WALK);
-    if (bars.length < MIN_BARS_TO_JUDGE) continue; // too soon to judge -- leave pending
+  for (let i = 0; i < pending.length; i += CONCURRENCY) {
+    const batch = pending.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (score) => {
+        const bars = await loadBarsAfter(score.symbol, score.time, MAX_BARS_TO_WALK);
+        if (bars.length < MIN_BARS_TO_JUDGE) return false; // too soon to judge -- leave pending
 
-    const instrument = getInstrument(score.symbol);
-    const entryPrice = new Decimal(score.entryPriceAtSignal.toString());
-    const atrValue = new Decimal(score.atrAtSignal.toString());
-    const structureSwingPrice = score.structureSwingPriceAtSignal ? new Decimal(score.structureSwingPriceAtSignal.toString()) : null;
-    const side = score.side as "long" | "short";
+        const instrument = getInstrument(score.symbol);
+        const entryPrice = new Decimal(score.entryPriceAtSignal.toString());
+        const atrValue = new Decimal(score.atrAtSignal.toString());
+        const structureSwingPrice = score.structureSwingPriceAtSignal ? new Decimal(score.structureSwingPriceAtSignal.toString()) : null;
+        const side = score.side as "long" | "short";
 
-    // Recompute the same hypothetical stop plan engine/loop.ts computed at
-    // signal time -- computeInitialStop is pure, so this reproduces the
-    // identical stop/target rather than needing to have stored them redundantly.
-    const stopPlan = computeInitialStop(entryPrice, side, atrValue, structureSwingPrice, { tickSize: instrument.tickSize });
+        // Recompute the same hypothetical stop plan engine/loop.ts computed at
+        // signal time -- computeInitialStop is pure, so this reproduces the
+        // identical stop/target rather than needing to have stored them redundantly.
+        const stopPlan = computeInitialStop(entryPrice, side, atrValue, structureSwingPrice, { tickSize: instrument.tickSize });
 
-    const outcome = evaluateHypotheticalOutcome(side, entryPrice.toNumber(), stopPlan.stopPrice.toNumber(), stopPlan.takeProfitPrice.toNumber(), bars);
+        const outcome = evaluateHypotheticalOutcome(side, entryPrice.toNumber(), stopPlan.stopPrice.toNumber(), stopPlan.takeProfitPrice.toNumber(), bars);
 
-    const outcomeLabel = outcome.label === "win" ? "missed_win" : outcome.label === "loss" ? "missed_loss" : "no_resolution";
+        const outcomeLabel = outcome.label === "win" ? "missed_win" : outcome.label === "loss" ? "missed_loss" : "no_resolution";
 
-    await prisma.score.update({
-      where: { id: score.id },
-      data: {
-        outcomeLabel,
-        outcomeRMultiple: outcome.rMultiple.toString(),
-        outcomeEvaluatedAt: new Date(),
-      },
-    });
-    updated++;
+        await prisma.score.update({
+          where: { id: score.id },
+          data: {
+            outcomeLabel,
+            outcomeRMultiple: outcome.rMultiple.toString(),
+            outcomeEvaluatedAt: new Date(),
+          },
+        });
+        return true;
+      })
+    );
+    updated += results.filter(Boolean).length;
   }
   return updated;
 }

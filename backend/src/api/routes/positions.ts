@@ -2,13 +2,22 @@ import type { FastifyInstance } from "fastify";
 import { prisma } from "../../db/client.js";
 import { requireApiKey } from "../../core/security.js";
 import { getBroker } from "../../brokers/index.js";
-import { getSettings } from "../../core/config.js";
+import type { BrokerKind } from "../../core/config.js";
+import { ensureDefaultAccount } from "../../engine/bootstrap.js";
 
 export async function positionsRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", requireApiKey);
 
   app.get("/api/positions", async () => {
-    const rows = await prisma.trade.findMany({ where: { status: "open" }, orderBy: { entryTime: "desc" } });
+    // Deliberately NOT scoped to the current mode's broker (unlike
+    // performance/journal/equity, which are) -- paper and live can now both
+    // have genuinely open positions at the same time (see engine/loop.ts's
+    // TradingEngine holding both brokers simultaneously), and hiding a real
+    // open position just because you happen to be viewing paper mode right
+    // now would be a real risk-visibility gap, not a feature. brokerKind is
+    // included on each row instead, so the UI can label which is which.
+    const account = await ensureDefaultAccount();
+    const rows = await prisma.trade.findMany({ where: { accountId: account.id, status: "open" }, orderBy: { entryTime: "desc" } });
     return rows.map((t) => ({
       tradeId: t.id,
       symbol: t.symbol,
@@ -21,6 +30,7 @@ export async function positionsRoutes(app: FastifyInstance): Promise<void> {
       strategyId: t.strategyId,
       score: t.score,
       explanation: t.explanation,
+      brokerKind: t.brokerKind,
     }));
   });
 
@@ -33,10 +43,14 @@ export async function positionsRoutes(app: FastifyInstance): Promise<void> {
     const trade = await prisma.trade.findUnique({ where: { id: tradeId } });
     if (!trade || trade.status !== "open") return reply.code(404).send({ error: "Open position not found" });
 
-    const settings = getSettings();
-    const broker = await getBroker(settings.brokerKind);
+    // Must close via the broker this specific trade actually opened under
+    // (trade.brokerKind), not whatever settings.brokerKind currently says --
+    // those can now disagree, e.g. closing an old LIVE position while the
+    // system has since been switched to PAPER mode would otherwise try to
+    // close it with the simulated broker, which never had it.
+    const broker = await getBroker(trade.brokerKind as BrokerKind);
     if (!broker.requestClosePosition) {
-      return reply.code(400).send({ error: `${settings.brokerKind} broker does not support closing positions via this action` });
+      return reply.code(400).send({ error: `${trade.brokerKind} broker does not support closing positions via this action` });
     }
 
     await broker.connect();
@@ -48,7 +62,8 @@ export async function positionsRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/api/orders", async () => {
-    const rows = await prisma.orderRecord.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
+    const account = await ensureDefaultAccount();
+    const rows = await prisma.orderRecord.findMany({ where: { accountId: account.id }, orderBy: { createdAt: "desc" }, take: 100 });
     return rows.map((o) => ({
       id: o.id,
       symbol: o.symbol,

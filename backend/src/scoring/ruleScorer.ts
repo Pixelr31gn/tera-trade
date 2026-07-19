@@ -21,8 +21,15 @@
  *   real data instead of a starting guess.
  */
 import type { SetupFeatures } from "./features.js";
+import { fibDirectionSignal } from "../analytics/fibonacci.js";
+import { ppmDirectionSignal } from "../analytics/ppm.js";
 
-export type StrategyVersion = "v1" | "v2";
+// "v4" is retained in this union even though it's no longer an active
+// voter (removed 2026-07-15, see engine/loop.ts) -- historical Score rows
+// still carry strategyVersion: "v4" and need to keep typechecking. The
+// training pipeline behind it (scoring/training.ts) is left in place,
+// dormant, in case it's revisited later.
+export type StrategyVersion = "v1" | "v2" | "v3" | "v4";
 
 // Weights are hand-set, documented priors -- not fit to data. Magnitudes
 // reflect how strongly each factor should move the pre-threshold
@@ -39,7 +46,22 @@ const WEIGHTS_V1 = {
   newsRisk: 1.6,
   historicalEdge: 0.9,
   openingRangeEdge: 0.7,
+  riskRewardEdge: 0.6,
+  fibDirectionEdge: 0.8,
+  // Set so this weight alone is ~10% of the total weight sum (2026-07-15,
+  // operator request) -- with every other weight fixed, ppmEdge=1.1 makes
+  // 1.1 / (sum of all weights) land at ~10%.
+  ppmEdge: 1.1,
 };
+
+// Setups are centered on the 1:3 risk/reward floor already enforced at
+// execution time (risk/tradePlan.ts's MIN_RISK_REWARD_DENOMINATOR) -- a
+// setup exactly at that floor is neutral, a materially better reward-to-risk
+// shape is rewarded, and a worse one (before the execution-time floor would
+// widen the stop) is penalized. Capped at 2x the floor either direction so
+// one outlier ratio can't dominate the score.
+const RISK_REWARD_FLOOR = 3;
+const RISK_REWARD_SPAN = 3;
 
 const WEIGHTS_V2 = {
   ...WEIGHTS_V1,
@@ -216,6 +238,59 @@ export function scoreSetup(features: SetupFeatures, version: StrategyVersion = "
       name: "openingRangeEdge",
       contribution,
       description: `the first-hour range has broken in this direction ${(features.openingRangeBreakoutProbability * 100).toFixed(0)}% of the last ${features.openingRangeSampleSize} sessions`,
+    });
+  }
+
+  // 10b. Risk/reward edge -- every version scores this, not just v2+. Loose
+  // nullish check (not `!== null`) since features can come from JSON-
+  // deserialized DB rows or partial test fixtures where the field is simply
+  // absent (undefined), not explicitly null.
+  if (features.riskRewardRatio != null) {
+    const raw = clip((features.riskRewardRatio - RISK_REWARD_FLOOR) / RISK_REWARD_SPAN);
+    const contribution = weights.riskRewardEdge * raw;
+    logit += contribution;
+    factors.push({
+      name: "riskRewardEdge",
+      contribution,
+      description: `hypothetical reward:risk is ${features.riskRewardRatio.toFixed(2)}:1 (vs the ${RISK_REWARD_FLOOR}:1 floor)`,
+    });
+  }
+
+  // 10c. Fibonacci direction validation -- every version scores this. See
+  // analytics/fibonacci.ts's fibDirectionSignal for the -1..1 scale: fighting
+  // the recent swing's direction is penalized, aligning with it is rewarded,
+  // most of all when price sits in the classic 38.2%-61.8% pullback zone
+  // rather than chasing (barely pulled back) or arriving after the swing
+  // structure has likely already broken (deep retracement).
+  {
+    const raw = fibDirectionSignal(features.fibSwingDirection ?? null, features.fibRetracementPct ?? null, features.side);
+    const contribution = weights.fibDirectionEdge * raw;
+    logit += contribution;
+    const pct = features.fibRetracementPct != null ? `${(features.fibRetracementPct * 100).toFixed(0)}% retracement` : "no retracement reading";
+    factors.push({
+      name: "fibDirectionEdge",
+      contribution,
+      description: features.fibSwingDirection
+        ? `${features.fibSwingDirection} swing, ${pct} -- ${raw >= 0 ? "supports" : "fights"} a ${features.side} setup`
+        : "not enough bars for a swing reading",
+    });
+  }
+
+  // 10d. Points-per-minute direction -- every version scores this, ~10% of
+  // total factor weight (2026-07-15, operator request). See analytics/ppm.ts's
+  // ppmDirectionSignal: positive when current market speed is moving in this
+  // setup's favor, negative when it opposes.
+  {
+    const raw = ppmDirectionSignal(features.netPointsPerMinute ?? null, features.side);
+    const contribution = weights.ppmEdge * raw;
+    logit += contribution;
+    factors.push({
+      name: "ppmEdge",
+      contribution,
+      description:
+        features.netPointsPerMinute != null
+          ? `market moving ${features.netPointsPerMinute >= 0 ? "up" : "down"} at ${Math.abs(features.netPointsPerMinute).toFixed(2)} pts/min -- ${raw >= 0 ? "supports" : "opposes"} a ${features.side} setup`
+          : "not enough recent ticks for a points-per-minute reading",
     });
   }
 

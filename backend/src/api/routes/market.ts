@@ -4,6 +4,9 @@ import { requireApiKey } from "../../core/security.js";
 import { DEFAULT_INSTRUMENTS } from "../../marketData/instruments.js";
 import { classifySession } from "../../analytics/session.js";
 import { getTrendLevels } from "../../engine/trendLevelsCache.js";
+import { getAllLatestOrderFlowSnapshots } from "../../engine/liveOrderFlowCache.js";
+import { getPpm } from "../../engine/ppmCache.js";
+import { getSupportResistanceLevels } from "../../engine/supportResistanceCache.js";
 
 export async function marketRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", requireApiKey);
@@ -16,31 +19,65 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     const now = new Date();
     const session = classifySession(now);
 
-    const out = [];
-    for (const spec of DEFAULT_INSTRUMENTS) {
-      const [lastBar, regimeRow, trendLevels] = await Promise.all([
-        prisma.bar.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }),
-        prisma.regimeSnapshot.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }),
-        getTrendLevels(spec.symbol),
-      ]);
+    const out = await Promise.all(
+      DEFAULT_INSTRUMENTS.map(async (spec) => {
+        const [lastBar, regimeRow, trendLevels] = await Promise.all([
+          prisma.bar.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }),
+          prisma.regimeSnapshot.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }),
+          getTrendLevels(spec.symbol),
+        ]);
 
-      out.push({
-        symbol: spec.symbol,
-        tickSize: spec.tickSize.toString(),
-        pointValue: spec.pointValue.toString(),
-        lastPrice: lastBar?.close ?? null,
-        lastPriceTime: lastBar?.time ?? null,
-        trendLabel: regimeRow?.trendLabel ?? null,
-        volLabel: regimeRow?.volLabel ?? null,
-        regimeConfidence: regimeRow?.confidence ?? null,
-        session,
-        maStack: trendLevels.maStack,
-        swingHigh: trendLevels.swingHigh,
-        swingLow: trendLevels.swingLow,
-        swingDirection: trendLevels.swingDirection,
-        fibLevels: trendLevels.fibLevels,
-      });
-    }
+        return {
+          symbol: spec.symbol,
+          tickSize: spec.tickSize.toString(),
+          pointValue: spec.pointValue.toString(),
+          lastPrice: lastBar?.close ?? null,
+          lastPriceTime: lastBar?.time ?? null,
+          trendLabel: regimeRow?.trendLabel ?? null,
+          volLabel: regimeRow?.volLabel ?? null,
+          regimeConfidence: regimeRow?.confidence ?? null,
+          session,
+          maStack: trendLevels.maStack,
+          swingHigh: trendLevels.swingHigh,
+          swingLow: trendLevels.swingLow,
+          swingDirection: trendLevels.swingDirection,
+          fibLevels: trendLevels.fibLevels,
+        };
+      })
+    );
     return out;
+  });
+
+  // Live, in-memory order-flow read directly off TopstepX's own WebSocket
+  // feed (see browserWatch/orderFlowListener.ts) -- purely observational for
+  // now, exposed here so the feed's accuracy can be sanity-checked visually
+  // before anything in scoring is allowed to depend on it.
+  app.get("/api/market/order-flow", async () => {
+    return getAllLatestOrderFlowSnapshots();
+  });
+
+  // Persisted order-flow history for a symbol -- one row per flush interval.
+  app.get<{ Params: { symbol: string }; Querystring: { limit?: string } }>("/api/market/order-flow/:symbol/history", async (request) => {
+    const { symbol } = request.params;
+    const limit = Math.min(Number(request.query.limit ?? 200), 2000);
+    const rows = await prisma.orderFlowSnapshot.findMany({
+      where: { symbol },
+      orderBy: { time: "desc" },
+      take: limit,
+    });
+    return rows.reverse();
+  });
+
+  // "Points per minute" -- up vs. down speed over a rolling 15-minute
+  // window, for the speed-test-style gauge (see analytics/ppm.ts).
+  app.get("/api/market/ppm", async () => {
+    return Promise.all(DEFAULT_INSTRUMENTS.map((spec) => getPpm(spec.symbol)));
+  });
+
+  // Support/resistance levels an entry is actually gated against (see
+  // risk/engine.ts's proximity check) -- exposed so the levels are visible
+  // and verifiable, not just implicit in a rejection reason string.
+  app.get("/api/market/support-resistance", async () => {
+    return Promise.all(DEFAULT_INSTRUMENTS.map((spec) => getSupportResistanceLevels(spec.symbol)));
   });
 }

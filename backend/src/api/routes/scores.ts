@@ -2,13 +2,71 @@ import type { FastifyInstance } from "fastify";
 import { Decimal } from "decimal.js";
 import { prisma } from "../../db/client.js";
 import { requireApiKey } from "../../core/security.js";
-import { computeActionability } from "../../scoring/actionability.js";
-import { computeTradePlan } from "../../risk/index.js";
+import { ACTIONABLE_STALE_MINUTES, computeActionability } from "../../scoring/actionability.js";
+import { computeTradePlan, RiskEngine, type RiskLimitsConfig } from "../../risk/index.js";
 import { DEFAULT_INSTRUMENTS, getInstrument } from "../../marketData/instruments.js";
-import { computeAccountEquity } from "../../engine/accounting.js";
+import { computeAccountEquity, computeAccountRiskState } from "../../engine/accounting.js";
 import { ensureDefaultAccount } from "../../engine/bootstrap.js";
-import { getSystemState } from "../../execution/mode.js";
+import { CONTINUOUS_SCAN_STRATEGY_IDS, determineConsensus } from "../../engine/loop.js";
+import type { GatedScore } from "../../scoring/gate.js";
+import type { StrategyVersion } from "../../scoring/ruleScorer.js";
+import type { OhlcBar } from "../../regime/indicators.js";
 import type { Score, RiskLimit } from "@prisma/client";
+
+const NO_NEWS = { inRiskWindow: false, nearestEventName: null, nearestEventTime: null, minutesToEvent: null, impact: null };
+
+function toRiskLimitsConfig(row: RiskLimit): RiskLimitsConfig {
+  return {
+    perTradeRiskPct: new Decimal(row.perTradeRiskPct.toString()),
+    maxDailyLossPct: new Decimal(row.maxDailyLossPct.toString()),
+    maxTrailingDrawdownPct: new Decimal(row.maxTrailingDrawdownPct.toString()),
+    maxConsecutiveLosses: row.maxConsecutiveLosses,
+    maxDailyTrades: row.maxDailyTrades,
+    maxPositionSize: row.maxPositionSize,
+    perTradeRiskDollars: row.perTradeRiskDollars ? new Decimal(row.perTradeRiskDollars.toString()) : null,
+    perTradeProfitDollars: row.perTradeProfitDollars ? new Decimal(row.perTradeProfitDollars.toString()) : null,
+    maxDailyLossDollars: row.maxDailyLossDollars ? new Decimal(row.maxDailyLossDollars.toString()) : null,
+  };
+}
+
+// Replays the exact risk-engine check a real signal went through at the time
+// it fired (same bars, same S/R levels an entry would've been judged
+// against), against the account's *current* risk state (equity/drawdown/
+// consecutive-losses circuit breakers reflect right now, not signal time --
+// those are about the account, not the setup). Consensus alone isn't
+// enough to say "paper will take this": a setup can reach consensus and
+// still get blocked by the S/R gate or sizing, exactly like a real trade
+// would.
+const engine = new RiskEngine();
+async function wouldPassRiskEngine(score: Score, riskLimitsRow: RiskLimit): Promise<boolean> {
+  if (score.signalKind !== "breakout" && score.signalKind !== "reversal") return true; // no recorded signal kind (older row) -- can't replay, don't block on it
+  const bars = await prisma.bar.findMany({ where: { symbol: score.symbol, time: { lte: score.time } }, orderBy: { time: "desc" }, take: 300 });
+  if (bars.length === 0) return false;
+  const ohlc: OhlcBar[] = bars
+    .reverse()
+    .map((b) => ({ time: b.time, open: Number(b.open), high: Number(b.high), low: Number(b.low), close: Number(b.close), volume: Number(b.volume) }));
+
+  const account = await ensureDefaultAccount();
+  const equity = await computeAccountEquity(account, new Map([[score.symbol, new Decimal(score.entryPriceAtSignal.toString())]]));
+  const accountState = await computeAccountRiskState(account, equity);
+  const instrument = getInstrument(score.symbol);
+
+  const assessment = engine.assessNewTrade({
+    side: score.side as "long" | "short",
+    entryPrice: new Decimal(score.entryPriceAtSignal.toString()),
+    atrValue: new Decimal(score.atrAtSignal.toString()),
+    structureSwingPrice: score.structureSwingPriceAtSignal ? new Decimal(score.structureSwingPriceAtSignal.toString()) : null,
+    signalKind: score.signalKind,
+    breakoutLevelPrice: score.breakoutLevelPrice ? new Decimal(score.breakoutLevelPrice.toString()) : null,
+    accountState,
+    limits: toRiskLimitsConfig(riskLimitsRow),
+    pointValue: instrument.pointValue,
+    tickSize: instrument.tickSize,
+    newsStatus: NO_NEWS,
+    bars: ohlc,
+  });
+  return assessment.approved;
+}
 
 // Every score row carries the hypothetical entry/ATR/structure-swing it was
 // signaled at (see engine/loop.ts), so the exact stop/target/quantity plan
@@ -47,10 +105,12 @@ async function loadRiskContext(): Promise<{ riskLimits: RiskLimit; equity: Decim
   const account = await ensureDefaultAccount();
   const riskLimits = await prisma.riskLimit.findUniqueOrThrow({ where: { accountId: account.id } });
 
+  const lastBars = await Promise.all(
+    DEFAULT_INSTRUMENTS.map((spec) => prisma.bar.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }))
+  );
   const lastPrices = new Map<string, Decimal>();
-  for (const spec of DEFAULT_INSTRUMENTS) {
-    const lastBar = await prisma.bar.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } });
-    if (lastBar) lastPrices.set(spec.symbol, new Decimal(lastBar.close.toString()));
+  for (const lastBar of lastBars) {
+    if (lastBar) lastPrices.set(lastBar.symbol, new Decimal(lastBar.close.toString()));
   }
   const equity = await computeAccountEquity(account, lastPrices);
 
@@ -79,24 +139,83 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
     }));
   });
 
-  // Setups that cleared the score threshold, aren't yet acted on, and are
-  // recent enough to still matter -- one per symbol (the most recent),
+  // Setups that would actually be traded right now, aren't yet acted on, and
+  // are recent enough to still matter -- one per symbol (the most recent),
   // skipped if there's already an open position in that symbol. This is
   // meant to be read as "you should place this trade," distinct from the
   // full /api/recommendations history table which includes everything
-  // taken *and* skipped. Restricted to the ACTIVE strategy version only --
-  // the shadow (inactive) version's "taken" setups never actually execute,
-  // so surfacing them here would suggest a manual trade the real active
-  // strategy wouldn't have taken.
+  // taken *and* skipped, by every version, regardless of whether it would
+  // actually execute.
+  //
+  // "Would actually be traded" is mode-dependent, mirroring engine/loop.ts's
+  // own execution decision exactly (not just "the active version scored it
+  // taken"): in paper mode that means cross-version consensus via
+  // determinePaperConsensus (a single version -- even the active one --
+  // liking a setup is not enough if the other two strongly disagree), and
+  // in analysis_only/live it's the active version's own decision, same as
+  // before. Getting this wrong previously surfaced a "PLACE LONG" setup
+  // where v1/v2 scored it 34%/12% -- paper correctly declined to trade it,
+  // but the banner told the operator to place it anyway.
   app.get("/api/recommendations/actionable", async () => {
     const now = new Date();
-    const systemState = await getSystemState();
     const openSymbols = new Set((await prisma.trade.findMany({ where: { status: "open" }, select: { symbol: true } })).map((t) => t.symbol));
 
-    const candidates = await prisma.score.findMany({
-      where: { decision: "taken", acknowledged: false, strategyVersion: systemState.activeStrategyVersion },
+    // Bounded to a bit past the "expired" cutoff -- old enough that nothing
+    // beyond it could ever be actionable, so no need to scan further back.
+    const lookback = new Date(now.getTime() - (ACTIONABLE_STALE_MINUTES + 15) * 60_000);
+    const recentScores = await prisma.score.findMany({
+      where: {
+        time: { gte: lookback },
+        acknowledged: false,
+        strategyId: { notIn: [...CONTINUOUS_SCAN_STRATEGY_IDS] },
+      },
       orderBy: { time: "desc" },
     });
+
+    // Group the three shadow-scored versions of each signal back together
+    // (same time/symbol/side/strategyId) so the real execution decision --
+    // not just one version's own decision -- can be evaluated per signal.
+    const bySignal = new Map<string, Map<StrategyVersion, Score>>();
+    for (const s of recentScores) {
+      const key = `${s.time.getTime()}:${s.symbol}:${s.side}:${s.strategyId}`;
+      const versions = bySignal.get(key) ?? new Map<StrategyVersion, Score>();
+      versions.set(s.strategyVersion as StrategyVersion, s);
+      bySignal.set(key, versions);
+    }
+
+    const account = await ensureDefaultAccount();
+    const riskLimitsRow = await prisma.riskLimit.findUniqueOrThrow({ where: { accountId: account.id } });
+
+    const representativeCandidates: Score[] = [];
+    for (const versions of bySignal.values()) {
+      // determineConsensus assumes all three voters were scored (that's how a
+      // real signal is always shadow-scored -- see engine/loop.ts) -- a
+      // signal with an incomplete version set here means its rows landed on
+      // opposite sides of the lookback window boundary, or some other data
+      // gap. Skip rather than guess at the missing version's decision. Both
+      // paper and live use the same consensus rule now (2026-07-14), so this
+      // no longer branches on systemState.mode.
+      if (!versions.has("v1") || !versions.has("v2") || !versions.has("v3")) continue;
+      const gatedByVersion = new Map<StrategyVersion, GatedScore>(
+        [...versions.entries()].map(([v, s]) => [
+          v,
+          { probability: s.probability.toNumber(), decision: s.decision as GatedScore["decision"] } as GatedScore,
+        ])
+      );
+      const consensus = determineConsensus(gatedByVersion);
+      if (!consensus.taken || !consensus.representativeVersion) continue;
+      const representative = versions.get(consensus.representativeVersion);
+      if (!representative) continue;
+      representativeCandidates.push(representative);
+    }
+    // Each check is its own DB round-trip chain (bar fetch + equity/risk-state
+    // computation) -- these are independent per candidate, and the candidate
+    // list here is already bounded to one row per distinct signal in the
+    // lookback window (naturally small), so a plain Promise.all is fine
+    // without a concurrency cap.
+    const riskChecks = await Promise.all(representativeCandidates.map((c) => wouldPassRiskEngine(c, riskLimitsRow)));
+    const candidates = representativeCandidates.filter((_, i) => riskChecks[i]);
+    candidates.sort((a, b) => b.time.getTime() - a.time.getTime());
 
     const bestPerSymbol = new Map<string, (typeof candidates)[number]>();
     for (const score of candidates) {

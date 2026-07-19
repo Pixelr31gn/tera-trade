@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { prisma } from "../../db/client.js";
 import { requireApiKey } from "../../core/security.js";
 import { ensureDefaultAccount } from "../../engine/bootstrap.js";
+import { currentBrokerKind } from "../../engine/accounting.js";
 
 interface RiskLimitsUpdateBody {
   perTradeRiskPct: number;
@@ -68,8 +69,12 @@ export async function accountsRoutes(app: FastifyInstance): Promise<void> {
     const accountId = Number(request.params.accountId);
     const days = Number(request.query.days ?? 30);
     const since = new Date(Date.now() - days * 86_400_000);
+    // Paper and live share one account row -- without this, switching modes
+    // wouldn't change the displayed equity chart at all (2026-07-15 operator
+    // report), since it'd keep blending both curves together.
+    const brokerKind = await currentBrokerKind();
     const rows = await prisma.equityCurvePoint.findMany({
-      where: { accountId, time: { gte: since } },
+      where: { accountId, brokerKind, time: { gte: since } },
       orderBy: { time: "asc" },
     });
     return rows.map((r) => ({ time: r.time, equity: r.equity, balance: r.balance }));

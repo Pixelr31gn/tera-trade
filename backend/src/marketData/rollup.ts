@@ -9,7 +9,7 @@
  */
 import { Decimal } from "decimal.js";
 import { prisma } from "../db/client.js";
-import { DEFAULT_INSTRUMENTS } from "./instruments.js";
+import { ACTIVE_INSTRUMENTS } from "./instruments.js";
 
 const RESOLUTIONS: Array<{ label: string; minutes: number }> = [
   { label: "5m", minutes: 5 },
@@ -79,7 +79,7 @@ export async function refreshRollupsForSymbol(symbol: string, lookbackHours = 48
 }
 
 export async function refreshAllRollups(): Promise<void> {
-  for (const spec of DEFAULT_INSTRUMENTS) {
+  for (const spec of ACTIVE_INSTRUMENTS) {
     await refreshRollupsForSymbol(spec.symbol);
   }
 }

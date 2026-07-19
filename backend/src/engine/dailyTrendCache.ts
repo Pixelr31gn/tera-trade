@@ -16,7 +16,13 @@ import { classifyRegime, type RegimeResult } from "../regime/classifier.js";
 import type { OhlcBar } from "../regime/indicators.js";
 
 const CACHE_TTL_MS = 60 * 60 * 1000; // the daily trend moves slowly -- no need to recompute every tick
-const LOOKBACK_DAYS = 250;
+// classifyRegime's longest-period indicator (atrPercentile, see
+// regime/indicators.ts) wants up to a 100-bar lookback plus its own 14-bar
+// ATR warm-up -- ~114 trading days. 200 calendar days gives ~138 trading
+// days after accounting for weekends (a comfortable margin, including
+// holidays), while pulling meaningfully fewer rows than the previous
+// 250-day window.
+const LOOKBACK_DAYS = 200;
 
 const cache = new Map<string, { regime: RegimeResult; computedAt: number }>();
 

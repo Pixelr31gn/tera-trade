@@ -3,8 +3,9 @@ export interface SystemState {
   killSwitch: boolean;
   killSwitchReason: string | null;
   brokerKind: string;
+  liveBrokerConnected: boolean;
   minScoreThreshold: number;
-  activeStrategyVersion: "v1" | "v2";
+  activeStrategyVersion: "v1" | "v2" | "v3" | "v4";
   updatedAt: string;
 }
 
@@ -43,7 +44,7 @@ export interface RecommendationScore {
   decision: string;
   explanation: string;
   tradeId: number | null;
-  strategyVersion: "v1" | "v2";
+  strategyVersion: "v1" | "v2" | "v3" | "v4";
   entryPrice: number;
   stopPrice: number;
   takeProfitPrice: number;
@@ -59,7 +60,7 @@ export interface ActionableRecommendation {
   probability: number;
   explanation: string;
   actionability: "fresh" | "stale";
-  strategyVersion: "v1" | "v2";
+  strategyVersion: "v1" | "v2" | "v3" | "v4";
   entryPrice: number;
   stopPrice: number;
   takeProfitPrice: number;
@@ -156,7 +157,17 @@ export interface SessionPerformance {
   byPriceAction: Record<string, SessionLabelBreakdown>;
 }
 
-export type StrategyComparison = Record<"v1" | "v2", Record<string, SessionPerformance>>;
+export type StrategyComparison = Record<"v1" | "v2" | "v3" | "v4", Record<string, SessionPerformance>>;
+
+export interface DivergenceBucket {
+  n: number;
+  win: number;
+  loss: number;
+  pending: number;
+  winRate: number | null;
+}
+
+export type VersionDivergence = Record<string, { onlyATook: DivergenceBucket; onlyBTook: DivergenceBucket; agreedPairs: number }>;
 
 export interface MaStack {
   maFast: number | null;
@@ -211,4 +222,13 @@ export interface PerformanceSummary {
   };
   byStrategy: Record<string, { tradeCount: number; totalPnl: number; winRate: number }>;
   byRegime: Record<string, { tradeCount: number; totalPnl: number; winRate: number }>;
+}
+
+export interface PpmSnapshot {
+  symbol: string;
+  windowMinutes: number;
+  upPointsPerMinute: number;
+  downPointsPerMinute: number;
+  netPointsPerMinute: number;
+  sampleCount: number;
 }

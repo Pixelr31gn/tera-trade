@@ -43,7 +43,7 @@ const POSITIVE_OUTCOME_LABELS = new Set(["executed_win", "missed_win"]);
 const NEGATIVE_OUTCOME_LABELS = new Set(["executed_loss", "missed_loss"]);
 
 function modelPath(session: TradingSession): string {
-  return fileURLToPath(new URL(`./artifacts/trade-scorer-${session}.json`, import.meta.url));
+  return fileURLToPath(new URL(`./artifacts/trade-scorer-v4-${session}.json`, import.meta.url));
 }
 
 export const FEATURE_COLUMNS = [
@@ -61,6 +61,7 @@ export const FEATURE_COLUMNS = [
   "newsRiskFlag",
   "openingRangeBreakoutProbability",
   "openingRangeSampleSize",
+  "riskRewardRatio",
 ] as const;
 
 interface TrainedModel {
@@ -138,11 +139,22 @@ function trainLogisticRegression(X: number[][], y: number[], opts: { epochs?: nu
 }
 
 async function trainModelForSession(session: TradingSession): Promise<TrainingReport> {
-  // strategyVersion: "v1" only -- v1 and v2 shadow-score the exact same
-  // signal (identical features/entry/outcome, see engine/loop.ts), so
-  // including both would just train on the same examples twice.
+  // strategyVersion: "v3" only -- v1/v2/v3 shadow-score the exact same
+  // signal on the real per-bar strategy path (identical features/entry/
+  // outcome, see engine/loop.ts), so including more than one would just
+  // train on the same examples twice. v3 is used (not v1) because it's also
+  // written continuously by runContinuousScan's always-on hypothetical
+  // long/short read (see engine/loop.ts), which v1/v2 never receive -- by
+  // far the largest and most evenly-sampled labeled dataset available.
+  // The holdout split below assumes chronological order -- Prisma/Postgres
+  // do NOT guarantee row order without an explicit orderBy (confirmed live:
+  // ~24% of adjacent rows came back out of sequence, with the *first* rows
+  // returned from the most recent day rather than the oldest -- silently
+  // scrambling train/test into a near-random split instead of the intended
+  // time-based one).
   const rows = await prisma.score.findMany({
-    where: { session, strategyVersion: "v1", outcomeLabel: { in: [...POSITIVE_OUTCOME_LABELS, ...NEGATIVE_OUTCOME_LABELS] } },
+    where: { session, strategyVersion: "v3", outcomeLabel: { in: [...POSITIVE_OUTCOME_LABELS, ...NEGATIVE_OUTCOME_LABELS] } },
+    orderBy: { time: "asc" },
   });
 
   if (rows.length < MIN_TRAINING_ROWS_PER_SESSION) {

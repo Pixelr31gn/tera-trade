@@ -3,12 +3,21 @@
 import { useState } from "react";
 import useSWR from "swr";
 import { apiFetch, fetcher } from "@/lib/api";
-import { StrategyComparison, SystemState } from "@/lib/types";
+import { StrategyComparison, SystemState, VersionDivergence } from "@/lib/types";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 const SESSION_LABELS: Record<string, string> = { new_york: "New York", london: "London", asian: "Asian" };
 const SESSION_ORDER = ["new_york", "london", "asian"];
+const VERSIONS = ["v1", "v2", "v3"] as const;
+type Version = (typeof VERSIONS)[number];
+
+const VERSION_DESCRIPTIONS: Record<Version, string> = {
+  v1: "Baseline: trend, momentum, volatility, news, historical/opening-range, risk/reward, Fibonacci direction, and points-per-minute edge.",
+  v2: "v1 + marketStructureEdge and liquidityEdge, added from real session-performance data.",
+  v3: "0-100 confidence score: EMA50 trend (20), ADX strength (20), ATR volatility (15), volume vs 20-bar avg (15), RSI momentum (10), price structure (20) -- scored for both directions, requires conviction margin, adjusted by recent similar-setup performance, risk/reward shape, Fibonacci direction, and points-per-minute.",
+};
 
 function pct(x: number | null): string {
   return x === null ? "n/a" : `${Math.round(x * 100)}%`;
@@ -17,14 +26,16 @@ function pct(x: number | null): string {
 export default function StrategyComparisonPage() {
   const { data: systemState, mutate: mutateState } = useSWR<SystemState>("/api/system/state", fetcher, { refreshInterval: 10000 });
   const { data: comparison } = useSWR<StrategyComparison>("/api/analytics/strategy-comparison", fetcher, { refreshInterval: 30000 });
+  const { data: divergence } = useSWR<VersionDivergence>("/api/analytics/version-divergence", fetcher, { refreshInterval: 30000 });
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const confirm = useConfirm();
 
   const active = systemState?.activeStrategyVersion;
 
-  async function switchVersion(version: "v1" | "v2") {
+  async function switchVersion(version: Version) {
     if (version === active) return;
-    if (!confirm(`Switch the ACTIVE strategy to ${version.toUpperCase()}? Both versions keep shadow-scoring every signal either way -- this only changes which one is allowed to actually place trades.`)) return;
+    if (!(await confirm(`Switch the ACTIVE strategy to ${version.toUpperCase()}? All versions keep shadow-scoring every signal either way -- this only changes which one is allowed to actually place trades.`))) return;
     setSwitching(true);
     setError(null);
     try {
@@ -41,13 +52,19 @@ export default function StrategyComparisonPage() {
     <div className="space-y-6">
       <Panel title="Strategy Version">
         <p className="mb-4 text-sm text-gray-400">
-          v1 and v2 shadow-score every single signal in parallel -- same bars, same market conditions -- so the numbers below
-          are a true apples-to-apples comparison, not two different time periods. Only the ACTIVE version&apos;s setups are
-          ever allowed to actually place a trade; the other keeps quietly accumulating comparison data in the background.
+          v1, v2, and v3 shadow-score every single signal in parallel -- same bars, same market conditions -- so the numbers
+          below are a true apples-to-apples comparison, not different time periods. (v4, an experimental ML model, was tried
+          and removed 2026-07-15 -- see the Recommendation Feed&apos;s version filter for its historical rows.) Execution
+          doesn&apos;t depend on a single
+          &quot;active&quot; version below -- both paper and live take a trade whenever at least{" "}
+          <strong>2 of the 3 versions independently clear the 65% score threshold</strong> (2026-07-16, a straight
+          majority vote on the raw score) -- replacing an earlier average-based rule that let one strongly-disagreeing
+          version veto a setup two others liked. The toggle below is informational only and does not change what
+          actually trades.
         </p>
         {error && <p className="mb-3 text-sm text-bad">{error}</p>}
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          {(["v1", "v2"] as const).map((version) => (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          {VERSIONS.map((version) => (
             <button
               key={version}
               onClick={() => switchVersion(version)}
@@ -58,11 +75,7 @@ export default function StrategyComparisonPage() {
             >
               <div>
                 <div className="font-medium text-white">{version.toUpperCase()}</div>
-                <div className="text-xs text-gray-400">
-                  {version === "v1"
-                    ? "Baseline: trend, momentum, volatility, news, historical/opening-range edge."
-                    : "v1 + marketStructureEdge and liquidityEdge, added from real session-performance data."}
-                </div>
+                <div className="text-xs text-gray-400">{VERSION_DESCRIPTIONS[version]}</div>
               </div>
               {active === version && <Badge text="active" tone="good" />}
             </button>
@@ -70,51 +83,99 @@ export default function StrategyComparisonPage() {
         </div>
       </Panel>
 
+      <Panel title="Version Divergence -- the actual head-to-head evidence">
+        <p className="mb-4 text-sm text-gray-400">
+          v1/v2/v3 score the exact same signal, so when they <em>agree</em> on taken/skipped, a skipped setup&apos;s outcome is
+          the same hypothetical trade regardless of version -- not independent evidence. The only real test of &quot;which
+          version&apos;s judgment is better&quot; is in the signals where they <em>disagree</em>: one version&apos;s extra
+          factors pushed it over the threshold the other one didn&apos;t clear. This shows how those incremental,
+          disagreement-only picks actually resolved.
+        </p>
+        <div className="space-y-3">
+          {Object.entries(divergence ?? {}).map(([pairKey, d]) => {
+            const [a, b] = pairKey.split("_vs_") as [Version, Version];
+            return (
+              <div key={pairKey} className="rounded-lg border border-white/10 px-4 py-3 text-sm">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="font-medium text-white">
+                    {a.toUpperCase()} vs {b.toUpperCase()}
+                  </span>
+                  <span className="text-xs text-gray-500">{d.agreedPairs} signals where both agreed (not counted below)</span>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    { label: `${a.toUpperCase()}-only took`, bucket: d.onlyATook },
+                    { label: `${b.toUpperCase()}-only took`, bucket: d.onlyBTook },
+                  ].map(({ label, bucket }) => (
+                    <div key={label} className="rounded border border-white/5 bg-white/5 px-3 py-2">
+                      <div className="text-xs text-gray-400">{label}</div>
+                      {bucket.n === 0 ? (
+                        <div className="mt-1 text-xs text-gray-600">no divergent picks yet</div>
+                      ) : (
+                        <>
+                          <div className="mt-1 flex items-center justify-between">
+                            <span className="text-gray-400">Win rate</span>
+                            <Badge text={pct(bucket.winRate)} tone={bucket.winRate === null ? "neutral" : bucket.winRate >= 0.5 ? "good" : "bad"} />
+                          </div>
+                          <div className="mt-1 text-xs text-gray-500">
+                            {bucket.win}W / {bucket.loss}L{bucket.pending > 0 ? ` / ${bucket.pending} pending` : ""} (n={bucket.n})
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Panel>
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {SESSION_ORDER.map((session) => {
-          const v1 = comparison?.v1?.[session];
-          const v2 = comparison?.v2?.[session];
+          const statsByVersion = VERSIONS.map((version) => ({ version, stats: comparison?.[version]?.[session] }));
+          const allLoaded = statsByVersion.every((v) => v.stats);
           return (
             <Panel key={session} title={SESSION_LABELS[session]}>
-              {!v1 || !v2 ? (
+              {!allLoaded ? (
                 <p className="text-sm text-gray-500">Loading...</p>
               ) : (
                 <div className="space-y-3 text-sm">
-                  <div className="grid grid-cols-2 gap-3">
-                    {[
-                      { version: "v1" as const, stats: v1 },
-                      { version: "v2" as const, stats: v2 },
-                    ].map(({ version, stats }) => (
-                      <div key={version} className={`rounded-lg border px-3 py-2 ${active === version ? "border-accent/50 bg-accent/5" : "border-white/10"}`}>
-                        <div className="mb-1 flex items-center justify-between">
-                          <span className="text-xs font-semibold text-white">{version.toUpperCase()}</span>
-                          {active === version && <Badge text="active" tone="good" />}
+                  <div className="grid grid-cols-3 gap-2">
+                    {statsByVersion.map(({ version, stats }) =>
+                      stats ? (
+                        <div key={version} className={`rounded-lg border px-2 py-2 ${active === version ? "border-accent/50 bg-accent/5" : "border-white/10"}`}>
+                          <div className="mb-1 flex items-center justify-between">
+                            <span className="text-xs font-semibold text-white">{version.toUpperCase()}</span>
+                            {active === version && <Badge text="active" tone="good" />}
+                          </div>
+                          <div className="text-xs text-gray-400">{stats.totalScores} setups</div>
+                          <div className="mt-1 flex items-center justify-between">
+                            <span className="text-gray-400">Win rate</span>
+                            <Badge text={pct(stats.winRate)} tone={stats.winRate === null ? "neutral" : stats.winRate >= 0.5 ? "good" : "bad"} />
+                          </div>
+                          <div className="mt-1 flex items-center justify-between text-xs text-gray-500">
+                            <span>Avg R</span>
+                            <span>{stats.avgRMultiple !== null ? stats.avgRMultiple.toFixed(2) : "n/a"}</span>
+                          </div>
+                          <div className="mt-1 flex items-center justify-between text-xs text-gray-500">
+                            <span>Resolved</span>
+                            <span>{stats.resolvedCount}</span>
+                          </div>
                         </div>
-                        <div className="text-xs text-gray-400">{stats.totalScores} setups</div>
-                        <div className="mt-1 flex items-center justify-between">
-                          <span className="text-gray-400">Win rate</span>
-                          <Badge text={pct(stats.winRate)} tone={stats.winRate === null ? "neutral" : stats.winRate >= 0.5 ? "good" : "bad"} />
-                        </div>
-                        <div className="mt-1 flex items-center justify-between text-xs text-gray-500">
-                          <span>Avg R</span>
-                          <span>{stats.avgRMultiple !== null ? stats.avgRMultiple.toFixed(2) : "n/a"}</span>
-                        </div>
-                        <div className="mt-1 flex items-center justify-between text-xs text-gray-500">
-                          <span>Resolved</span>
-                          <span>{stats.resolvedCount}</span>
-                        </div>
-                      </div>
-                    ))}
+                      ) : null
+                    )}
                   </div>
-                  {v1.winRate !== null && v2.winRate !== null && (
-                    <p className="text-xs text-gray-500">
-                      {v2.winRate > v1.winRate
-                        ? `v2 is currently outperforming v1 by ${Math.round((v2.winRate - v1.winRate) * 100)} points in this session.`
-                        : v2.winRate < v1.winRate
-                          ? `v1 is currently outperforming v2 by ${Math.round((v1.winRate - v2.winRate) * 100)} points in this session.`
-                          : "v1 and v2 are performing identically so far in this session."}
-                    </p>
-                  )}
+                  {(() => {
+                    const withRates = statsByVersion.filter((v) => v.stats?.winRate !== null) as { version: Version; stats: NonNullable<(typeof statsByVersion)[number]["stats"]> }[];
+                    if (withRates.length < 2) return null;
+                    const best = withRates.reduce((a, b) => ((b.stats.winRate ?? 0) > (a.stats.winRate ?? 0) ? b : a));
+                    return (
+                      <p className="text-xs text-gray-500">
+                        {best.version.toUpperCase()} is currently the best-performing version in this session ({pct(best.stats.winRate)} win rate).
+                      </p>
+                    );
+                  })()}
                 </div>
               )}
             </Panel>

@@ -39,6 +39,7 @@ export default function JournalPage() {
             <th>Entry Px</th>
             <th>Exit Px</th>
             <th>Exit Reason</th>
+            <th>Result</th>
             <th>P&L</th>
             <th>MAE/MFE</th>
             <th>Regime</th>
@@ -57,6 +58,11 @@ export default function JournalPage() {
               <td>{t.entryPrice}</td>
               <td>{t.exitPrice ?? "-"}</td>
               <td className="text-gray-400">{t.exitReason ?? "-"}</td>
+              <td>
+                {t.status === "closed" && t.pnl != null && (
+                  <Badge text={t.pnl >= 0 ? "WIN" : "LOSS"} tone={t.pnl >= 0 ? "good" : "bad"} />
+                )}
+              </td>
               <td className={(t.pnl ?? 0) >= 0 ? "text-good" : "text-bad"}>{t.pnl != null ? `$${t.pnl.toFixed(2)}` : "-"}</td>
               <td className="text-gray-400">
                 {t.mfe != null ? t.mfe.toFixed(2) : "-"} / {t.mae != null ? t.mae.toFixed(2) : "-"}

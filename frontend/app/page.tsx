@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useMemo } from "react";
 import useSWR from "swr";
 import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import { fetcher } from "@/lib/api";
@@ -19,7 +20,9 @@ import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
 import { ActionBanner } from "@/components/ActionBanner";
 import { QuickOrderPanel } from "@/components/QuickOrderPanel";
-import { useLiveEvents } from "@/lib/useLiveEvents";
+import { PpmSpeedGauge } from "@/components/PpmSpeedGauge";
+import { LiveFeed } from "@/components/LiveFeed";
+import { RecentTrades } from "@/components/RecentTrades";
 
 const SESSION_LABELS: Record<string, string> = { new_york: "New York", london: "London", asian: "Asian" };
 const SESSION_ORDER = ["new_york", "london", "asian"];
@@ -38,16 +41,19 @@ export default function DashboardPage() {
   const { data: systemState } = useSWR<SystemState>("/api/system/state", fetcher, { refreshInterval: 10000 });
   const { data: performance } = useSWR<PerformanceSummary>("/api/performance/summary", fetcher, { refreshInterval: 20000 });
   const { data: sessionPerf } = useSWR<Record<string, SessionPerformance>>("/api/analytics/session-performance", fetcher, {
-    refreshInterval: 30000,
+    refreshInterval: 3600000, // backend caches this for 24h -- polling faster than that just re-requests the same cached response
   });
-  const { events, connected } = useLiveEvents(20);
-
   const latestEquity = equityCurve?.at(-1)?.equity ?? account?.startingBalance ?? 0;
   const startingBalance = account?.startingBalance ?? 0;
   const pnl = latestEquity - startingBalance;
   const openRisk = positions?.reduce((sum, p) => sum + Math.abs((p.entryPrice - p.stopPrice) * p.quantity), 0) ?? 0;
 
-  const chartData = (equityCurve ?? []).map((p) => ({ time: new Date(p.time).toLocaleString(), equity: p.equity }));
+  // Only a new reference when the 15s-polled equity data actually changes --
+  // otherwise Recharts repaints the SVG on every unrelated re-render.
+  const chartData = useMemo(
+    () => (equityCurve ?? []).map((p) => ({ time: new Date(p.time).toLocaleString(), equity: p.equity })),
+    [equityCurve]
+  );
 
   return (
     <div className="space-y-6">
@@ -138,23 +144,14 @@ export default function DashboardPage() {
             {(!positions || positions.length === 0) && <p className="py-4 text-center text-sm text-gray-500">No open positions.</p>}
           </Panel>
 
-          <Panel
-            title="Live Feed"
-            action={<Badge text={connected ? "connected" : "reconnecting..."} tone={connected ? "good" : "warn"} />}
-          >
-            <ul className="max-h-64 space-y-1.5 overflow-y-auto text-sm">
-              {events.length === 0 && <li className="text-gray-500">Waiting for engine events...</li>}
-              {events.map((e, i) => (
-                <li key={i} className="flex items-start gap-2 border-b border-white/5 pb-1.5 last:border-0">
-                  <Badge text={String(e.type)} tone="neutral" />
-                  <span className="text-gray-300">{String(e.explanation ?? e.reason ?? JSON.stringify(e))}</span>
-                </li>
-              ))}
-            </ul>
-          </Panel>
+          <RecentTrades />
+
+          <LiveFeed />
         </div>
 
         <div className="space-y-6">
+          <PpmSpeedGauge />
+
           <QuickOrderPanel />
 
           <Panel title="Current Regime">

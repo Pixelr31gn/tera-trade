@@ -19,3 +19,50 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Dev-server logs
+backend/backend-dev.log
+frontend/frontend-dev.log
+frontend/prod-check.log
+
+# Stray Chrome user-data-dir profile artifacts that have ended up directly in
+# the repo root at some point (should live in the debug profile dir instead,
+# see browserWatch/chromeLauncher.ts's defaultUserDataDir) -- not project data.
+ActorSafetyLists/
+AmountExtractionHeuristicRegexes/
+BrowserMetrics/
+BrowserMetrics-spare.pma
+CaptchaProviders/
+CertificateRevocation/
+Crashpad/
+CrashpadMetrics-active.pma
+Crowd Deny/
+Default/
+FileTypePolicies/
+First Run
+FirstPartySetsPreloaded/
+GPUPersistentCache/
+GrShaderCache/
+Last Browser
+Last Version
+Local State
+MEIPreload/
+OnDeviceHeadSuggestModel/
+OptimizationHints/
+PKIMetadata/
+SSLErrorAssistant/
+Safe Browsing/
+SafetyTips/
+ShaderCache/
+Subresource Filter/
+TrustTokenKeyCommitments/
+Variations
+WasmTtsEngine/
+ZxcvbnData/
+component_crx_cache/
+extensions_crx_cache/
+first_party_sets.db
+first_party_sets.db-journal
+hyphen-data/
+optimization_guide_model_store/
+segmentation_platform/

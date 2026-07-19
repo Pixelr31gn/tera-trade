@@ -14,6 +14,8 @@ export function useLiveEvents(maxEvents = 50) {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
+  const nextId = useRef(0);
+
   useEffect(() => {
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout>;
@@ -32,7 +34,10 @@ export function useLiveEvents(maxEvents = 50) {
       ws.onmessage = (event) => {
         try {
           const parsed = JSON.parse(event.data) as LiveEvent;
-          setEvents((prev) => [parsed, ...prev].slice(0, maxEvents));
+          // A stable id at receipt time -- events prepend, so every visible
+          // row's array index shifts on each new tick; keying by index there
+          // makes React mutate existing DOM nodes instead of inserting one.
+          setEvents((prev) => [{ ...parsed, __id: nextId.current++ }, ...prev].slice(0, maxEvents));
         } catch {
           // ignore malformed frames
         }

@@ -12,7 +12,17 @@ import type { GatedScore } from "../scoring/gate.js";
 
 export function explainScore(symbol: string, side: string, gated: GatedScore, threshold: number): string {
   const pct = `${Math.round(gated.probability * 100)}%`;
-  const topFactors = [...gated.factors].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution)).slice(0, 3);
+  // Sorting by |contribution| used to surface a setup's strongest-*supporting*
+  // factors even when explaining a *skip* -- a skipped setup with a strong
+  // ADX reading (say 15/20) but a weak/ranging structure reading (5/20)
+  // would show "ADX confirms strong trend" as a "key factor" for why it was
+  // skipped, which reads as actively contradicting the decision. Sorted by
+  // raw contribution instead: descending (strongest support first) when
+  // taken, ascending (biggest detractors first) when skipped, so the factors
+  // shown always actually explain the decision instead of just being the
+  // loudest numbers regardless of which way they point.
+  const sorted = [...gated.factors].sort((a, b) => (gated.decision === "taken" ? b.contribution - a.contribution : a.contribution - b.contribution));
+  const topFactors = sorted.slice(0, 3);
   const factorText = topFactors.map((f) => f.description).join("; ");
 
   if (gated.decision === "taken") {

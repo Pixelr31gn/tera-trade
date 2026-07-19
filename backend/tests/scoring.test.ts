@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { evaluateSetup } from "../src/scoring/gate.js";
+import { evaluateSetup, shouldOverrideToTaken, type GatedScore } from "../src/scoring/gate.js";
 import { scoreSetup } from "../src/scoring/ruleScorer.js";
 import type { SetupFeatures } from "../src/scoring/features.js";
+
+function fakeGated(decision: "taken" | "skipped_score", probability = 0.7): GatedScore {
+  return { probability, decision, factors: [], modelUsed: "rule_v1", blockReason: null, v3Bucket: null };
+}
 
 function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
   return {
@@ -34,6 +38,11 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     // long-target-edge gate; tests exercising that gate specifically override these.
     longTargetWinRate: 0.9,
     longTargetSampleSize: 100,
+    riskRewardRatio: null,
+    fibSwingDirection: null,
+    fibRetracementPct: null,
+    netPointsPerMinute: null,
+    orderFlowSnapshot: null,
     ...overrides,
   };
 }
@@ -91,59 +100,80 @@ describe("scoreSetup", () => {
 });
 
 describe("evaluateSetup (gate)", () => {
-  it("blocks low-probability setups", () => {
-    const gated = evaluateSetup(features({ trendLabel: "down", side: "long", newsRiskFlag: true, newsMinutesToEvent: 2, adx: 15 }));
+  it("blocks low-probability setups", async () => {
+    const gated = await evaluateSetup(features({ trendLabel: "down", side: "long", newsRiskFlag: true, newsMinutesToEvent: 2, adx: 15 }));
     expect(gated.decision).toBe("skipped_score");
   });
 
-  it("allows high-probability setups", () => {
-    const gated = evaluateSetup(features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9 }));
+  it("allows high-probability setups", async () => {
+    const gated = await evaluateSetup(features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9 }));
     expect(gated.decision).toBe("taken");
     expect(gated.probability).toBeGreaterThanOrEqual(0.65);
   });
 
-  it("blocks a setup that fights a confident daily trend even when everything else looks good", () => {
-    const gated = evaluateSetup(
+  it("blocks a setup that fights a confident daily trend even when everything else looks good", async () => {
+    const gated = await evaluateSetup(
       features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, dailyTrendLabel: "down", dailyTrendConfidence: 0.9 })
     );
     expect(gated.decision).toBe("skipped_score");
   });
 
-  it("blocks an otherwise-qualifying long when the historical 20pt win rate is below 67%, and explains why", () => {
-    const gated = evaluateSetup(
+  it("no longer applies a fixed-target-points hard gate to longs -- a low historical 20pt win rate doesn't block an otherwise-qualifying long", async () => {
+    const gated = await evaluateSetup(
       features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: 0.16, longTargetSampleSize: 339 })
-    );
-    expect(gated.decision).toBe("skipped_score");
-    expect(gated.blockReason).toMatch(/16%/);
-    expect(gated.blockReason).toMatch(/339 samples/);
-  });
-
-  it("blocks an otherwise-qualifying long when there aren't enough historical samples yet", () => {
-    const gated = evaluateSetup(
-      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: null, longTargetSampleSize: 3 })
-    );
-    expect(gated.decision).toBe("skipped_score");
-    expect(gated.blockReason).toMatch(/not enough historical samples/);
-  });
-
-  it("takes an otherwise-qualifying long once the historical 20pt win rate clears 67% with enough samples", () => {
-    const gated = evaluateSetup(
-      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: 0.72, longTargetSampleSize: 40 })
     );
     expect(gated.decision).toBe("taken");
     expect(gated.blockReason).toBeNull();
   });
 
-  it("does not apply the long-target-edge gate to short setups", () => {
-    const gated = evaluateSetup(
-      features({ trendLabel: "down", side: "short", momentum10: -0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: 0.05, longTargetSampleSize: 500 })
+  it("no longer blocks a long just because there aren't enough historical fixed-target samples yet", async () => {
+    const gated = await evaluateSetup(
+      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: null, longTargetSampleSize: 3 })
     );
     expect(gated.decision).toBe("taken");
+    expect(gated.blockReason).toBeNull();
   });
 
-  it("passes the strategy version through to the rule scorer", () => {
-    const v1 = evaluateSetup(features({ marketStructureLabel: "ranging" }), "v1");
-    const v2 = evaluateSetup(features({ marketStructureLabel: "ranging" }), "v2");
+  it("passes the strategy version through to the rule scorer", async () => {
+    const v1 = await evaluateSetup(features({ marketStructureLabel: "ranging" }), "v1");
+    const v2 = await evaluateSetup(features({ marketStructureLabel: "ranging" }), "v2");
     expect(v1.probability).not.toBe(v2.probability);
+  });
+});
+
+describe("evaluateSetup (gate) - v3", () => {
+  it("throws if v3Inputs (bars) aren't provided", async () => {
+    await expect(evaluateSetup(features({}), "v3")).rejects.toThrow(/v3Inputs is required/);
+  });
+
+  // evaluateSetup's v3 path also calls computeHistoricalAdjustment, which
+  // hits the real DB -- deliberately not unit-tested end-to-end here, same
+  // convention as engine/fixedTargetEdgeCache.ts / engine/openingRangeCache.ts:
+  // the DB query wrapper isn't unit tested, only the pure logic feeding it.
+  // See tests/ruleScorerV3.test.ts for scoreSetupV3Directional coverage and
+  // computeAdjustmentFromOutcomes for the historical-adjustment math itself.
+});
+
+describe("shouldOverrideToTaken (v1/v2 -> v3 override)", () => {
+  it("overrides when both v1 and v2 took the setup", () => {
+    expect(shouldOverrideToTaken(fakeGated("taken"), fakeGated("taken"))).toBe(true);
+  });
+
+  it("does not override when only v1 took it", () => {
+    expect(shouldOverrideToTaken(fakeGated("taken"), fakeGated("skipped_score"))).toBe(false);
+  });
+
+  it("does not override when only v2 took it", () => {
+    expect(shouldOverrideToTaken(fakeGated("skipped_score"), fakeGated("taken"))).toBe(false);
+  });
+
+  it("does not override when neither took it", () => {
+    expect(shouldOverrideToTaken(fakeGated("skipped_score"), fakeGated("skipped_score"))).toBe(false);
+  });
+
+  it("does not override when either version's result is missing", () => {
+    expect(shouldOverrideToTaken(undefined, fakeGated("taken"))).toBe(false);
+    expect(shouldOverrideToTaken(fakeGated("taken"), undefined)).toBe(false);
+    expect(shouldOverrideToTaken(undefined, undefined)).toBe(false);
   });
 });

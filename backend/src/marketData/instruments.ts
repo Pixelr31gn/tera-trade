@@ -44,3 +44,13 @@ export function getInstrument(symbol: string): InstrumentSpec {
   if (!spec) throw new Error(`Unknown instrument symbol: ${symbol}`);
   return spec;
 }
+
+// The subset actually traded, per the user -- ES, CL, and GC are excluded
+// from every *recurring* background job (browser-tick collection, continuous
+// scoring, backfill, rollups) so no compute/DB writes are spent analyzing
+// symbols nobody trades (2026-07-15: narrowed to NQ only -- "I don't trade
+// ES"). DEFAULT_INSTRUMENTS itself is untouched and every excluded symbol's
+// existing historical data stays queryable -- on-demand/read-only endpoints
+// (market snapshot, performance history, regime display) still use the full
+// list so past data remains visible if anyone looks it up.
+export const ACTIVE_INSTRUMENTS: InstrumentSpec[] = DEFAULT_INSTRUMENTS.filter((i) => i.symbol === "NQ");

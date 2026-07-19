@@ -18,7 +18,12 @@ const LINKS = [
 export function Nav() {
   const pathname = usePathname();
   return (
-    <nav className="sticky top-0 z-20 flex items-center gap-1 border-b border-white/10 bg-background/70 px-6 py-3 backdrop-blur-xl">
+    // Solid background instead of backdrop-blur -- a sticky element blurring
+    // actively-scrolling content underneath it forces the browser to
+    // recompute that blur on every scroll frame, which is one of the more
+    // expensive things you can ask Chromium to paint. bg-background/95 keeps
+    // the same near-opaque look without the per-frame recomposition cost.
+    <nav className="sticky top-0 z-20 flex items-center gap-1 border-b border-white/10 bg-background/95 px-6 py-3">
       <span className="mr-6 flex items-center gap-2 font-semibold tracking-tight text-white">
         <span className="h-2 w-2 rounded-full bg-accent shadow-glow-accent" />
         Tera Trade

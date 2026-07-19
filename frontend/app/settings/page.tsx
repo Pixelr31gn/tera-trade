@@ -9,8 +9,8 @@ import { Badge } from "@/components/Badge";
 
 const MODES: Array<{ value: "analysis_only" | "paper" | "live"; label: string; description: string }> = [
   { value: "analysis_only", label: "Analysis Only", description: "Scores and regime detection run, but no orders are ever placed." },
-  { value: "paper", label: "Paper Trading", description: "Qualifying setups are executed against the simulated broker." },
-  { value: "live", label: "Live Trading", description: "Requires a real broker (ProjectX Gateway or browser-control) and an explicit server-side confirmation flag." },
+  { value: "paper", label: "Paper Trading", description: "Qualifying setups are executed against the simulated broker. Always available -- switching here never touches the real account." },
+  { value: "live", label: "Live Trading", description: "Requires a live broker to be connected right now (ProjectX Gateway or browser-control) and LIVE_TRADING_CONFIRMED set server-side. Switches instantly, no restart needed." },
 ];
 
 export default function SettingsPage() {
@@ -77,7 +77,7 @@ export default function SettingsPage() {
       >
         <div className="space-y-3">
           {MODES.map((m) => {
-            const disabled = m.value === "live" && systemState?.brokerKind !== "projectx" && systemState?.brokerKind !== "browser_control";
+            const disabled = m.value === "live" && !systemState?.liveBrokerConnected;
             return (
               <button
                 key={m.value}

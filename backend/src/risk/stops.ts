@@ -25,7 +25,12 @@ export function computeInitialStop(
   opts: { atrMultiplier?: Decimal; takeProfitRMultiple?: Decimal; tickSize?: Decimal; chandelierAtrMultiplier?: Decimal } = {}
 ): StopPlan {
   const atrMultiplier = opts.atrMultiplier ?? new Decimal("1.5");
-  const takeProfitRMultiple = opts.takeProfitRMultiple ?? new Decimal("2.0");
+  // 3.0 (not the more common 2.0) so the point-based target already satisfies
+  // tradePlan.ts's MIN_RISK_REWARD_DENOMINATOR floor by construction -- see
+  // that file's comment for why a fixed-dollar target decoupled from the
+  // actual stop distance was dragging tight, structurally-correct stops out
+  // to an arbitrary ~4-5pt distance whenever position size got capped.
+  const takeProfitRMultiple = opts.takeProfitRMultiple ?? new Decimal("3.0");
   const tickSize = opts.tickSize ?? new Decimal("0.25");
   const chandelierAtrMultiplier = opts.chandelierAtrMultiplier ?? new Decimal("3.0");
 

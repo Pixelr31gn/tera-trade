@@ -8,11 +8,28 @@
  * auto-escalate from paper to live by itself.
  */
 import { prisma } from "../db/client.js";
-import { BrokerKind, getSettings, TradingMode } from "../core/config.js";
+import { getSettings, TradingMode } from "../core/config.js";
 import type { StrategyVersion } from "../scoring/ruleScorer.js";
 import type { SystemState } from "@prisma/client";
 
 export class ModeChangeError extends Error {}
+
+// Set by index.ts once the live broker (ProjectX/browser-control, if
+// configured) has actually connected -- reflects real runtime state, not a
+// static env var. The engine (see engine/loop.ts's TradingEngine) now holds
+// BOTH a simulated and a live broker simultaneously, so PAPER is always
+// reachable regardless of BROKER_KIND (it always resolves to the simulated
+// broker) and LIVE is reachable exactly when the live broker is actually up
+// -- switching between them from the UI/API no longer requires a restart
+// (2026-07-15 operator request: "I shouldn't have to come into this
+// console and code it").
+let liveBrokerConnected = false;
+export function setLiveBrokerConnected(connected: boolean): void {
+  liveBrokerConnected = connected;
+}
+export function isLiveBrokerConnected(): boolean {
+  return liveBrokerConnected;
+}
 
 export async function getSystemState(): Promise<SystemState> {
   let state = await prisma.systemState.findUnique({ where: { id: 1 } });
@@ -26,18 +43,14 @@ export async function getSystemState(): Promise<SystemState> {
 export async function setMode(mode: TradingMode): Promise<SystemState> {
   const settings = getSettings();
 
-  // PAPER must never place a real order -- executeIfApproved calls
-  // broker.placeOrder() for any mode other than ANALYSIS_ONLY, so without this
-  // check, "paper" was only a naming convention, not an enforced guarantee:
-  // BROKER_KIND=projectx or browser_control + TRADING_MODE=paper would have
-  // silently placed real orders under a label that implies zero real risk.
-  if (mode === TradingMode.PAPER && settings.brokerKind !== BrokerKind.SIMULATED) {
-    throw new ModeChangeError("Cannot switch to PAPER mode: BROKER_KIND must be 'simulated' -- paper mode guarantees no real orders are placed");
-  }
-
+  // PAPER is always reachable -- TradingEngine.brokerForMode hard-codes
+  // PAPER (and ANALYSIS_ONLY) to always resolve to the simulated broker
+  // object itself, regardless of what BROKER_KIND happens to be configured
+  // to. That's a stronger guarantee than gating on env config here ever
+  // was: it can't drift out of sync with what the engine actually does.
   if (mode === TradingMode.LIVE) {
-    if (settings.brokerKind !== BrokerKind.PROJECTX && settings.brokerKind !== BrokerKind.BROWSER_CONTROL) {
-      throw new ModeChangeError("Cannot switch to LIVE mode: BROKER_KIND must be 'projectx' or 'browser_control'");
+    if (!liveBrokerConnected) {
+      throw new ModeChangeError("Cannot switch to LIVE mode: no live broker (ProjectX/browser-control) is currently connected");
     }
     if (!settings.liveTradingConfirmed) {
       throw new ModeChangeError(

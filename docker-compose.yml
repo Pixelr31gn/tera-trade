@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: teratrade-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: teratrade
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: teratrade
+    ports:
+      - "5432:5432"
+    volumes:
+      - teratrade_pgdata_pg18_v2:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U teratrade -d teratrade"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  teratrade_pgdata_pg18_v2:

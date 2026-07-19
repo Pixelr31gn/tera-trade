@@ -9,6 +9,7 @@
  * would already have failed on.
  */
 import { Decimal } from "decimal.js";
+import { getSettings } from "../core/config.js";
 
 export interface AccountRiskState {
   currentEquity: Decimal;
@@ -38,38 +39,46 @@ export interface CircuitBreakerDecision {
 }
 
 export function checkCircuitBreakers(state: AccountRiskState, limits: RiskLimitsConfig): CircuitBreakerDecision {
-  const dailyLossDollars = state.dailyStartingEquity.minus(state.currentEquity);
+  // KILL_SWITCH_ENABLED=false (set for now, during paper testing) skips both
+  // auto-trip checks below entirely -- daily-loss and trailing-drawdown no
+  // longer block or pause anything. The softer per-check pauses further down
+  // (consecutive losses, max daily trades) are untouched; only the kill
+  // switch itself is disabled. Must be re-enabled before ever going live --
+  // see KILL_SWITCH_ENABLED's comment in core/config.ts.
+  if (getSettings().killSwitchEnabled) {
+    const dailyLossDollars = state.dailyStartingEquity.minus(state.currentEquity);
 
-  // Fixed-dollar daily loss cap, checked first when configured -- an absolute
-  // limit that doesn't drift with equity the way the percentage check does.
-  if (limits.maxDailyLossDollars != null && dailyLossDollars.gte(limits.maxDailyLossDollars)) {
-    return {
-      allowed: false,
-      tripKillSwitch: true,
-      reason: `daily loss of $${dailyLossDollars.toFixed(2)} has reached the $${limits.maxDailyLossDollars} daily loss limit`,
-    };
-  }
+    // Fixed-dollar daily loss cap, checked first when configured -- an absolute
+    // limit that doesn't drift with equity the way the percentage check does.
+    if (limits.maxDailyLossDollars != null && dailyLossDollars.gte(limits.maxDailyLossDollars)) {
+      return {
+        allowed: false,
+        tripKillSwitch: true,
+        reason: `daily loss of $${dailyLossDollars.toFixed(2)} has reached the $${limits.maxDailyLossDollars} daily loss limit`,
+      };
+    }
 
-  const dailyLossPct = state.dailyStartingEquity.gt(0) ? dailyLossDollars.dividedBy(state.dailyStartingEquity).times(100) : new Decimal(0);
+    const dailyLossPct = state.dailyStartingEquity.gt(0) ? dailyLossDollars.dividedBy(state.dailyStartingEquity).times(100) : new Decimal(0);
 
-  if (dailyLossPct.gte(limits.maxDailyLossPct)) {
-    return {
-      allowed: false,
-      tripKillSwitch: true,
-      reason: `daily loss of ${dailyLossPct.toFixed(2)}% has reached the ${limits.maxDailyLossPct}% daily loss limit`,
-    };
-  }
+    if (dailyLossPct.gte(limits.maxDailyLossPct)) {
+      return {
+        allowed: false,
+        tripKillSwitch: true,
+        reason: `daily loss of ${dailyLossPct.toFixed(2)}% has reached the ${limits.maxDailyLossPct}% daily loss limit`,
+      };
+    }
 
-  const trailingDdPct = state.peakEquity.gt(0)
-    ? state.peakEquity.minus(state.currentEquity).dividedBy(state.peakEquity).times(100)
-    : new Decimal(0);
+    const trailingDdPct = state.peakEquity.gt(0)
+      ? state.peakEquity.minus(state.currentEquity).dividedBy(state.peakEquity).times(100)
+      : new Decimal(0);
 
-  if (trailingDdPct.gte(limits.maxTrailingDrawdownPct)) {
-    return {
-      allowed: false,
-      tripKillSwitch: true,
-      reason: `trailing drawdown of ${trailingDdPct.toFixed(2)}% has reached the ${limits.maxTrailingDrawdownPct}% trailing drawdown limit`,
-    };
+    if (trailingDdPct.gte(limits.maxTrailingDrawdownPct)) {
+      return {
+        allowed: false,
+        tripKillSwitch: true,
+        reason: `trailing drawdown of ${trailingDdPct.toFixed(2)}% has reached the ${limits.maxTrailingDrawdownPct}% trailing drawdown limit`,
+      };
+    }
   }
 
   if (state.consecutiveLosses >= limits.maxConsecutiveLosses) {

@@ -113,6 +113,24 @@ describe("extractPriceForSymbol", () => {
     expect(extractPriceForSymbol(pageText, "ES")).toBeCloseTo(7557.0);
     expect(extractPriceForSymbol(pageText, "NQ")).toBeCloseTo(29901.75);
   });
+
+  it("ignores a stale 'Order Filled' toast and still finds the real quote price (2026-07-15 incident)", () => {
+    // Real incident: a stuck Toastify "Order Filled" notification for a
+    // closed MNQU26 trade lingered in the page for 30+ minutes. "MNQU26"
+    // contains the substring "nq", so the loose fallback search matched the
+    // toast's body before ever reaching the real "NQ" quote line below it,
+    // and froze the recorded price at the toast's old fill price instead.
+    const pageText = ["Order Filled", "-2 MNQU26 Market", "Execute Price: 29,624.00", "53.33%", "Watchlist", "NQ", "29,708.25"].join(
+      "\n"
+    );
+
+    expect(extractPriceForSymbol(pageText, "NQ")).toBeCloseTo(29708.25);
+  });
+
+  it("returns null (not a stale toast price) when a toast is the only 'nq'-matching text on the page", () => {
+    const pageText = ["Order Filled", "-2 MNQU26 Market", "Execute Price: 29,624.00", "53.33%"].join("\n");
+    expect(extractPriceForSymbol(pageText, "NQ")).toBeNull();
+  });
 });
 
 describe("extractVolumeForSymbol", () => {
@@ -158,6 +176,38 @@ describe("extractVolumeForSymbol", () => {
   it("returns null when there's no volume figure for that row", () => {
     const pageText = "ESU26\n7,557.00\n28.75";
     expect(extractVolumeForSymbol(pageText, "ES")).toBeNull();
+  });
+
+  it("still reads the real Volume column with a stale order-filled toast sitting just above the quote table", () => {
+    const pageText = [
+      "Order Filled",
+      "-2 MNQU26 Market",
+      "Execute Price: 29,624.00",
+      "53.33%",
+      "Contract",
+      "Last",
+      "Change",
+      "% Chg",
+      "Open",
+      "Bid",
+      "Ask",
+      "High",
+      "Low",
+      "Volume",
+      "Remove",
+      "NQU26",
+      "29,901.75",
+      "345.75",
+      "1.17%",
+      "29,566.00",
+      "29,896.50",
+      "29,922.25",
+      "29,955.25",
+      "29,522.00",
+      "98,210",
+    ].join("\n");
+
+    expect(extractVolumeForSymbol(pageText, "NQ")).toBe(98210);
   });
 });
 

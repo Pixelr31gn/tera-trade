@@ -60,3 +60,25 @@ export function findSwing(bars: Array<{ high: number; low: number }>): Swing | n
 
   return { high: bars[highIdx]!.high, low: bars[lowIdx]!.low, direction: highIdx > lowIdx ? "up" : "down" };
 }
+
+/**
+ * Normalized [-1, 1] signal for how well a setup's side matches the swing
+ * structure it's actually inside of -- shared by every scoring version (see
+ * scoring/ruleScorer.ts, scoring/ruleScorerV3.ts) so they all judge "does
+ * this setup validate against Fibonacci structure" the same way, just weight
+ * it differently. -1 = fighting the swing's direction entirely. +1 = aligned
+ * AND sitting in the classic 38.2%-61.8% "healthy pullback" retracement
+ * zone. Aligned but barely pulled back (<23.6%, chasing the move) or aligned
+ * but deep into the retracement (>78.6%, swing structure at risk of
+ * failing) score positively but lower -- hand-set tiers, not fitted.
+ */
+export function fibDirectionSignal(swingDirection: "up" | "down" | null, retracementPct: number | null, side: "long" | "short"): number {
+  if (swingDirection === null) return 0;
+  const aligned = (swingDirection === "up" && side === "long") || (swingDirection === "down" && side === "short");
+  if (!aligned) return -1;
+  if (retracementPct === null) return 0.5;
+  if (retracementPct >= 0.382 && retracementPct <= 0.618) return 1;
+  if (retracementPct < 0.236) return 0.4; // barely pulled back -- chasing the move
+  if (retracementPct > 0.786) return 0.1; // deep retracement -- swing structure likely broken
+  return 0.7; // moderate zones (23.6%-38.2% or 61.8%-78.6%)
+}

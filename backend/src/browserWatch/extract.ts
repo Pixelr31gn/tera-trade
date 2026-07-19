@@ -79,7 +79,44 @@ export function extractLabeledNumber(pageText: string, labels: string[]): number
   return null;
 }
 
-export function extractAccountSnapshot(pageText: string): BrowserAccountSnapshot {
+// TopstepX's "Order Filled"/rejected/cancelled toast notifications can
+// linger in the DOM far longer than they're visually shown (confirmed live,
+// 2026-07-15: a stale toast from an old closed trade sat in the page for
+// hours) and contain a contract code + "Execute Price: ..." line that reads
+// exactly like a live quote row to the label-based extraction below.
+// Without stripping these first, a fallback substring match (e.g. "nq"
+// matching inside "MNQU26") can latch onto a frozen historical fill price
+// forever instead of the actual current market price -- this was traced to
+// a real incident where NQ's price and every downstream signal/analytics
+// read (points-per-minute, real strategy signals) went dead for 30+ minutes
+// because the extraction got stuck on one old toast's fill price. Each
+// toast block is a fixed, short shape (heading, then a "<qty> <contract>
+// <order type>" line, then "Execute Price: ..." (or similar), then often
+// one trailing %-figure line) -- stripped out entirely before any
+// extraction runs, from every toast in the page, not just the first.
+const TOAST_HEADING_PATTERN = /^(order filled|order rejected|order cancelled|order canceled|order working)$/i;
+const TOAST_BODY_LINES_TO_SKIP = 3;
+
+function stripToastNotifications(pageText: string): string {
+  const lines = pageText.split("\n");
+  const result: string[] = [];
+  let toastLinesRemaining = 0;
+  for (const rawLine of lines) {
+    if (TOAST_HEADING_PATTERN.test(rawLine.trim())) {
+      toastLinesRemaining = TOAST_BODY_LINES_TO_SKIP;
+      continue;
+    }
+    if (toastLinesRemaining > 0) {
+      toastLinesRemaining--;
+      continue;
+    }
+    result.push(rawLine);
+  }
+  return result.join("\n");
+}
+
+export function extractAccountSnapshot(rawPageText: string): BrowserAccountSnapshot {
+  const pageText = stripToastNotifications(rawPageText);
   const balance = extractLabeledNumber(pageText, BALANCE_LABELS);
   const explicitEquity = extractLabeledNumber(pageText, EQUITY_LABELS);
   const unrealizedPnl = extractLabeledNumber(pageText, UNREALIZED_PNL_LABELS);
@@ -118,8 +155,8 @@ function findNearbyPrice(lines: string[], startIndex: number): number | null {
  * first-match-wins search, this keeps scanning past any label match that
  * doesn't yield a nearby price instead of giving up.
  */
-export function extractPriceForSymbol(pageText: string, symbol: string, aliases: string[] = []): number | null {
-  const lines = pageText.split("\n").map((l) => l.trim()).filter(Boolean);
+export function extractPriceForSymbol(rawPageText: string, symbol: string, aliases: string[] = []): number | null {
+  const lines = stripToastNotifications(rawPageText).split("\n").map((l) => l.trim()).filter(Boolean);
 
   const contractCodePattern = new RegExp(`^${symbol}[${FUTURES_MONTH_CODES}]\\d{2}$`, "i");
   for (let i = 0; i < lines.length; i++) {
@@ -155,8 +192,8 @@ const ANY_CONTRACT_CODE_PATTERN = new RegExp(`^[A-Z]{1,3}[${FUTURES_MONTH_CODES}
  * only looks within the current row (stops at the next contract code) to
  * avoid drifting into an unrelated column.
  */
-export function extractVolumeForSymbol(pageText: string, symbol: string, aliases: string[] = []): number | null {
-  const lines = pageText.split("\n").map((l) => l.trim()).filter(Boolean);
+export function extractVolumeForSymbol(rawPageText: string, symbol: string, aliases: string[] = []): number | null {
+  const lines = stripToastNotifications(rawPageText).split("\n").map((l) => l.trim()).filter(Boolean);
   const contractCodePattern = new RegExp(`^${symbol}[${FUTURES_MONTH_CODES}]\\d{2}$`, "i");
 
   for (let i = 0; i < lines.length; i++) {

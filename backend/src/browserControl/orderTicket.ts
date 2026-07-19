@@ -15,6 +15,9 @@
  */
 import type { Locator, Page } from "playwright-core";
 import { buildContractPattern } from "./pure.js";
+import { childLogger } from "../core/logger.js";
+
+const logger = childLogger("orderTicket");
 
 export interface OrderWidget {
   buyButton: Locator;
@@ -59,12 +62,14 @@ export async function findOrderWidget(page: Page, contractPrefix: string): Promi
   const buyButtons = page.locator('[data-testid="order-card-click-button-buy"]');
   const count = await buyButtons.count();
 
+  const seenContractTexts: string[] = [];
   for (let i = 0; i < count; i++) {
     const buyButton = buyButtons.nth(i);
     const contractText = await buyButton
       .locator('xpath=preceding::input[@type="text"][1]')
       .inputValue()
       .catch(() => "");
+    seenContractTexts.push(contractText);
     if (!pattern.test(contractText)) continue;
 
     return {
@@ -75,7 +80,34 @@ export async function findOrderWidget(page: Page, contractPrefix: string): Promi
       qtyInput: buyButton.locator('xpath=preceding::input[@type="number"][1]'),
     };
   }
+  // Logged at warn (not just returned as null) so a widget-not-found failure
+  // -- e.g. during a close-position call -- leaves behind what contract text
+  // each order card actually showed, instead of just "not found" with no way
+  // to tell whether TopstepX's DOM changed once a position was open.
+  logger.warn({ contractPrefix, buyButtonCount: count, seenContractTexts }, "order_widget_not_found");
   return null;
+}
+
+/**
+ * Read-only check for whether the order-entry widget for `contractPrefix`
+ * currently shows "No Active Position" -- TopstepX's own literal text for a
+ * flat position, confirmed live (2026-07-15). Returns null (not false) when
+ * this can't be determined confidently -- the widget wasn't found, or its
+ * text couldn't be read -- so callers never mistake "couldn't check" for
+ * "confirmed flat." Scoped to the same order card as the widget's own
+ * close-position button (a stable, semantically-meaningful ancestor) rather
+ * than a fixed DOM depth, since exact markup levels aren't guaranteed stable.
+ */
+export async function isPositionFlat(page: Page, contractPrefix: string): Promise<boolean | null> {
+  const widget = await findOrderWidget(page, contractPrefix);
+  if (!widget) return null;
+
+  const cardText = await widget.buyButton
+    .locator("xpath=ancestor::div[.//*[@data-testid='order-card-click-button-close-position']][1]")
+    .textContent()
+    .catch(() => null);
+  if (cardText === null) return null;
+  return cardText.includes("No Active Position");
 }
 
 /** Sets the order ticket's quantity and verifies the buy button's own displayed quantity actually changed before returning. */
@@ -102,7 +134,11 @@ export async function configureBracket(page: Page, widget: OrderWidget, riskDoll
   const riskInput = page.locator('input[name="risk"]');
   await riskInput.waitFor({ state: "visible", timeout: 5000 });
 
-  const autoApplyCheckbox = page.locator('input[type="checkbox"]').first();
+  // Stable data-testid (confirmed live), NOT `input[type="checkbox"].first()`
+  // on the whole page -- that untargeted lookup previously let a real order
+  // go out with the auto-apply toggle never actually confirmed checked, with
+  // no real bracket attached to the position at all.
+  const autoApplyCheckbox = page.locator('[data-testid="auto-oco-brackets-toggle-switch-auto-apply"] input[type="checkbox"]');
   await autoApplyCheckbox.check(); // no-op if already checked -- never blindly toggles
 
   await riskInput.fill(String(riskDollars));
@@ -112,6 +148,23 @@ export async function configureBracket(page: Page, widget: OrderWidget, riskDoll
     const profitInput = page.locator('input[name="toMake"]');
     await profitInput.fill(String(profitDollars));
     await profitInput.press("Tab");
+  }
+
+  // Hard verification before closing the popover -- if the checkbox didn't
+  // actually end up checked, or the typed values didn't take, refuse rather
+  // than silently submit an order with no real bracket attached.
+  if (!(await autoApplyCheckbox.isChecked())) {
+    throw new Error("bracket auto-apply checkbox did not end up checked -- refusing to submit an order that would have no stop/target attached");
+  }
+  const riskValue = await riskInput.inputValue();
+  if (riskValue !== String(riskDollars)) {
+    throw new Error(`bracket risk input reads "${riskValue}" after fill, expected "${riskDollars}" -- refusing to submit`);
+  }
+  if (profitDollars !== null) {
+    const profitValue = await page.locator('input[name="toMake"]').inputValue();
+    if (profitValue !== String(profitDollars)) {
+      throw new Error(`bracket profit input reads "${profitValue}" after fill, expected "${profitDollars}" -- refusing to submit`);
+    }
   }
 
   await page.locator("button", { hasText: /^Close$/ }).last().click();

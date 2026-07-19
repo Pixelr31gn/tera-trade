@@ -37,7 +37,7 @@ describe.skipIf(!hasRealDb)("engine integration", () => {
       })),
     });
 
-    const engine = new TradingEngine(new SimulatedBroker());
+    const engine = new TradingEngine(new SimulatedBroker(), null, null);
     const last = bars[bars.length - 1]!;
     await engine.onNewBar(symbol, last.time, new Decimal(last.open), new Decimal(last.high), new Decimal(last.low), new Decimal(last.close), new Decimal(last.volume));
 

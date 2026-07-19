@@ -1,6 +1,6 @@
 import { prisma } from "../db/client.js";
 import { childLogger } from "../core/logger.js";
-import { DEFAULT_INSTRUMENTS, type InstrumentSpec } from "./instruments.js";
+import { ACTIVE_INSTRUMENTS, DEFAULT_INSTRUMENTS, type InstrumentSpec } from "./instruments.js";
 import { fetchYahooChart, type YahooBar } from "./yahooClient.js";
 
 const logger = childLogger("backfill");
@@ -88,7 +88,9 @@ function sleep(ms: number): Promise<void> {
 
 export async function runFullBackfill(days = 365): Promise<void> {
   await ensureInstrumentsSeeded();
-  for (const spec of DEFAULT_INSTRUMENTS) {
+  // Only the actively-traded symbols -- see ACTIVE_INSTRUMENTS's comment.
+  // CL/GC's existing historical data is untouched, just never re-fetched.
+  for (const spec of ACTIVE_INSTRUMENTS) {
     await backfillDaily(spec, days);
     await backfillRecentIntraday(spec);
     // A little breathing room between symbols regardless -- cheap insurance

@@ -4,7 +4,7 @@ import { prisma } from "../../db/client.js";
 import { requireApiKey } from "../../core/security.js";
 import { getBroker, OrderSide, OrderType } from "../../brokers/index.js";
 import { getSettings, TradingMode } from "../../core/config.js";
-import { computeAccountEquity, computeAccountRiskState } from "../../engine/accounting.js";
+import { computeAccountEquity, computeAccountRiskState, currentBrokerKind } from "../../engine/accounting.js";
 import { ensureDefaultAccount } from "../../engine/bootstrap.js";
 import { getSystemState } from "../../execution/mode.js";
 import { checkCircuitBreakers, type RiskLimitsConfig } from "../../risk/index.js";
@@ -138,8 +138,15 @@ export async function tradesRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Querystring: { status?: string; symbol?: string; limit?: string } }>("/api/trades", async (request) => {
     const { status, symbol } = request.query;
     const limit = Math.min(Number(request.query.limit ?? 200), 1000);
+    // Scoped to the broker matching the current mode (paper vs live) so a
+    // paper run never shows real Topstep trades, or vice versa -- paper and
+    // live share one account row, so this previously only claimed to filter
+    // by mode in its own comment without actually doing so (2026-07-15
+    // operator report: switching modes didn't change what was displayed).
+    const account = await ensureDefaultAccount();
+    const brokerKind = await currentBrokerKind();
     const rows = await prisma.trade.findMany({
-      where: { ...(status ? { status } : {}), ...(symbol ? { symbol } : {}) },
+      where: { accountId: account.id, brokerKind, ...(status ? { status } : {}), ...(symbol ? { symbol } : {}) },
       orderBy: { entryTime: "desc" },
       take: limit,
     });

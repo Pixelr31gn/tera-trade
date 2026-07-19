@@ -182,6 +182,18 @@ model Score {
   atrAtSignal                 Decimal  @map("atr_at_signal") @db.Decimal(18, 8)
   riskRewardRatio             Decimal? @map("risk_reward_ratio") @db.Decimal(6, 3)
 
+  /// "breakout" | "reversal" | null (continuous-scan rows have no real
+  /// signal, so no kind) -- see strategy/types.ts's Signal.signalKind. Needed
+  /// to accurately replay the risk engine's S/R gate later (e.g. for the
+  /// actionable-recommendations endpoint's "would this really execute"
+  /// check) -- that gate behaves differently for a breakout than a
+  /// reversal, and there was previously no way to reconstruct which one a
+  /// past signal was.
+  signalKind         String?  @map("signal_kind")
+  /// Only set when signalKind is "breakout": the actual prior high/low the
+  /// signal broke through (see Signal.breakoutLevelPrice's comment).
+  breakoutLevelPrice Decimal? @map("breakout_level_price") @db.Decimal(18, 8)
+
   /// Filled in later by the outcome evaluator (engine/outcomeEvaluator.ts):
   /// "executed_win" | "executed_loss" | "missed_win" | "missed_loss" |
   /// "no_resolution" | null (still pending -- not enough time/bars have
@@ -197,6 +209,26 @@ model Score {
   /// execution (see SystemState.activeStrategyVersion).
   strategyVersion String @default("v1") @map("strategy_version")
 
+  /// Coarse categorical fingerprint of market conditions at signal time --
+  /// only populated for v3 rows (see scoring/ruleScorerV3.ts's
+  /// computeV3Bucket). Used by scoring/v3HistoricalAdjustment.ts to find the
+  /// most recent resolved setups that looked similar, so a new setup's score
+  /// can be adjusted by how well similar-looking setups actually performed.
+  v3Bucket String? @map("v3_bucket")
+
+  /// Denormalized copies of the same-named fields inside `features` (JSON).
+  /// The session-performance/strategy-comparison analytics queries only
+  /// ever need these three scalars, not the whole feature vector -- pulling
+  /// the full `features` blob for every row in the lookback window was
+  /// measured at ~28s for ~12,700 rows (JSON payload size, not a missing
+  /// index -- those queries intentionally select most of the table, where a
+  /// sequential scan already beats an index scan). Flat columns here let
+  /// those endpoints select a handful of small strings instead. Only
+  /// populated going forward; existing rows carry these as null.
+  marketStructureLabel String? @map("market_structure_label")
+  liquidityLabel       String? @map("liquidity_label")
+  priceActionLabel     String? @map("price_action_label")
+
   trade Trade? @relation(fields: [tradeId], references: [id])
 
   @@unique([time, symbol, strategyId, strategyVersion])
@@ -204,6 +236,9 @@ model Score {
   @@index([decision, acknowledged, time])
   @@index([session, outcomeLabel])
   @@index([strategyVersion, session, outcomeLabel])
+  @@index([strategyVersion, v3Bucket, time])
+  @@index([time, session])
+  @@index([outcomeLabel, tradeId])
   @@map("scores")
 }
 
@@ -231,12 +266,17 @@ model Trade {
   explanation         String    @default("")
   status              String    @default("open")
   brokerOrderId       String?   @map("broker_order_id")
+  /// Which broker actually owns this position ("simulated" | "browser_control" | "projectx") -- recorded at entry so an
+  /// open trade is always managed by the correct broker regardless of later system-mode switches (see engine/loop.ts's
+  /// brokerForTrade). Defaults to "simulated" for pre-migration rows; safe since no trade was open when this was added.
+  brokerKind          String    @default("simulated") @map("broker_kind")
 
   account Account @relation(fields: [accountId], references: [id])
   orders  OrderRecord[]
   scores  Score[]
 
   @@index([symbol])
+  @@index([accountId, status, brokerKind])
   @@map("trades")
 }
 
@@ -282,10 +322,39 @@ model EquityCurvePoint {
   accountId Int     @map("account_id")
   equity    Decimal @db.Decimal(18, 2)
   balance   Decimal @db.Decimal(18, 2)
+  /// Which broker this point reflects ("simulated" | "browser_control" | "projectx") -- paper and live share one
+  /// account row, so without this, peak-equity/drawdown circuit breakers would mix a live account's real balance
+  /// with a paper run's simulated one into the same curve. Part of the primary key so a live and paper point can
+  /// both exist for the same instant.
+  brokerKind String  @default("simulated") @map("broker_kind")
 
   account Account @relation(fields: [accountId], references: [id])
 
-  @@id([time, accountId])
-  @@index([accountId, time])
+  @@id([time, accountId, brokerKind])
+  @@index([accountId, brokerKind, time])
   @@map("equity_curve")
+}
+
+// A rolling window of live order-flow, captured by listening to the
+// SignalR WebSocket traffic TopstepX's own web platform already receives
+// (RealTimeDom/RealTimeTradeLogWithSpeed/RealTimeTilt) -- not scraped DOM
+// text, which turned out to go stale when the ladder widget isn't actively
+// centered on price. See browserWatch/orderFlowListener.ts. Each row
+// summarizes one flush interval (best bid/ask size at flush time, buy vs.
+// sell aggressor trade volume accumulated during the window, and TopstepX's
+// own crowd long/short positioning bias where available).
+model OrderFlowSnapshot {
+  id            Int      @id @default(autoincrement())
+  time          DateTime
+  symbol        String
+  bestBidSize   Decimal? @map("best_bid_size") @db.Decimal(18, 4)
+  bestAskSize   Decimal? @map("best_ask_size") @db.Decimal(18, 4)
+  buyVolume     Decimal  @default(0) @map("buy_volume") @db.Decimal(18, 4)
+  sellVolume    Decimal  @default(0) @map("sell_volume") @db.Decimal(18, 4)
+  tradeCount    Int      @default(0) @map("trade_count")
+  tiltLongBias  Decimal? @map("tilt_long_bias") @db.Decimal(9, 5)
+  tiltShortBias Decimal? @map("tilt_short_bias") @db.Decimal(9, 5)
+
+  @@index([symbol, time])
+  @@map("order_flow_snapshots")
 }

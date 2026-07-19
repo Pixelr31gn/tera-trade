@@ -23,7 +23,16 @@ import { Decimal } from "decimal.js";
 import type { Browser, Page } from "playwright-core";
 import { connectToChrome, findPage } from "../browserWatch/cdpClient.js";
 import { computeBracketDollars } from "../browserControl/pure.js";
-import { configureBracket, findBlockingModalText, findOrderWidget, setQuantity, submitBuy, submitClosePosition, submitSell } from "../browserControl/orderTicket.js";
+import {
+  configureBracket,
+  findBlockingModalText,
+  findOrderWidget,
+  isPositionFlat as isPositionFlatCheck,
+  setQuantity,
+  submitBuy,
+  submitClosePosition,
+  submitSell,
+} from "../browserControl/orderTicket.js";
 import { getSettings } from "../core/config.js";
 import { childLogger } from "../core/logger.js";
 import { getLatestBrowserAccountSnapshot } from "../engine/liveAccountOverride.js";
@@ -168,6 +177,16 @@ export class BrowserControlBroker implements BrokerClient {
 
   async cancelOrder(): Promise<boolean> {
     throw new Error("BrowserControlBroker does not support cancelOrder -- use closePosition instead");
+  }
+  async isPositionFlat(symbol: string): Promise<boolean | null> {
+    try {
+      const page = await this.getPage();
+      const instrument = getInstrument(symbol);
+      return await isPositionFlatCheck(page, instrument.brokerContractPrefix);
+    } catch (err) {
+      logger.warn({ symbol, err: String(err) }, "is_position_flat_check_failed");
+      return null; // couldn't determine -- never guess
+    }
   }
   async getPositions(): Promise<BrokerPosition[]> {
     throw new Error("BrowserControlBroker does not support getPositions -- positions are tracked via the trades table");

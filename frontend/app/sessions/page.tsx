@@ -74,7 +74,7 @@ function LabelBreakdownTable({ title, breakdown }: { title: string; breakdown: R
 
 export default function SessionsPage() {
   const { data } = useSWR<Record<string, SessionPerformance>>("/api/analytics/session-performance", fetcher, {
-    refreshInterval: 30000,
+    refreshInterval: 3600000, // backend caches this for 24h -- polling faster than that just re-requests the same cached response
   });
 
   return (

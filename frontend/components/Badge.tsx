@@ -1,4 +1,6 @@
-export function Badge({ text, tone = "neutral" }: { text: string; tone?: "good" | "bad" | "warn" | "neutral" }) {
+import { memo } from "react";
+
+export const Badge = memo(function Badge({ text, tone = "neutral" }: { text: string; tone?: "good" | "bad" | "warn" | "neutral" }) {
   const toneClass = {
     good: "bg-good/15 text-good border-good/30",
     bad: "bg-bad/15 text-bad border-bad/30",
@@ -7,4 +9,4 @@ export function Badge({ text, tone = "neutral" }: { text: string; tone?: "good" 
   }[tone];
 
   return <span className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${toneClass}`}>{text}</span>;
-}
+});

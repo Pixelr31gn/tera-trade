@@ -10,7 +10,9 @@
     "test": "vitest run",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
-    "prisma:migrate:dev": "prisma migrate dev"
+    "prisma:migrate:dev": "prisma migrate dev",
+    "license:generate": "tsx --env-file=.env scripts/generateLicenseKey.ts",
+    "train:v4": "tsx --env-file=.env scripts/trainV4Model.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

@@ -161,6 +161,18 @@ export class SimulatedBroker implements BrokerClient {
     }
   }
 
+  /**
+   * The bracket's current (possibly trailed) stop price, if this broker
+   * instance still remembers opening the position -- null if it doesn't
+   * (e.g. a process restart wiped this in-memory map; brackets/positions are
+   * never persisted). Callers must not treat null as "no stop exists" --
+   * fall back to the durable, DB-persisted stop instead. See
+   * engine/loop.ts's manageOpenTrades for why this distinction matters.
+   */
+  getBracketStopPrice(accountId: string, symbol: string): Decimal | null {
+    return this.brackets.get(this.key(accountId, symbol))?.stopPrice ?? null;
+  }
+
   /** Check whether this bar's range triggered the resting stop or target. */
   evaluateBar(accountId: string, symbol: string, high: Decimal, low: Decimal, barTime: Date): ClosedSimTrade | null {
     const key = this.key(accountId, symbol);

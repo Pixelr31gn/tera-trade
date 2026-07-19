@@ -38,6 +38,7 @@ export class MeanReversionStrategy implements Strategy {
         symbol,
         side: "long",
         structureSwingPrice: new Decimal(last.low),
+        signalKind: "reversal",
         reason: `close ${last.close} is below the lower Bollinger Band (${lower.toFixed(2)}), reversion toward ${sma.toFixed(2)} expected`,
       };
     }
@@ -47,6 +48,7 @@ export class MeanReversionStrategy implements Strategy {
         symbol,
         side: "short",
         structureSwingPrice: new Decimal(last.high),
+        signalKind: "reversal",
         reason: `close ${last.close} is above the upper Bollinger Band (${upper.toFixed(2)}), reversion toward ${sma.toFixed(2)} expected`,
       };
     }

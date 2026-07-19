@@ -9,6 +9,9 @@ import { atr, realizedVolZscore, type OhlcBar } from "../regime/indicators.js";
 import type { RegimeResult } from "../regime/classifier.js";
 import { classifyLiquidity, classifyMarketStructure, describePriceAction, type LiquidityLabel, type MarketStructureLabel, type PriceActionLabel } from "../analytics/priceAction.js";
 import { classifySession, type TradingSession } from "../analytics/session.js";
+import { findSwing } from "../analytics/fibonacci.js";
+import { computePpm } from "../analytics/ppm.js";
+import type { OrderFlowSnapshot } from "../browserWatch/orderFlowListener.js";
 
 export interface SetupFeatures {
   symbol: string;
@@ -43,6 +46,16 @@ export interface SetupFeatures {
   /** Empirical win rate (see engine/fixedTargetEdgeCache.ts) that a LONG setup in this exact (symbol, session) bucket has historically reached a fixed +20pt move before its stop. Null until there's at least one resolved sample. */
   longTargetWinRate: number | null;
   longTargetSampleSize: number;
+  /** Hypothetical take-profit distance / stop distance for this setup's initial stop plan (see risk/tradePlan.ts's 1:3 floor) -- every scoring version factors this in as a certainty input, not just an execution-time sizing rule. Null if a stop plan couldn't be computed. */
+  riskRewardRatio: number | null;
+  /** Direction of the most recent swing (see analytics/fibonacci.ts's findSwing) over a shorter recent lookback than the full bar window -- used to validate a setup's side against the swing structure it's actually inside of. Null if there aren't enough bars for a swing. */
+  fibSwingDirection: "up" | "down" | null;
+  /** How deep into the swing's retracement the current close sits: 0 = right at the swing's most recent extreme (no pullback yet), 1 = fully round-tripped to the opposite extreme (swing structure likely broken). Matches computeFibLevels' 0%/100% convention. Null if there's no valid swing. */
+  fibRetracementPct: number | null;
+  /** Signed points-per-minute over a rolling 15-minute window (see analytics/ppm.ts) -- positive means the market is currently moving up, negative down, independent of the setup's side. Null if there aren't at least 2 ticks in the window. */
+  netPointsPerMinute: number | null;
+  /** Most recent live order-flow read for this symbol (see browserWatch/orderFlowListener.ts and analytics/orderFlow.ts) -- trade-aggressor buy/sell volume and resting bid/ask size from the last flush window, plus TopstepX's crowd "Tilt" bias. Null when the order-flow listener isn't running (PRICE_SOURCE != browser or ORDER_FLOW_ENABLED=false) or hasn't produced a snapshot for this symbol yet. */
+  orderFlowSnapshot: OrderFlowSnapshot | null;
 }
 
 function mean(xs: number[]): number {
@@ -63,7 +76,9 @@ export function buildSetupFeatures(
   dailyTrendLabel: "up" | "down" | "none" = "none",
   dailyTrendConfidence = 0,
   longTargetWinRate: number | null = null,
-  longTargetSampleSize = 0
+  longTargetSampleSize = 0,
+  riskRewardRatio: number | null = null,
+  orderFlowSnapshot: OrderFlowSnapshot | null = null
 ): SetupFeatures {
   const closes = bars.map((b) => b.close);
   const atrSeries = atr(bars).filter((v) => !Number.isNaN(v));
@@ -106,6 +121,26 @@ export function buildSetupFeatures(
   const liquidityLabel = classifyLiquidity(volumeZscore, session);
   const priceActionLabel = describePriceAction(bars);
 
+  // Shorter than the full `bars` window (typically 300) so the swing found
+  // is the current, still-relevant one rather than the single most extreme
+  // high/low anywhere in a long history.
+  const FIB_SWING_LOOKBACK_BARS = 100;
+  const swing = findSwing(bars.slice(-FIB_SWING_LOOKBACK_BARS));
+  let fibSwingDirection: "up" | "down" | null = null;
+  let fibRetracementPct: number | null = null;
+  if (swing) {
+    fibSwingDirection = swing.direction;
+    const range = swing.high - swing.low;
+    if (range > 0) {
+      const lastClose = closes[closes.length - 1]!;
+      fibRetracementPct = swing.direction === "up" ? (swing.high - lastClose) / range : (lastClose - swing.low) / range;
+    }
+  }
+
+  const PPM_WINDOW_MINUTES = 15;
+  const ppm = computePpm(bars, PPM_WINDOW_MINUTES);
+  const netPointsPerMinute = ppm.sampleCount >= 2 ? ppm.netPointsPerMinute : null;
+
   return {
     symbol,
     side,
@@ -134,5 +169,10 @@ export function buildSetupFeatures(
     dailyTrendConfidence,
     longTargetWinRate,
     longTargetSampleSize,
+    riskRewardRatio,
+    fibSwingDirection,
+    fibRetracementPct,
+    netPointsPerMinute,
+    orderFlowSnapshot,
   };
 }

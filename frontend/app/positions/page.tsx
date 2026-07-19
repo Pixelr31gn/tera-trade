@@ -1,22 +1,27 @@
 "use client";
 
+import { useState } from "react";
 import useSWR from "swr";
 import { apiFetch, fetcher } from "@/lib/api";
 import { Position, SystemState } from "@/lib/types";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 export default function PositionsPage() {
   const { data: positions, mutate } = useSWR<Position[]>("/api/positions", fetcher, { refreshInterval: 5000 });
   const { data: systemState } = useSWR<SystemState>("/api/system/state", fetcher, { refreshInterval: 10000 });
+  const confirm = useConfirm();
+  const [error, setError] = useState<string | null>(null);
 
   async function closePosition(tradeId: number, symbol: string) {
-    if (!confirm(`Close the open ${symbol} position? This clicks "Close Position" on your real account.`)) return;
+    if (!(await confirm(`Close the open ${symbol} position? This clicks "Close Position" on your real account.`))) return;
+    setError(null);
     try {
       await apiFetch(`/api/positions/${tradeId}/close`, { method: "POST" });
       mutate();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to close position");
+      setError(e instanceof Error ? e.message : "Failed to close position");
     }
   }
 
@@ -26,6 +31,7 @@ export default function PositionsPage() {
         title="Open Positions"
         action={<Badge text={`broker: ${systemState?.brokerKind ?? "..."}`} tone="neutral" />}
       >
+        {error && <p className="mb-3 text-sm text-bad">{error}</p>}
         <table>
           <thead>
             <tr>

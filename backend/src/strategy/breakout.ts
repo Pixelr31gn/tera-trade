@@ -22,6 +22,8 @@ export class BreakoutStrategy implements Strategy {
         symbol,
         side: "long",
         structureSwingPrice: new Decimal(priorLow),
+        signalKind: "breakout",
+        breakoutLevelPrice: new Decimal(priorHigh),
         reason: `close ${last.close} broke above the prior ${LOOKBACK}-bar high of ${priorHigh}`,
       };
     }
@@ -31,6 +33,8 @@ export class BreakoutStrategy implements Strategy {
         symbol,
         side: "short",
         structureSwingPrice: new Decimal(priorHigh),
+        signalKind: "breakout",
+        breakoutLevelPrice: new Decimal(priorLow),
         reason: `close ${last.close} broke below the prior ${LOOKBACK}-bar low of ${priorLow}`,
       };
     }

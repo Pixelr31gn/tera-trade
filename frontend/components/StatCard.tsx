@@ -1,4 +1,6 @@
-export function StatCard({
+import { memo } from "react";
+
+export const StatCard = memo(function StatCard({
   label,
   value,
   tone = "neutral",
@@ -23,4 +25,4 @@ export function StatCard({
       {sub && <div className="mt-1 text-xs text-gray-500">{sub}</div>}
     </div>
   );
-}
+});

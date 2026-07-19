@@ -1,8 +1,8 @@
 /**
  * Simple moving averages over daily closes, used to classify multi-timeframe
- * trend direction via the classic 8/20/200 short/medium/long stack: price
- * and the three MAs fully stacked in ascending order reads as an uptrend,
- * fully descending reads as a downtrend, anything else is "mixed" (no clean
+ * trend direction via a 9/50/200 short/medium/long stack: price and the
+ * three MAs fully stacked in ascending order reads as an uptrend, fully
+ * descending reads as a downtrend, anything else is "mixed" (no clean
  * directional read) -- see engine/trendLevelsCache.ts.
  */
 export function sma(values: number[], period: number): number[] {
@@ -18,13 +18,13 @@ export function sma(values: number[], period: number): number[] {
 export type MaDirection = "up" | "down" | "mixed";
 
 export interface MaStack {
-  maFast: number | null; // 8-period
-  maMid: number | null; // 20-period
+  maFast: number | null; // 9-period
+  maMid: number | null; // 50-period
   maSlow: number | null; // 200-period
   direction: MaDirection;
 }
 
-export function classifyMaStack(closes: number[], fastPeriod = 8, midPeriod = 20, slowPeriod = 200): MaStack {
+export function classifyMaStack(closes: number[], fastPeriod = 9, midPeriod = 50, slowPeriod = 200): MaStack {
   const lastClose = closes.length > 0 ? closes[closes.length - 1]! : null;
   const maFastRaw = sma(closes, fastPeriod).at(-1) ?? NaN;
   const maMidRaw = sma(closes, midPeriod).at(-1) ?? NaN;

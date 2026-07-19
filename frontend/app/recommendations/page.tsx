@@ -1,19 +1,70 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { fetcher } from "@/lib/api";
 import { RecommendationScore } from "@/lib/types";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
 
-const VERSION_FILTERS = ["all", "v1", "v2"] as const;
+const VERSION_FILTERS = ["all", "v1", "v2", "v3", "v4"] as const;
+const REAL_VERSIONS = ["v1", "v2", "v3"] as const;
+
+interface SignalGroup {
+  key: string;
+  time: string;
+  symbol: string;
+  strategyId: string;
+  side: string;
+  quantity: number;
+  entryPrice: number;
+  stopPrice: number;
+  takeProfitPrice: number;
+  byVersion: Partial<Record<string, RecommendationScore>>;
+}
+
+// Same signal = same time/symbol/side/strategyId -- v1/v2/v3 all shadow-score
+// it, so grouping them back together is what actually lets you see "did all
+// three fire for this setup" at a glance, instead of a flat chronological
+// list where they can land many rows apart from each other (2026-07-15
+// operator request).
+function groupSignals(rows: RecommendationScore[]): SignalGroup[] {
+  const map = new Map<string, SignalGroup>();
+  for (const s of rows) {
+    const key = `${s.time}|${s.symbol}|${s.side}|${s.strategyId}`;
+    let g = map.get(key);
+    if (!g) {
+      g = {
+        key,
+        time: s.time,
+        symbol: s.symbol,
+        strategyId: s.strategyId,
+        side: s.side,
+        quantity: s.quantity,
+        entryPrice: s.entryPrice,
+        stopPrice: s.stopPrice,
+        takeProfitPrice: s.takeProfitPrice,
+        byVersion: {},
+      };
+      map.set(key, g);
+    }
+    g.byVersion[s.strategyVersion] = s;
+  }
+  return [...map.values()].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+}
 
 export default function RecommendationsPage() {
   const { data } = useSWR<RecommendationScore[]>("/api/recommendations?limit=300", fetcher, { refreshInterval: 8000 });
   const [versionFilter, setVersionFilter] = useState<(typeof VERSION_FILTERS)[number]>("all");
 
-  const rows = data?.filter((s) => versionFilter === "all" || s.strategyVersion === versionFilter);
+  // Rebuilds the Map/sort only when the underlying data or filter actually
+  // changes, not on every 8s poll tick that returns identical rows.
+  const filtered = useMemo(
+    () => data?.filter((s) => versionFilter === "all" || s.strategyVersion === versionFilter),
+    [data, versionFilter]
+  );
+  const groups = useMemo(() => (versionFilter === "all" ? groupSignals(filtered ?? []) : null), [versionFilter, filtered]);
+  const flatRows = versionFilter !== "all" ? filtered : null;
 
   return (
     <Panel
@@ -35,51 +86,127 @@ export default function RecommendationsPage() {
       }
     >
       <p className="mb-3 text-xs text-gray-500">
-        Every signal is shadow-scored by both strategy versions -- see the Strategy page to compare their performance and switch which one executes.
+        Every signal is shadow-scored by v1/v2/v3 -- see the Strategy page to compare their performance (v4 filter still
+        works for historical rows from before it was removed 2026-07-15). &quot;Taken&quot; means that version&apos;s own
+        score cleared its threshold, not that a trade happened on its own. Both paper and live execute a signal once{" "}
+        <strong>at least 2 of the 3 versions independently clear the 65% threshold</strong> (2026-07-16, a straight
+        majority vote on the raw score). A nearby support/resistance level and passing risk sizing still have to clear
+        too either way. A row only links to a real trade # once all of that clears.{" "}
+        <strong>In the All tab</strong>, rows for the same signal are grouped together with a V1/V2/V3 completeness badge.
+        Continuous-scan rows (a running per-bar directional read, not a detected chart pattern) are also scored by all
+        three versions and can execute -- but only when one version clears <strong>70%</strong> and neither of the
+        other two is below <strong>50%</strong>, a stricter bar than a real strategy signal since there&apos;s no
+        confirmed pattern behind it.
       </p>
-      <table>
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>Symbol</th>
-            <th>Strategy</th>
-            <th>Ver</th>
-            <th>Side</th>
-            <th>Score</th>
-            <th>Decision</th>
-            <th>Qty</th>
-            <th>Entry</th>
-            <th>Stop</th>
-            <th>Target</th>
-            <th>Explanation</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows?.map((s, i) => (
-            <tr key={i}>
-              <td className="whitespace-nowrap text-gray-400">{new Date(s.time).toLocaleString()}</td>
-              <td className="font-medium text-white">{s.symbol}</td>
-              <td className="text-gray-400">{s.strategyId}</td>
-              <td>
-                <Badge text={s.strategyVersion} tone={s.strategyVersion === "v2" ? "warn" : "neutral"} />
-              </td>
-              <td>
-                <Badge text={s.side} tone={s.side === "long" ? "good" : "bad"} />
-              </td>
-              <td>{(s.probability * 100).toFixed(0)}%</td>
-              <td>
-                <Badge text={s.decision} tone={s.decision === "taken" ? "good" : "neutral"} />
-              </td>
-              <td className="font-mono text-gray-300">{s.quantity}</td>
-              <td className="font-mono text-gray-300">{s.entryPrice.toFixed(2)}</td>
-              <td className="font-mono text-bad">{s.stopPrice.toFixed(2)}</td>
-              <td className="font-mono text-good">{s.takeProfitPrice.toFixed(2)}</td>
-              <td className="max-w-xl text-gray-300">{s.explanation}</td>
+
+      {groups && (
+        <div className="space-y-3">
+          {groups.map((g) => {
+            return (
+              <div key={g.key} className="rounded-lg border border-white/10 overflow-hidden">
+                <div className="flex flex-wrap items-center justify-between gap-2 bg-white/5 px-3 py-2 text-xs">
+                  <div className="flex items-center gap-3">
+                    <span className="whitespace-nowrap text-gray-400">{new Date(g.time).toLocaleString()}</span>
+                    <span className="font-medium text-white">{g.symbol}</span>
+                    <span className="text-gray-400">{g.strategyId}</span>
+                    <Badge text={g.side} tone={g.side === "long" ? "good" : "bad"} />
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="font-mono text-gray-300">
+                      qty {g.quantity} @ {g.entryPrice.toFixed(2)}
+                    </span>
+                    <span className="font-mono text-bad">SL {g.stopPrice.toFixed(2)}</span>
+                    <span className="font-mono text-good">TP {g.takeProfitPrice.toFixed(2)}</span>
+                    <div className="flex gap-1">
+                      {REAL_VERSIONS.map((v) => (
+                        <Badge key={v} text={v} tone={g.byVersion[v] ? "good" : "bad"} />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <table>
+                  <tbody>
+                    {Object.values(g.byVersion)
+                      .filter((s): s is RecommendationScore => !!s)
+                      .sort((a, b) => a.strategyVersion.localeCompare(b.strategyVersion))
+                      .map((s) => (
+                        <tr key={s.id}>
+                          <td className="w-16">
+                            <Badge text={s.strategyVersion} tone={s.strategyVersion === "v3" || s.strategyVersion === "v4" ? "good" : "neutral"} />
+                          </td>
+                          <td className="w-16">{(s.probability * 100).toFixed(0)}%</td>
+                          <td className="w-40">
+                            {s.decision !== "taken" ? (
+                              <Badge text="skipped" tone="neutral" />
+                            ) : s.tradeId !== null ? (
+                              <Badge text={`trade #${s.tradeId}`} tone="good" />
+                            ) : (
+                              <Badge text="taken, not executed" tone="warn" />
+                            )}
+                          </td>
+                          <td className="text-gray-300">{s.explanation}</td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
+          {groups.length === 0 && <p className="py-6 text-center text-sm text-gray-500">No scored setups yet.</p>}
+        </div>
+      )}
+
+      {flatRows && (
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Strategy</th>
+              <th>Ver</th>
+              <th>Side</th>
+              <th>Score</th>
+              <th>Decision</th>
+              <th>Qty</th>
+              <th>Entry</th>
+              <th>Stop</th>
+              <th>Target</th>
+              <th>Explanation</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-      {(!rows || rows.length === 0) && <p className="py-6 text-center text-sm text-gray-500">No scored setups yet.</p>}
+          </thead>
+          <tbody>
+            {flatRows.map((s) => (
+              <tr key={s.id}>
+                <td className="whitespace-nowrap text-gray-400">{new Date(s.time).toLocaleString()}</td>
+                <td className="font-medium text-white">{s.symbol}</td>
+                <td className="text-gray-400">{s.strategyId}</td>
+                <td>
+                  <Badge text={s.strategyVersion} tone={s.strategyVersion === "v3" || s.strategyVersion === "v4" ? "good" : "neutral"} />
+                </td>
+                <td>
+                  <Badge text={s.side} tone={s.side === "long" ? "good" : "bad"} />
+                </td>
+                <td>{(s.probability * 100).toFixed(0)}%</td>
+                <td>
+                  {s.decision !== "taken" ? (
+                    <Badge text="skipped" tone="neutral" />
+                  ) : s.tradeId !== null ? (
+                    <Badge text={`trade #${s.tradeId}`} tone="good" />
+                  ) : (
+                    <Badge text="taken, not executed" tone="warn" />
+                  )}
+                </td>
+                <td className="font-mono text-gray-300">{s.quantity}</td>
+                <td className="font-mono text-gray-300">{s.entryPrice.toFixed(2)}</td>
+                <td className="font-mono text-bad">{s.stopPrice.toFixed(2)}</td>
+                <td className="font-mono text-good">{s.takeProfitPrice.toFixed(2)}</td>
+                <td className="max-w-xl text-gray-300">{s.explanation}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {flatRows && flatRows.length === 0 && <p className="py-6 text-center text-sm text-gray-500">No scored setups yet.</p>}
     </Panel>
   );
 }

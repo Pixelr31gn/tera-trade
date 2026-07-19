@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import useSWR from "swr";
 import { apiFetch, fetcher } from "@/lib/api";
 import { ActionableRecommendation } from "@/lib/types";
@@ -16,7 +17,7 @@ function formatPrice(value: number): string {
   return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-export function ActionBanner() {
+export const ActionBanner = memo(function ActionBanner() {
   const { data, mutate } = useSWR<ActionableRecommendation[]>("/api/recommendations/actionable", fetcher, {
     refreshInterval: 8000,
   });
@@ -78,4 +79,4 @@ export function ActionBanner() {
       })}
     </div>
   );
-}
+});

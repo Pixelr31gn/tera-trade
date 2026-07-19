@@ -49,11 +49,22 @@ const EnvSchema = z.object({
   LOG_LEVEL: z.string().default("info"),
   API_KEY: z.string().default("change-me-dev-key"),
 
+  // --- License (see core/license.ts and ../../LICENSE.md) ---
+  LICENSE_KEY: z.string().default(""),
+  LICENSED_TO: z.string().default(""),
+  LICENSE_SIGNING_SECRET: z.string().default(""),
+
   DATABASE_URL: z.string(),
 
   TRADING_MODE: z.nativeEnum(TradingMode).default(TradingMode.ANALYSIS_ONLY),
   BROKER_KIND: z.nativeEnum(BrokerKind).default(BrokerKind.SIMULATED),
   LIVE_TRADING_CONFIRMED: boolFromEnv,
+  // Defaults ON (protective) so a forgotten override can't silently disable
+  // account-wide loss protection once real money is on the line -- must be
+  // explicitly set to "false" (done for now, during paper testing) to
+  // disable the daily-loss/trailing-drawdown auto-trip. Re-enable before
+  // ever switching to live trading.
+  KILL_SWITCH_ENABLED: boolFromEnvDefault(true),
 
   PROJECTX_BASE_URL: z.string().default("https://api.topstepx.com"),
   PROJECTX_RTC_URL: z.string().default("https://rtc.topstepx.com"),
@@ -100,6 +111,22 @@ const EnvSchema = z.object({
   BROWSER_POLL_SECONDS: numberFromEnv(5),
   BROWSER_SELECTORS_PATH: z.string().optional(),
 
+  // --- Automatic debug-mode Chrome launch (see browserWatch/chromeLauncher.ts) ---
+  // Lets each user just start the app, rather than manually running Chrome
+  // with --remote-debugging-port every time -- the whole point of the
+  // "no API, local browser" distribution model.
+  CHROME_AUTO_LAUNCH: boolFromEnvDefault(true),
+  CHROME_EXECUTABLE_PATH: z.string().optional(),
+  CHROME_DEBUG_USER_DATA_DIR: z.string().optional(),
+  CHROME_DEBUG_START_URL: z.string().default("https://topstepx.com/"),
+
+  // --- Order-flow listener (reads live bid/ask size + trade-aggressor flow
+  // off the same TopstepX tab's WebSocket traffic, see
+  // browserWatch/orderFlowListener.ts) -- only meaningful when PRICE_SOURCE
+  // is browser, since it depends on the same attached tab.
+  ORDER_FLOW_ENABLED: boolFromEnvDefault(true),
+  ORDER_FLOW_FLUSH_SECONDS: numberFromEnv(10),
+
   // --- Browser-control (real mouse/click order placement via BrowserControlBroker) ---
   // Defaults to true (dry-run) so real clicks require an explicit, separate opt-in
   // on top of TRADING_MODE=live + BROKER_KIND=browser_control + LIVE_TRADING_CONFIRMED.
@@ -111,10 +138,14 @@ export interface Settings {
   environment: string;
   logLevel: string;
   apiKey: string;
+  licenseKey: string;
+  licensedTo: string;
+  licenseSigningSecret: string;
   databaseUrl: string;
   tradingMode: TradingMode;
   brokerKind: BrokerKind;
   liveTradingConfirmed: boolean;
+  killSwitchEnabled: boolean;
   projectXBaseUrl: string;
   projectXRtcUrl: string;
   projectXUsername: string;
@@ -144,6 +175,12 @@ export interface Settings {
   browserUrlMatch: string;
   browserPollSeconds: number;
   browserSelectorsPath: string | undefined;
+  chromeAutoLaunch: boolean;
+  chromeExecutablePath: string | undefined;
+  chromeDebugUserDataDir: string | undefined;
+  chromeDebugStartUrl: string;
+  orderFlowEnabled: boolean;
+  orderFlowFlushSeconds: number;
   dryRunOrders: boolean;
 }
 
@@ -157,10 +194,14 @@ export function getSettings(): Settings {
     environment: env.ENVIRONMENT,
     logLevel: env.LOG_LEVEL,
     apiKey: env.API_KEY,
+    licenseKey: env.LICENSE_KEY,
+    licensedTo: env.LICENSED_TO,
+    licenseSigningSecret: env.LICENSE_SIGNING_SECRET,
     databaseUrl: env.DATABASE_URL,
     tradingMode: env.TRADING_MODE,
     brokerKind: env.BROKER_KIND,
     liveTradingConfirmed: env.LIVE_TRADING_CONFIRMED,
+    killSwitchEnabled: env.KILL_SWITCH_ENABLED,
     projectXBaseUrl: env.PROJECTX_BASE_URL,
     projectXRtcUrl: env.PROJECTX_RTC_URL,
     projectXUsername: env.PROJECTX_USERNAME,
@@ -190,6 +231,12 @@ export function getSettings(): Settings {
     browserUrlMatch: env.BROWSER_URL_MATCH,
     browserPollSeconds: env.BROWSER_POLL_SECONDS,
     browserSelectorsPath: env.BROWSER_SELECTORS_PATH,
+    chromeAutoLaunch: env.CHROME_AUTO_LAUNCH,
+    chromeExecutablePath: env.CHROME_EXECUTABLE_PATH,
+    chromeDebugUserDataDir: env.CHROME_DEBUG_USER_DATA_DIR,
+    chromeDebugStartUrl: env.CHROME_DEBUG_START_URL,
+    orderFlowEnabled: env.ORDER_FLOW_ENABLED,
+    orderFlowFlushSeconds: env.ORDER_FLOW_FLUSH_SECONDS,
     dryRunOrders: env.DRY_RUN_ORDERS,
   };
   return cached;

@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useState } from "react";
 import useSWR from "swr";
 import { apiFetch, fetcher } from "@/lib/api";
 import { MarketSnapshot, Position, SystemState } from "@/lib/types";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 const SYMBOLS = ["ES", "NQ", "CL", "GC"];
 
@@ -13,7 +14,8 @@ function fmt(value: number, decimals = 2): string {
   return value.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
-export function QuickOrderPanel() {
+export const QuickOrderPanel = memo(function QuickOrderPanel() {
+  const confirm = useConfirm();
   const { data: snapshot } = useSWR<MarketSnapshot[]>("/api/market/snapshot", fetcher, { refreshInterval: 5000 });
   const { data: positions, mutate: mutatePositions } = useSWR<Position[]>("/api/positions", fetcher, { refreshInterval: 5000 });
   const { data: systemState } = useSWR<SystemState>("/api/system/state", fetcher, { refreshInterval: 10000 });
@@ -47,7 +49,7 @@ export function QuickOrderPanel() {
       `Stop ${fmt(stopPrice)} (~$${riskDollars?.toFixed(0)} risk)` +
       (takeProfitPrice ? `, target ${fmt(takeProfitPrice)}` : "") +
       (systemState?.brokerKind === "browser_control" ? "\n\nThis clicks a real order on your TopstepX account." : "");
-    if (!confirm(confirmMsg)) return;
+    if (!(await confirm(confirmMsg))) return;
 
     setSubmitting(true);
     setError(null);
@@ -66,7 +68,7 @@ export function QuickOrderPanel() {
 
   async function closePosition() {
     if (!openPosition) return;
-    if (!confirm(`Close the open ${symbol} position? This clicks "Close Position" on your real account.`)) return;
+    if (!(await confirm(`Close the open ${symbol} position? This clicks "Close Position" on your real account.`))) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -113,7 +115,7 @@ export function QuickOrderPanel() {
 
         {row?.maStack && (
           <div className="flex items-center justify-between text-xs">
-            <span className="text-gray-400">MA 8/20/200 trend</span>
+            <span className="text-gray-400">MA 9/50/200 trend</span>
             <div className="flex items-center gap-2">
               <span className="font-mono text-gray-500">
                 {row.maStack.maFast !== null ? fmt(row.maStack.maFast) : "-"} / {row.maStack.maMid !== null ? fmt(row.maStack.maMid) : "-"} /{" "}
@@ -259,4 +261,4 @@ export function QuickOrderPanel() {
       </div>
     </Panel>
   );
-}
+});

@@ -1,72 +1,120 @@
 # Tera Trade
 
-A trading platform for Topstep-funded futures accounts: real-time market data, a year+ of
-historical price history, statistical performance analysis, market-regime detection,
-news/economic-calendar risk awareness, a trade scoring engine gated by a strict confidence
-threshold, and a full risk engine with dynamic position sizing and ATR/structure stops --
-all with a plain-English explanation behind every decision.
+A trading platform for Topstep-funded futures accounts (currently ES/NQ): real-time market
+data, a rule-based scoring engine (three shadow-scored strategy versions per signal, v1/v2/v3),
+a full risk engine with dynamic position sizing and ATR/structure stops, market-regime
+detection, and a plain-English explanation behind every decision. Reads your account and prices
+directly off TopstepX's own web platform in a dedicated, auto-managed Chrome tab -- no broker
+API key required.
 
-**Status: Phase 0.** The system runs end-to-end against a simulated broker and free market
-data, locked to `analysis_only` mode. See [docs/ROLLOUT_PLAN.md](docs/ROLLOUT_PLAN.md) before
-enabling paper or live trading.
+**This is licensed software.** See [LICENSE.md](LICENSE.md) before installing or distributing
+it -- the app will not start without a valid license key (Section "License setup" below).
+
+**Status**: runs end-to-end against a simulated broker (`paper` mode) with real live market
+data. Live trading (real orders on a real account) exists but requires four independent,
+explicit opt-ins -- see "Trading modes" below -- and should not be enabled until you've watched
+paper mode trade for a meaningful stretch of time.
 
 ## Architecture
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full module breakdown. Short version:
 
 ```
 backend/   Node.js + TypeScript (Fastify) -- broker abstraction, market data, analytics,
            regime, news, scoring, risk, strategy, execution, explanation, and the engine
            loop that wires them together. Prisma ORM against a hosted Postgres (Neon).
 frontend/  Next.js dashboard -- overview, recommendations, positions, performance,
-           journal, settings.
-infra/     Optional docker-compose.yml, only useful if you install Docker Desktop later.
+           journal, strategy comparison, settings.
 ```
 
-Originally spec'd with a Python/FastAPI backend and local TimescaleDB via Docker; both were
-swapped out because neither Python nor Docker were available on the target machine. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what changed and why.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/BUILD_HISTORY.md](docs/BUILD_HISTORY.md)
+for the full module breakdown and how the system got to its current state.
 
-## Quick start (native, no Docker required)
+## Prerequisites
 
-**Prerequisites**: Node.js 20+ (already installed) and a free hosted Postgres database.
+- **Node.js 20+**
+- **Google Chrome** (the app launches and manages its own dedicated debug-mode Chrome profile
+  automatically -- see "First run" below. Your regular Chrome browsing is never touched.)
+- A **free hosted Postgres database** ([neon.tech](https://neon.tech), no card required)
+- A **TopstepX account** you can log into
+- A **license key** (see below)
 
-1. **Create a database**: sign up at [neon.tech](https://neon.tech) (free, no card), create a
-   project, and copy its connection string.
-2. Copy the environment template into `backend/.env` and fill in your `DATABASE_URL`
-   (Prisma's CLI only looks for `.env` next to its own project, not a repo-root one):
-   ```
-   cp .env.example backend/.env
-   ```
-3. Install backend dependencies and set up the database schema:
+## License setup
+
+The app refuses to start without a valid `LICENSE_KEY` + `LICENSED_TO` pair in `backend/.env`
+(see [LICENSE.md](LICENSE.md) for the terms). If you were given a key, skip to "Install and
+run." If you're the licensor issuing your own key:
+
+```
+cd backend
+npm run license:generate -- "Recipient Name or Email"
+```
+
+That's it -- no setup needed first. (Advanced: this signs against a secret baked into
+`src/core/license.ts` so every distributed copy can verify keys you issue; set
+`LICENSE_SIGNING_SECRET` in your own `backend/.env` only if you want to override that default
+for yourself specifically -- it won't affect copies you've already sent out.)
+
+This prints a `LICENSED_TO` / `LICENSE_KEY` pair to give the recipient for their own
+`backend/.env`. Each key is tied to the name/email it was issued for.
+
+## Install and run
+
+**`.env` lives in `backend/`, not the repo root** -- Prisma's CLI and the app's own env loader
+both only look next to `backend/`'s own files.
+
+1. **Create a database**: sign up at [neon.tech](https://neon.tech), create a project, copy its
+   connection string.
+2. **Configure**:
    ```
    cd backend
-   npm install
-   npx prisma migrate dev --name init
+   cp .env.example .env
    ```
-4. Start the backend:
+   Fill in `DATABASE_URL`, your license (`LICENSE_KEY`/`LICENSED_TO`), and `API_KEY` (any
+   string -- this guards the API, keep it private). Everything else has a sane default.
+3. **Install and migrate**:
+   ```
+   npm install
+   npx prisma migrate deploy
+   ```
+4. **Start the backend**:
    ```
    npm run dev
    ```
-5. In a second terminal, set up and start the frontend. It needs its own env file with
-   the *same* API key as the backend, or every dashboard call fails with 401:
+   On first run this automatically launches a dedicated Chrome window (see "First run" below).
+5. **In a second terminal**, start the dashboard (needs the *same* API key as the backend, or
+   every call fails with 401):
    ```
    cd frontend
    npm install
    cp .env.example .env.local
    npm run dev
    ```
-6. Kick off the historical backfill (1 year of daily bars + trailing ~60 days of 5-minute
-   bars, for ES/NQ/CL/GC) and pull the current economic calendar:
-   ```
-   curl -X POST http://localhost:8000/api/backfill/run -H "X-API-Key: change-me-dev-key"
-   ```
-7. Open the dashboard at http://localhost:3000 and confirm the API is up at
+6. Open the dashboard at **http://localhost:3000**. Confirm the API is up at
    http://localhost:8000/health.
 
-The engine starts polling for new bars immediately and will begin producing regime
-snapshots, scored setups, and plain-English explanations in the dashboard's Overview and
-Recommendations pages -- all in `analysis_only` mode, so nothing is ever executed yet.
+## First run: logging into TopstepX
+
+The backend automatically launches its own Chrome window on startup (a separate profile from
+your everyday browsing -- see `backend/src/browserWatch/chromeLauncher.ts`), pointed at
+TopstepX. The very first time, it's a fresh, logged-out profile: **just log into TopstepX in
+that window once.** The session persists across every future restart -- you only do this once
+per machine.
+
+If you ever need to do it manually (e.g. `CHROME_AUTO_LAUNCH=false`), see
+[docs/BROWSER_WATCH.md](docs/BROWSER_WATCH.md).
+
+## Trading modes
+
+`TRADING_MODE` in `backend/.env` controls what the engine is allowed to do:
+
+- **`analysis_only`** -- scores setups, shows recommendations, places no order anywhere (not
+  even simulated).
+- **`paper`** -- requires `BROKER_KIND=simulated`. Trades a simulated account against real live
+  prices, full risk management enforced identically to live. **Start here, stay here for a
+  while.**
+- **`live`** -- real orders on your real account. Requires `BROKER_KIND=projectx` or
+  `browser_control` *and* `LIVE_TRADING_CONFIRMED=true` -- two separate, deliberate flags, so
+  nothing can escalate from paper to live by itself. Also keep `KILL_SWITCH_ENABLED=true` (the
+  default) -- it's the account-wide daily-loss/drawdown auto-stop.
 
 ## Running tests
 
@@ -74,40 +122,27 @@ Recommendations pages -- all in `analysis_only` mode, so nothing is ever execute
 cd backend
 npm test
 ```
+Most tests are pure unit tests and need no database. `tests/engineIntegration.test.ts` exercises
+the full engine loop against a real Postgres and is skipped automatically unless
+`TEST_DATABASE_URL` (or `DATABASE_URL`) points at a reachable, migrated database.
 
-Most tests are pure unit tests (analytics, risk, regime, scoring, strategies, explanations)
-and need no database. One integration test (`tests/engineIntegration.test.ts`) exercises the
-full engine loop against a real Postgres and is skipped automatically unless
-`TEST_DATABASE_URL` (or `DATABASE_URL`) points at a reachable, already-migrated database.
+## Docs
 
-## Optional: reading your real account without a ProjectX API key
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) -- module map, data flow, design rationale
+- [docs/BUILD_HISTORY.md](docs/BUILD_HISTORY.md) -- how the system was built, phase by phase
+- [docs/BROWSER_WATCH.md](docs/BROWSER_WATCH.md) -- the read-only account/price data source
+- [docs/BROWSER_CONTROL.md](docs/BROWSER_CONTROL.md) -- real order placement via click automation
+- [LICENSE.md](LICENSE.md) -- license terms (draft template, see the note at the top of that file)
 
-Don't have a ProjectX Gateway API key yet? Tera Trade can read your account balance/P&L and
-prices directly off the TopstepX web platform in your own logged-in Chrome (read-only, via
-Chrome DevTools Protocol -- nothing automates clicks or order placement). See
-[docs/BROWSER_WATCH.md](docs/BROWSER_WATCH.md).
+## Known limitations
 
-## Optional: Docker
-
-If you later install Docker Desktop, `infra/docker-compose.yml` builds and runs the backend
-and frontend as containers (the database stays hosted on Neon either way -- there's no local
-database container). `docker compose up --build` from `infra/`.
-
-## Known limitations (Phase 0, by design)
-
-- **No ProjectX Gateway credentials yet.** `ProjectXGatewayBroker` is implemented against
-  the documented API but has not been integration-tested against a live account.
-- **Free historical data, 5-minute floor.** Yahoo Finance's free endpoint doesn't serve
-  interval=1m for CME futures continuous contracts at all (only equities); 5-minute is the
-  finest granularity available, going back ~60 days. The 1-year+ history requirement is
-  satisfied at daily granularity (`bars_daily`). See `backend/src/marketData/backfill.ts`.
-- **Plain Postgres, not TimescaleDB.** Neon's free tier doesn't support the TimescaleDB
-  extension; 5m/15m/1h/1d bar rollups run as scheduled application-code queries
-  (`backend/src/marketData/rollup.ts`) instead of native continuous aggregates.
-- **Rule-based scoring model.** There's no trade history to train a real ML model on yet;
-  `backend/src/scoring/ruleScorer.ts` is a documented, transparent heuristic.
-  `backend/src/scoring/training.ts` (a hand-rolled logistic regression) is ready to fit a
-  calibrated model once enough closed trades exist.
-- This environment had neither Python, Docker, nor a database available, so end-to-end
-  verification (`npm install` / `npm run build` / `npm test` / running the server against a
-  real database) depends on you having created the Neon database and run the steps above.
+- **No ProjectX Gateway credentials tested.** `ProjectXGatewayBroker` is implemented against
+  the documented API but has never been integration-tested against a live account -- the
+  browser-attach path (no API key needed) is what's actually been run and verified.
+- **Rule-based scoring, not a trained ML model.** `scoring/ruleScorer.ts`/`ruleScorerV3.ts` are
+  documented, transparent heuristics with a historical-outcome adjustment layered on top.
+  `scoring/training.ts` (a hand-rolled logistic regression) is ready to fit a calibrated model
+  once enough closed trades exist.
+- **Single Chrome tab, single account.** The live data path depends on one already-logged-in
+  browser tab on the machine running the backend -- see docs/BROWSER_WATCH.md for what that
+  means for multi-user or hosted setups.

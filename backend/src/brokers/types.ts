@@ -92,4 +92,14 @@ export interface BrokerClient {
   startAccountStream?(accountId: string, handler: AccountUpdateHandler): Promise<void>;
   /** Closes the open position in `symbol` entirely. Only implemented by brokers that support it (e.g. BrowserControlBroker). */
   requestClosePosition?(symbol: string): Promise<OrderResult>;
+  /**
+   * Read-only check: is there currently NO open position in `symbol` on the
+   * real broker account? Only implemented by brokers where a position can
+   * close outside our own control (e.g. BrowserControlBroker, where
+   * TopstepX's own bracket order can close a position server-side without
+   * our app ever being told). Returns null when the state genuinely can't
+   * be determined (don't guess) -- callers must treat null as "unknown",
+   * not as either true or false.
+   */
+  isPositionFlat?(symbol: string): Promise<boolean | null>;
 }
