@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { classifyEma50Trend } from "../src/analytics/emaTrend.js";
 import { computeRsi } from "../src/analytics/rsi.js";
-import { computeBreakoutStrengthAdjustment, computeOrderFlowAdjustment, computeV3Bucket, scoreSetupV3Directional } from "../src/scoring/ruleScorerV3.js";
+import { computeBreakoutStrengthAdjustment, computeOrderFlowAdjustment, computeTimeframeAlignmentAdjustment, computeV3Bucket, scoreSetupV3Directional } from "../src/scoring/ruleScorerV3.js";
 import { computeAdjustmentFromOutcomes } from "../src/scoring/v3HistoricalAdjustment.js";
 import type { SetupFeatures } from "../src/scoring/features.js";
 import type { OhlcBar } from "../src/regime/indicators.js";
@@ -41,6 +41,7 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     fibRetracementPct: null,
     netPointsPerMinute: null,
     orderFlowSnapshot: null,
+    timeframeTrends: {},
     ...overrides,
   };
 }
@@ -251,5 +252,37 @@ describe("computeOrderFlowAdjustment", () => {
   it("stays within the documented +/-8 bound for extreme one-sided flow", () => {
     const result = computeOrderFlowAdjustment(snapshot({ buyVolume: 1000, sellVolume: 0, tradeCount: 50, bestBidSize: 500, bestAskSize: 0 }), "long");
     expect(result.adjustmentPoints).toBeCloseTo(8);
+  });
+});
+
+describe("computeTimeframeAlignmentAdjustment", () => {
+  it("gives no adjustment when there are no timeframe reads available yet", () => {
+    const result = computeTimeframeAlignmentAdjustment({}, "long");
+    expect(result.adjustmentPoints).toBe(0);
+    expect(result.description).toContain("no timeframe reads available");
+  });
+
+  it("gives a positive adjustment for a long when timeframes agree", () => {
+    const result = computeTimeframeAlignmentAdjustment({ "1d": { trendLabel: "up", confidence: 0.8 } }, "long");
+    expect(result.adjustmentPoints).toBeGreaterThan(0);
+  });
+
+  it("gives a negative adjustment for a long when timeframes fight it", () => {
+    const result = computeTimeframeAlignmentAdjustment({ "1d": { trendLabel: "down", confidence: 0.8 } }, "long");
+    expect(result.adjustmentPoints).toBeLessThan(0);
+  });
+
+  it("reports the available/7 leg count in the description", () => {
+    const result = computeTimeframeAlignmentAdjustment(
+      { "1d": { trendLabel: "up", confidence: 0.8 }, "1h": { trendLabel: "up", confidence: 0.5 } },
+      "long"
+    );
+    expect(result.description).toContain("2/7 available timeframes");
+  });
+
+  it("stays within the documented +/-12 bound for extreme full agreement", () => {
+    const allUp = { "1d": { trendLabel: "up" as const, confidence: 1 }, "4h": { trendLabel: "up" as const, confidence: 1 } };
+    const result = computeTimeframeAlignmentAdjustment(allUp, "long");
+    expect(result.adjustmentPoints).toBeCloseTo(12);
   });
 });

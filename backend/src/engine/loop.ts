@@ -15,6 +15,7 @@ import { computeAccountEquity, computeAccountRiskState, recordEquityPoint } from
 import { ensureDefaultAccount, loadRecentBars } from "./bootstrap.js";
 import { classifySession } from "../analytics/session.js";
 import { getDailyTrend } from "./dailyTrendCache.js";
+import { getHigherTimeframeTrends } from "./timeframeTrendCache.js";
 import { getFixedTargetEdge } from "./fixedTargetEdgeCache.js";
 import { getLatestOrderFlowSnapshot } from "./liveOrderFlowCache.js";
 import { getOpeningRangeStats } from "./openingRangeCache.js";
@@ -610,7 +611,7 @@ export class TradingEngine {
 
     const newsStatus = await getNewsRiskStatus(barTime);
     const openingRangeStats = await getOpeningRangeStats(symbol);
-    const dailyTrend = await getDailyTrend(symbol);
+    const [dailyTrend, higherTimeframeTrends] = await Promise.all([getDailyTrend(symbol), getHigherTimeframeTrends(symbol)]);
     const session = classifySession(barTime);
 
     for (const strategy of ALL_STRATEGIES) {
@@ -648,7 +649,7 @@ export class TradingEngine {
         null, openingRangeBreakoutProbability, openingRangeStats.sessionsAnalyzed,
         dailyTrend.trendLabel, dailyTrend.confidence,
         longTargetEdge?.winRate ?? null, longTargetEdge?.sampleSize ?? 0,
-        riskRewardRatio, getLatestOrderFlowSnapshot(symbol)
+        riskRewardRatio, getLatestOrderFlowSnapshot(symbol), higherTimeframeTrends
       );
 
       // Shadow-score every signal under all three strategy versions in
@@ -713,11 +714,12 @@ export class TradingEngine {
     // None of these four depend on each other's result -- they were
     // previously awaited one at a time, paying for each one's DB round-trip
     // (or, on a cache miss, a genuinely expensive aggregate query) serially.
-    const [bars, newsStatus, openingRangeStats, dailyTrend] = await Promise.all([
+    const [bars, newsStatus, openingRangeStats, dailyTrend, higherTimeframeTrends] = await Promise.all([
       loadRecentBars(symbol, 300),
       getNewsRiskStatus(barTime),
       getOpeningRangeStats(symbol),
       getDailyTrend(symbol),
+      getHigherTimeframeTrends(symbol),
     ]);
     if (bars.length < MIN_BARS_FOR_REGIME) return;
 
@@ -755,7 +757,7 @@ export class TradingEngine {
           null, openingRangeBreakoutProbability, openingRangeStats.sessionsAnalyzed,
           dailyTrend.trendLabel, dailyTrend.confidence,
           longTargetEdge?.winRate ?? null, longTargetEdge?.sampleSize ?? 0,
-          riskRewardRatio, getLatestOrderFlowSnapshot(symbol)
+          riskRewardRatio, getLatestOrderFlowSnapshot(symbol), higherTimeframeTrends
         );
 
         const strategyId = side === "long" ? CONTINUOUS_SCAN_STRATEGY_IDS[0] : CONTINUOUS_SCAN_STRATEGY_IDS[1];

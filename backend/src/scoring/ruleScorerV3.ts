@@ -28,6 +28,7 @@ import type { MarketStructureLabel } from "../analytics/priceAction.js";
 import { fibDirectionSignal } from "../analytics/fibonacci.js";
 import { ppmDirectionSignal } from "../analytics/ppm.js";
 import { orderFlowDirectionSignal } from "../analytics/orderFlow.js";
+import { timeframeAlignmentSignal, type TimeframeTrendReadings } from "../analytics/timeframeAlignment.js";
 import type { OrderFlowSnapshot } from "../browserWatch/orderFlowListener.js";
 import type { SetupFeatures } from "./features.js";
 
@@ -347,6 +348,30 @@ export function computeOrderFlowAdjustment(snapshot: OrderFlowSnapshot | null, s
   return {
     adjustmentPoints,
     description: `order flow: ${snapshot.buyVolume.toFixed(0)} buy / ${snapshot.sellVolume.toFixed(0)} sell vol (${snapshot.tradeCount} trades), bid ${snapshot.bestBidSize ?? "?"} / ask ${snapshot.bestAskSize ?? "?"} -- ${adjustmentPoints >= 0 ? "+" : ""}${adjustmentPoints.toFixed(1)} pt adjustment`,
+  };
+}
+
+// Same bounded-adjustment pattern as computeFibAdjustment/computePpmAdjustment
+// above -- not one of the six core 100-pt factors. See
+// analytics/timeframeAlignment.ts's timeframeAlignmentSignal for the -1..1
+// scale, combining up to 7 timeframes weighted so higher ones count more.
+// Bounded wider than the single-input adjustments (fib +/-8, ppm/order-flow
+// +/-10/+/-8) since this is already a weighted combination of multiple
+// independent reads, but still below the historical-similarity adjustment's
+// +/-15, since -- like the rest of the adjustments here -- it isn't yet
+// validated against real resolved-outcome data the way that one is.
+const MAX_TIMEFRAME_ALIGNMENT_ADJUSTMENT = 12;
+
+export function computeTimeframeAlignmentAdjustment(readings: TimeframeTrendReadings, side: "long" | "short"): DirectionAdjustmentResult {
+  const raw = timeframeAlignmentSignal(readings, side);
+  const adjustmentPoints = raw * MAX_TIMEFRAME_ALIGNMENT_ADJUSTMENT;
+  const available = Object.keys(readings).length;
+  return {
+    adjustmentPoints,
+    description:
+      available > 0
+        ? `multi-timeframe alignment across ${available}/7 available timeframes -- ${adjustmentPoints >= 0 ? "+" : ""}${adjustmentPoints.toFixed(1)} pt adjustment`
+        : "no timeframe reads available yet -- no adjustment",
   };
 }
 

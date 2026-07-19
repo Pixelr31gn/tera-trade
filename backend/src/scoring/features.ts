@@ -11,6 +11,7 @@ import { classifyLiquidity, classifyMarketStructure, describePriceAction, type L
 import { classifySession, type TradingSession } from "../analytics/session.js";
 import { findSwing } from "../analytics/fibonacci.js";
 import { computePpm } from "../analytics/ppm.js";
+import type { TimeframeTrendReadings } from "../analytics/timeframeAlignment.js";
 import type { OrderFlowSnapshot } from "../browserWatch/orderFlowListener.js";
 
 export interface SetupFeatures {
@@ -40,7 +41,7 @@ export interface SetupFeatures {
   marketStructureLabel: MarketStructureLabel;
   liquidityLabel: LiquidityLabel;
   priceActionLabel: PriceActionLabel;
-  /** Higher-timeframe trend (computed from ~1yr of daily bars, see engine/dailyTrendCache.ts) -- much stickier than the intraday regime, used to filter out countertrend whipsaw. */
+  /** Daily-timeframe trend (computed from ~1yr of daily bars, see engine/dailyTrendCache.ts). No longer independently scored (see timeframeTrends below, which folds this in as its "1d" leg) -- kept populated for reference/training, same treatment as longTargetWinRate below. */
   dailyTrendLabel: "up" | "down" | "none";
   dailyTrendConfidence: number;
   /** Empirical win rate (see engine/fixedTargetEdgeCache.ts) that a LONG setup in this exact (symbol, session) bucket has historically reached a fixed +20pt move before its stop. Null until there's at least one resolved sample. */
@@ -56,6 +57,8 @@ export interface SetupFeatures {
   netPointsPerMinute: number | null;
   /** Most recent live order-flow read for this symbol (see browserWatch/orderFlowListener.ts and analytics/orderFlow.ts) -- trade-aggressor buy/sell volume and resting bid/ask size from the last flush window, plus TopstepX's crowd "Tilt" bias. Null when the order-flow listener isn't running (PRICE_SOURCE != browser or ORDER_FLOW_ENABLED=false) or hasn't produced a snapshot for this symbol yet. */
   orderFlowSnapshot: OrderFlowSnapshot | null;
+  /** Per-timeframe trend reads, 1D down to 1M, used for the multi-timeframe alignment factor (see analytics/timeframeAlignment.ts). A timeframe key is absent when there wasn't enough rolled-up history to compute it yet (see engine/timeframeTrendCache.ts) -- "1d" and "1m" are always present (assembled below from dailyTrendLabel/dailyTrendConfidence and the intraday regime respectively), the 4h/1h/30m/15m/5m legs may not be for a while after this ships. */
+  timeframeTrends: TimeframeTrendReadings;
 }
 
 function mean(xs: number[]): number {
@@ -78,7 +81,8 @@ export function buildSetupFeatures(
   longTargetWinRate: number | null = null,
   longTargetSampleSize = 0,
   riskRewardRatio: number | null = null,
-  orderFlowSnapshot: OrderFlowSnapshot | null = null
+  orderFlowSnapshot: OrderFlowSnapshot | null = null,
+  higherTimeframeTrends: TimeframeTrendReadings = {}
 ): SetupFeatures {
   const closes = bars.map((b) => b.close);
   const atrSeries = atr(bars).filter((v) => !Number.isNaN(v));
@@ -141,6 +145,15 @@ export function buildSetupFeatures(
   const ppm = computePpm(bars, PPM_WINDOW_MINUTES);
   const netPointsPerMinute = ppm.sampleCount >= 2 ? ppm.netPointsPerMinute : null;
 
+  // 1d and 1m are always available here (daily trend and intraday regime are
+  // both required inputs to this function already) -- only the 5 rolled-up
+  // legs in higherTimeframeTrends can be genuinely missing.
+  const timeframeTrends: TimeframeTrendReadings = {
+    ...higherTimeframeTrends,
+    "1d": { trendLabel: dailyTrendLabel, confidence: dailyTrendConfidence },
+    "1m": { trendLabel: regime.trendLabel, confidence: regime.confidence },
+  };
+
   return {
     symbol,
     side,
@@ -174,5 +187,6 @@ export function buildSetupFeatures(
     fibRetracementPct,
     netPointsPerMinute,
     orderFlowSnapshot,
+    timeframeTrends,
   };
 }

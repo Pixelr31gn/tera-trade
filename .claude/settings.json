@@ -25,7 +25,11 @@
       "Bash(taskkill //PID 24184 //F //T)",
       "Bash(taskkill //PID 19288 //F //T)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8000/health)",
-      "Bash(node --env-file=.env -e ' *)"
+      "Bash(node --env-file=.env -e ' *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(git tag *)",
+      "Bash(curl -s -m 5 http://localhost:8000/health)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

@@ -23,6 +23,7 @@
 import type { SetupFeatures } from "./features.js";
 import { fibDirectionSignal } from "../analytics/fibonacci.js";
 import { ppmDirectionSignal } from "../analytics/ppm.js";
+import { timeframeAlignmentSignal } from "../analytics/timeframeAlignment.js";
 
 // "v4" is retained in this union even though it's no longer an active
 // voter (removed 2026-07-15, see engine/loop.ts) -- historical Score rows
@@ -37,7 +38,18 @@ export type StrategyVersion = "v1" | "v2" | "v3" | "v4";
 // outweighs event risk).
 const WEIGHTS_V1 = {
   trendAlignment: 1.1,
-  dailyTrendAlignment: 1.8,
+  // Replaces the old single-timeframe dailyTrendAlignment (2026-07-18,
+  // operator request) -- 1D is now the heaviest-weighted leg inside this
+  // composite instead of a separate factor scoring the same daily-trend
+  // evidence twice. Weighted above the old 1.8: full agreement now needs
+  // corroboration across up to 7 legs (1D down to 1M, see
+  // analytics/timeframeAlignment.ts) instead of just one. Hand-set, like
+  // every other weight here -- worth revisiting once real 4h/1h rollup data
+  // has accumulated for a few weeks and score distributions can actually be
+  // observed (bars_1m only recently started accumulating clean history, see
+  // marketData/rollup.ts, so those two legs are omitted from the composite
+  // until then rather than scored on thin/no data).
+  timeframeAlignment: 2.2,
   momentumAlignment: 0.8,
   adxStrength: 0.6,
   volatilityRegime: 0.5,
@@ -116,29 +128,25 @@ export function scoreSetup(features: SetupFeatures, version: StrategyVersion = "
     factors.push({ name: "trendAlignment", contribution, description: desc });
   }
 
-  // 2. Daily trend alignment -- the intraday regime above can flip within a
-  // single session as short-term noise passes through; the daily trend
-  // (computed from ~1yr of daily bars, see engine/dailyTrendCache.ts) is far
-  // stickier and is weighted more heavily than the intraday one deliberately,
-  // so a setup that fights a confident daily trend rarely clears the score
-  // threshold no matter how good it looks on the last few minutes of bars.
-  // This is the main defense against long/short/short/long whipsaw.
+  // 2. Multi-timeframe trend alignment -- 1D down to 1M combined, weighted so
+  // higher timeframes count more (analytics/timeframeAlignment.ts has the
+  // exact per-leg weights/math). The intraday regime used by factor #1 above
+  // can flip within a single session as short-term noise passes through;
+  // folding 1D (still the heaviest leg) in alongside 4H/1H/30M/15M/5M/1M
+  // keeps this factor's original whipsaw-defense role while correctly
+  // softening when higher and lower timeframes genuinely disagree, rather
+  // than a same-session intraday flip being invisible to a single fixed
+  // daily read the way the old dailyTrendAlignment factor was.
   {
-    let raw: number;
-    let desc: string;
-    if (features.dailyTrendLabel === "none") {
-      raw = -0.2;
-      desc = "no clear daily trend to confirm this setup's direction";
-    } else if ((features.dailyTrendLabel === "up" && direction === 1) || (features.dailyTrendLabel === "down" && direction === -1)) {
-      raw = features.dailyTrendConfidence;
-      desc = `agrees with the daily ${features.dailyTrendLabel} trend (${(features.dailyTrendConfidence * 100).toFixed(0)}% confidence)`;
-    } else {
-      raw = -clip(0.6 + features.dailyTrendConfidence);
-      desc = `fights the daily ${features.dailyTrendLabel} trend (${(features.dailyTrendConfidence * 100).toFixed(0)}% confidence)`;
-    }
-    const contribution = weights.dailyTrendAlignment * raw;
+    const raw = timeframeAlignmentSignal(features.timeframeTrends, features.side);
+    const contribution = weights.timeframeAlignment * raw;
     logit += contribution;
-    factors.push({ name: "dailyTrendAlignment", contribution, description: desc });
+    const available = Object.keys(features.timeframeTrends).length;
+    factors.push({
+      name: "timeframeAlignment",
+      contribution,
+      description: `multi-timeframe trend alignment across ${available}/7 available timeframes (${raw >= 0 ? "supports" : "fights"} a ${features.side} setup)`,
+    });
   }
 
   // 3. Momentum alignment

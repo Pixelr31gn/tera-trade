@@ -15,7 +15,7 @@ import { getSettings } from "../core/config.js";
 import type { TradingSession } from "../analytics/session.js";
 import type { SetupFeatures } from "./features.js";
 import { scoreSetup, type FactorContribution, type StrategyVersion } from "./ruleScorer.js";
-import { computeBreakoutStrengthAdjustment, computeFibAdjustment, computeOrderFlowAdjustment, computePpmAdjustment, computeRiskRewardAdjustment, computeV3Bucket, scoreSetupV3Directional } from "./ruleScorerV3.js";
+import { computeBreakoutStrengthAdjustment, computeFibAdjustment, computeOrderFlowAdjustment, computePpmAdjustment, computeRiskRewardAdjustment, computeTimeframeAlignmentAdjustment, computeV3Bucket, scoreSetupV3Directional } from "./ruleScorerV3.js";
 import { computeHistoricalAdjustment } from "./v3HistoricalAdjustment.js";
 import { MLScorer } from "./training.js";
 
@@ -85,12 +85,13 @@ export async function evaluateSetup(
     const fib = computeFibAdjustment(features.fibSwingDirection, features.fibRetracementPct, features.side);
     const ppm = computePpmAdjustment(features.netPointsPerMinute, features.side);
     const orderFlow = computeOrderFlowAdjustment(features.orderFlowSnapshot, features.side);
+    const timeframeAlignment = computeTimeframeAlignmentAdjustment(features.timeframeTrends, features.side);
 
     const adjustedScore = Math.max(
       0,
       Math.min(
         100,
-        mySide.score + historical.adjustmentPoints + (breakoutStrength?.adjustmentPoints ?? 0) + riskReward.adjustmentPoints + fib.adjustmentPoints + ppm.adjustmentPoints + orderFlow.adjustmentPoints
+        mySide.score + historical.adjustmentPoints + (breakoutStrength?.adjustmentPoints ?? 0) + riskReward.adjustmentPoints + fib.adjustmentPoints + ppm.adjustmentPoints + orderFlow.adjustmentPoints + timeframeAlignment.adjustmentPoints
       )
     );
     const probability = Math.round((adjustedScore / 100) * 1e5) / 1e5;
@@ -127,6 +128,7 @@ export async function evaluateSetup(
     factors.push({ name: "fibDirectionAdjustment", contribution: fib.adjustmentPoints, description: fib.description });
     factors.push({ name: "ppmAdjustment", contribution: ppm.adjustmentPoints, description: ppm.description });
     factors.push({ name: "orderFlowAdjustment", contribution: orderFlow.adjustmentPoints, description: orderFlow.description });
+    factors.push({ name: "timeframeAlignmentAdjustment", contribution: timeframeAlignment.adjustmentPoints, description: timeframeAlignment.description });
 
     // Hard override: if v1 AND v2 both independently took this exact same
     // setup, v3 takes it too, even if its own score/conviction check

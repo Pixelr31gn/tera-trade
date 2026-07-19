@@ -24,6 +24,7 @@ import { ensureInstrumentsSeeded } from "./marketData/backfill.js";
 import { ACTIVE_INSTRUMENTS } from "./marketData/instruments.js";
 import { LiveBarPoller } from "./marketData/live.js";
 import { MinuteBarAggregator } from "./marketData/minuteBarAggregator.js";
+import { refreshAllRollups } from "./marketData/rollup.js";
 
 // Defense in depth: a crashed backend means zero risk oversight (no kill
 // switch enforcement, no position monitoring, nothing) until someone notices
@@ -275,6 +276,28 @@ async function main(): Promise<void> {
   runOutcomeEvaluation();
   const outcomeEvaluationTimer = setInterval(runOutcomeEvaluation, OUTCOME_EVALUATION_INTERVAL_MS);
 
+  // Keeps bars_rollup fresh for the 30m/1h/4h (and 5m/15m) legs of the
+  // multi-timeframe trend read (see engine/timeframeTrendCache.ts) -- doesn't
+  // need continuousScanTimer's 15s cadence: a rollup only needs to be as
+  // fresh as its own bucket size, and the fastest resolution rolled up here
+  // is 5 minutes. Same overlap-guard shape as outcomeEvaluationTimer above.
+  const ROLLUP_REFRESH_INTERVAL_MS = 5 * 60_000;
+  let rollupRefreshRunning = false;
+  const runRollupRefresh = (): void => {
+    if (rollupRefreshRunning) {
+      logger.warn("rollup_refresh_still_running_skipping_tick");
+      return;
+    }
+    rollupRefreshRunning = true;
+    refreshAllRollups()
+      .catch((err) => logger.error({ err: String(err) }, "rollup_refresh_failed"))
+      .finally(() => {
+        rollupRefreshRunning = false;
+      });
+  };
+  runRollupRefresh();
+  const rollupRefreshTimer = setInterval(runRollupRefresh, ROLLUP_REFRESH_INTERVAL_MS);
+
   // A running v3 confidence read per instrument, independent of whether any
   // strategy actually fired a signal -- see TradingEngine.runContinuousScan's
   // comment for why this is observational only and never executes. Guarded
@@ -311,6 +334,7 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     logger.info("terra_trade_stopping");
     clearInterval(outcomeEvaluationTimer);
+    clearInterval(rollupRefreshTimer);
     clearInterval(continuousScanTimer);
     stopDataSource();
     await dataSourcePromise;

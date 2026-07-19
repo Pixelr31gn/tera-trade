@@ -43,6 +43,7 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     fibRetracementPct: null,
     netPointsPerMinute: null,
     orderFlowSnapshot: null,
+    timeframeTrends: {},
     ...overrides,
   };
 }
@@ -60,10 +61,16 @@ describe("scoreSetup", () => {
     expect(risky.probability).toBeLessThan(calm.probability);
   });
 
-  it("scores a setup aligned with a confident daily trend higher than one fighting it", () => {
-    const aligned = scoreSetup(features({ side: "long", dailyTrendLabel: "up", dailyTrendConfidence: 0.8 }));
-    const counter = scoreSetup(features({ side: "long", dailyTrendLabel: "down", dailyTrendConfidence: 0.8 }));
+  it("scores a setup aligned with a confident timeframe trend higher than one fighting it", () => {
+    const aligned = scoreSetup(features({ side: "long", timeframeTrends: { "1d": { trendLabel: "up", confidence: 0.8 } } }));
+    const counter = scoreSetup(features({ side: "long", timeframeTrends: { "1d": { trendLabel: "down", confidence: 0.8 } } }));
     expect(aligned.probability).toBeGreaterThan(counter.probability);
+  });
+
+  it("has a timeframeAlignment factor and no standalone dailyTrendAlignment factor (absorbed 2026-07-18)", () => {
+    const result = scoreSetup(features({ timeframeTrends: { "1d": { trendLabel: "up", confidence: 0.8 } } }));
+    expect(result.factors.some((f) => f.name === "timeframeAlignment")).toBe(true);
+    expect(result.factors.some((f) => f.name === "dailyTrendAlignment")).toBe(false);
   });
 
   it("v1 ignores marketStructureLabel/liquidityLabel entirely -- v2 and v1 agree when both labels are neutral-ish", () => {
@@ -111,9 +118,12 @@ describe("evaluateSetup (gate)", () => {
     expect(gated.probability).toBeGreaterThanOrEqual(0.65);
   });
 
-  it("blocks a setup that fights a confident daily trend even when everything else looks good", async () => {
+  it("blocks a setup that fights a confident timeframe trend even when everything else looks good", async () => {
     const gated = await evaluateSetup(
-      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, dailyTrendLabel: "down", dailyTrendConfidence: 0.9 })
+      features({
+        trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9,
+        timeframeTrends: { "1d": { trendLabel: "down", confidence: 0.9 }, "4h": { trendLabel: "down", confidence: 0.9 }, "1h": { trendLabel: "down", confidence: 0.9 } },
+      })
     );
     expect(gated.decision).toBe("skipped_score");
   });

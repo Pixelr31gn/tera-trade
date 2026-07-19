@@ -240,6 +240,37 @@ being confident. Replaced `determineConsensus` (`engine/loop.ts`) with: **take t
 if at least 2 of the 3 versions individually clear the 65% score threshold**, full stop —
 applies to both paper and live.
 
+### Multi-timeframe trend alignment (2026-07-19)
+
+Replaced the single-timeframe `dailyTrendAlignment` factor with a 7-timeframe composite —
+**1D, 4H, 1H, 30M, 15M, 5M, 1M** — weighted so higher timeframes count more (`1d:6, 4h:5,
+1h:4, 30m:3, 15m:2, 5m:1.5, 1m:1`, hand-set), confirmed as a scoring *nudge*, not a hard
+gate (operator explicitly ruled out blocking trades on this). 1D still absorbs into the
+composite rather than staying a separate factor, so the same daily-trend evidence isn't
+scored twice.
+
+Revived `marketData/rollup.ts` (`bars_1m` → `bars_rollup`, previously dead code with zero
+callers) and added 30m/4h resolutions on top of the existing 5m/15m/1h, each with a
+per-resolution lookback window sized for `classifyRegime`'s ~114-bar appetite (5m: 48h,
+15m: 72h, 30m: 120h, 1h: 240h, 4h: 720h). Dropped the dead `1d` rollup entry — 1D reuses
+the existing `dailyTrendCache.ts`/`bars_daily` path, which already has real ~1yr depth.
+Found and fixed a latent bug while widening the lookback: the aggregation could overwrite
+a previously-complete bucket with an incomplete one when the query window's start fell
+mid-bucket; fixed by only upserting buckets whose own start is `>= since`. Wired
+`refreshAllRollups()` into a new 5-minute scheduled job (same overlap-guard shape as the
+outcome-evaluation timer) — it had never been called from anywhere before this.
+
+New `engine/timeframeTrendCache.ts` (4h/1h/30m/15m/5m legs, TTL-cached per resolution) and
+`analytics/timeframeAlignment.ts` (pure combination logic, same `(data, side) -> -1..1`
+shape as the fib/PPM/order-flow signals) feed a new `SetupFeatures.timeframeTrends` field.
+A timeframe with fewer than ~114 rolled-up bars is omitted from the composite entirely
+(renormalized around, not treated as a fabricated neutral reading) — expected for 15m/5m
+for a while after a fresh `bars_1m` history reset, though live verification the same day
+showed 4h/1h/30m already usable (the migrated historical data gave rollup a head start
+this build didn't originally expect). Wired into v1/v2 as a reweighted factor (`2.2`,
+replacing the old `1.8`) and into v3 as a new bounded adjustment (`computeTimeframeAlignmentAdjustment`,
+±12 points).
+
 ## Current architecture
 
 ### Module map (`backend/src/`)
