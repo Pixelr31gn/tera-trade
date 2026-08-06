@@ -119,6 +119,12 @@ const EnvSchema = z.object({
   CHROME_EXECUTABLE_PATH: z.string().optional(),
   CHROME_DEBUG_USER_DATA_DIR: z.string().optional(),
   CHROME_DEBUG_START_URL: z.string().default("https://topstepx.com/"),
+  // Opened as a second tab in the same debug Chrome session once it's
+  // reachable, so the dashboard is always sitting right next to the
+  // TopstepX tab instead of requiring a separate manual browser window.
+  // Blank disables this (e.g. if you'd rather keep the debug profile
+  // TopstepX-only).
+  DASHBOARD_URL: z.string().default("http://localhost:3000"),
 
   // --- Order-flow listener (reads live bid/ask size + trade-aggressor flow
   // off the same TopstepX tab's WebSocket traffic, see
@@ -131,6 +137,15 @@ const EnvSchema = z.object({
   // Defaults to true (dry-run) so real clicks require an explicit, separate opt-in
   // on top of TRADING_MODE=live + BROKER_KIND=browser_control + LIVE_TRADING_CONFIRMED.
   DRY_RUN_ORDERS: boolFromEnvDefault(true),
+
+  // --- Execution Decision Engine (2026-07-20) -- routes an approved signal
+  // through fair-value-map scoring and a resting limit order instead of an
+  // immediate market order. Defaults OFF: this is new, untested-live
+  // automation (real limit-order DOM automation, built and unit-tested the
+  // same night the market happened to be closed for maintenance) -- must be
+  // deliberately turned on, and only after a DRY_RUN_ORDERS=true smoke test,
+  // same posture as DRY_RUN_ORDERS itself.
+  EXECUTION_DECISION_ENGINE_ENABLED: boolFromEnvDefault(false),
 });
 
 export interface Settings {
@@ -179,9 +194,11 @@ export interface Settings {
   chromeExecutablePath: string | undefined;
   chromeDebugUserDataDir: string | undefined;
   chromeDebugStartUrl: string;
+  dashboardUrl: string;
   orderFlowEnabled: boolean;
   orderFlowFlushSeconds: number;
   dryRunOrders: boolean;
+  executionDecisionEngineEnabled: boolean;
 }
 
 let cached: Settings | undefined;
@@ -235,9 +252,11 @@ export function getSettings(): Settings {
     chromeExecutablePath: env.CHROME_EXECUTABLE_PATH,
     chromeDebugUserDataDir: env.CHROME_DEBUG_USER_DATA_DIR,
     chromeDebugStartUrl: env.CHROME_DEBUG_START_URL,
+    dashboardUrl: env.DASHBOARD_URL,
     orderFlowEnabled: env.ORDER_FLOW_ENABLED,
     orderFlowFlushSeconds: env.ORDER_FLOW_FLUSH_SECONDS,
     dryRunOrders: env.DRY_RUN_ORDERS,
+    executionDecisionEngineEnabled: env.EXECUTION_DECISION_ENGINE_ENABLED,
   };
   return cached;
 }

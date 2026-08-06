@@ -11,6 +11,7 @@ import { childLogger } from "../core/logger.js";
 import { connectToChrome, findPage, readPageText } from "./cdpClient.js";
 import {
   extractAccountSnapshot,
+  extractActiveAccountIdentity,
   extractPriceForSymbol,
   extractVolumeForSymbol,
   parseMoney,
@@ -117,10 +118,16 @@ export class BrowserWatcher {
       const balanceText = this.selectors.balanceSelector ? await readViaSelector(page, this.selectors.balanceSelector) : null;
       const equityText = this.selectors.equitySelector ? await readViaSelector(page, this.selectors.equitySelector) : null;
       const pnlText = this.selectors.pnlSelector ? await readViaSelector(page, this.selectors.pnlSelector) : null;
+      // Calibrated selectors only cover balance/equity/pnl -- account identity
+      // still comes from the free-text heuristic either way, so a calibrated
+      // setup doesn't lose per-account equity-curve separation.
+      const identity = extractActiveAccountIdentity(pageText);
       await this.onAccountSnapshot({
         balance: balanceText ? parseMoney(balanceText) : null,
         equity: equityText ? parseMoney(equityText) : null,
         pnl: pnlText ? parseMoney(pnlText) : null,
+        accountName: identity?.name ?? null,
+        brokerAccountId: identity?.brokerAccountId ?? null,
       });
     } else {
       await this.onAccountSnapshot(extractAccountSnapshot(pageText));

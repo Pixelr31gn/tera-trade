@@ -12,12 +12,39 @@ export interface OhlcBar {
   volume: number;
 }
 
+// A single degenerate bar (e.g. a bad data-feed tick briefly producing a
+// wildly wrong OHLC bar) otherwise dominates every ATR-based calculation
+// downstream for many minutes afterward -- Wilder's smoothing only decays by
+// ~(1-1/period) per bar, so one huge true-range value stays influential long
+// after the underlying bad tick is corrected. 2026-07-21 incident: a single
+// zero-volume NQ bar with a false ~29,000-point range (and, via prevClose,
+// the very next bar too) kept a live continuous-scan signal's ATR-derived
+// stop distance in the thousands of points for several minutes after the
+// bad tick itself had already self-healed. Clip each bar's raw true range to
+// at most this multiple of the recent local median -- generous enough that
+// a real volatility spike (a genuine gap, a news event) still reads as
+// elevated, tight enough that one degenerate bar can't dominate the average.
+const TRUE_RANGE_OUTLIER_CLIP_MULTIPLE = 10;
+const TRUE_RANGE_OUTLIER_CLIP_WINDOW = 14;
+
+function clipTrueRangeOutliers(raw: number[]): number[] {
+  return raw.map((value, i) => {
+    const reference = raw.slice(Math.max(0, i - TRUE_RANGE_OUTLIER_CLIP_WINDOW), i); // preceding bars only, excludes this one
+    if (reference.length < Math.max(3, Math.floor(TRUE_RANGE_OUTLIER_CLIP_WINDOW / 2))) return value; // not enough history yet to judge
+    const sorted = [...reference].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)]!;
+    if (median <= 0) return value;
+    return Math.min(value, median * TRUE_RANGE_OUTLIER_CLIP_MULTIPLE);
+  });
+}
+
 export function trueRange(bars: OhlcBar[]): number[] {
-  return bars.map((bar, i) => {
+  const raw = bars.map((bar, i) => {
     if (i === 0) return bar.high - bar.low;
     const prevClose = bars[i - 1]!.close;
     return Math.max(bar.high - bar.low, Math.abs(bar.high - prevClose), Math.abs(bar.low - prevClose));
   });
+  return clipTrueRangeOutliers(raw);
 }
 
 /** Wilder's smoothing (equivalent to pandas ewm(alpha=1/period, adjust=False)). */

@@ -8,9 +8,11 @@ import { DEFAULT_INSTRUMENTS, getInstrument } from "../../marketData/instruments
 import { computeAccountEquity, computeAccountRiskState } from "../../engine/accounting.js";
 import { ensureDefaultAccount } from "../../engine/bootstrap.js";
 import { CONTINUOUS_SCAN_STRATEGY_IDS, determineConsensus } from "../../engine/loop.js";
+import { getExecutionSettings } from "../../execution/mode.js";
 import type { GatedScore } from "../../scoring/gate.js";
 import type { StrategyVersion } from "../../scoring/ruleScorer.js";
 import type { OhlcBar } from "../../regime/indicators.js";
+import type { ExecutionSettings } from "../../replay/types.js";
 import type { Score, RiskLimit } from "@prisma/client";
 
 const NO_NEWS = { inRiskWindow: false, nearestEventName: null, nearestEventTime: null, minutesToEvent: null, impact: null };
@@ -38,7 +40,7 @@ function toRiskLimitsConfig(row: RiskLimit): RiskLimitsConfig {
 // still get blocked by the S/R gate or sizing, exactly like a real trade
 // would.
 const engine = new RiskEngine();
-async function wouldPassRiskEngine(score: Score, riskLimitsRow: RiskLimit): Promise<boolean> {
+async function wouldPassRiskEngine(score: Score, riskLimitsRow: RiskLimit, executionSettings: ExecutionSettings): Promise<boolean> {
   if (score.signalKind !== "breakout" && score.signalKind !== "reversal") return true; // no recorded signal kind (older row) -- can't replay, don't block on it
   const bars = await prisma.bar.findMany({ where: { symbol: score.symbol, time: { lte: score.time } }, orderBy: { time: "desc" }, take: 300 });
   if (bars.length === 0) return false;
@@ -64,6 +66,13 @@ async function wouldPassRiskEngine(score: Score, riskLimitsRow: RiskLimit): Prom
     tickSize: instrument.tickSize,
     newsStatus: NO_NEWS,
     bars: ohlc,
+    // Approval here only depends on the S/R gate and circuit breakers, not
+    // quantity/sizing, so this row's own single-version probability (not a
+    // true cross-version average, unavailable in this per-row context) is
+    // a safe stand-in -- it can't change whether the trade is approved.
+    averageProbability: score.probability.toNumber(),
+    takeProfitRMultiple: executionSettings.takeProfitRMultiple,
+    confidenceTiers: executionSettings.confidenceTiers,
   });
   return assessment.approved;
 }
@@ -75,7 +84,13 @@ async function wouldPassRiskEngine(score: Score, riskLimitsRow: RiskLimit): Prom
 // plan as its own columns. This must stay in sync with the account's actual
 // risk limits (fixed-dollar or percentage) so what's displayed always
 // matches what would actually be traded.
-function buildTradePlan(score: Score, riskLimits: RiskLimit, equity: Decimal): { entryPrice: number; stopPrice: number; takeProfitPrice: number; quantity: number } {
+function buildTradePlan(
+  score: Score,
+  riskLimits: RiskLimit,
+  equity: Decimal,
+  executionSettings: ExecutionSettings,
+  averageProbability: number = score.probability.toNumber()
+): { entryPrice: number; stopPrice: number; takeProfitPrice: number; quantity: number } {
   const instrument = getInstrument(score.symbol);
   const entryPrice = new Decimal(score.entryPriceAtSignal.toString());
   const atrValue = new Decimal(score.atrAtSignal.toString());
@@ -96,14 +111,20 @@ function buildTradePlan(score: Score, riskLimits: RiskLimit, equity: Decimal): {
     riskAmount,
     profitDollars,
     maxPositionSize: riskLimits.maxPositionSize,
+    averageProbability,
+    // Must match risk/engine.ts's assessNewTrade exactly -- both now read
+    // the same operator-adjustable SystemState settings (2026-08-02).
+    takeProfitRMultiple: executionSettings.takeProfitRMultiple,
+    confidenceTiers: executionSettings.confidenceTiers,
   });
 
   return { entryPrice: entryPrice.toNumber(), stopPrice: plan.stopPrice.toNumber(), takeProfitPrice: plan.takeProfitPrice.toNumber(), quantity: plan.quantity };
 }
 
-async function loadRiskContext(): Promise<{ riskLimits: RiskLimit; equity: Decimal }> {
+async function loadRiskContext(): Promise<{ riskLimits: RiskLimit; equity: Decimal; executionSettings: ExecutionSettings }> {
   const account = await ensureDefaultAccount();
   const riskLimits = await prisma.riskLimit.findUniqueOrThrow({ where: { accountId: account.id } });
+  const executionSettings = await getExecutionSettings();
 
   const lastBars = await Promise.all(
     DEFAULT_INSTRUMENTS.map((spec) => prisma.bar.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }))
@@ -114,7 +135,7 @@ async function loadRiskContext(): Promise<{ riskLimits: RiskLimit; equity: Decim
   }
   const equity = await computeAccountEquity(account, lastPrices);
 
-  return { riskLimits, equity };
+  return { riskLimits, equity, executionSettings };
 }
 
 export async function scoresRoutes(app: FastifyInstance): Promise<void> {
@@ -123,7 +144,7 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Querystring: { limit?: string } }>("/api/recommendations", async (request) => {
     const limit = Math.min(Number(request.query.limit ?? 100), 500);
     const rows = await prisma.score.findMany({ orderBy: { time: "desc" }, take: limit });
-    const { riskLimits, equity } = await loadRiskContext();
+    const { riskLimits, equity, executionSettings } = await loadRiskContext();
     return rows.map((s) => ({
       id: s.id,
       time: s.time,
@@ -135,7 +156,7 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
       explanation: s.explanation,
       tradeId: s.tradeId,
       strategyVersion: s.strategyVersion,
-      ...buildTradePlan(s, riskLimits, equity),
+      ...buildTradePlan(s, riskLimits, equity, executionSettings),
     }));
   });
 
@@ -185,17 +206,27 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
 
     const account = await ensureDefaultAccount();
     const riskLimitsRow = await prisma.riskLimit.findUniqueOrThrow({ where: { accountId: account.id } });
+    const executionSettings = await getExecutionSettings();
 
-    const representativeCandidates: Score[] = [];
+    // Carries the real cross-version averageProbability alongside its
+    // representative row -- confidence-tier sizing (risk/sizing.ts) needs
+    // the actual consensus average, not just the representative's own
+    // single-version probability, for this preview to match what the real
+    // execution path would actually size.
+    const representativeCandidates: { score: Score; averageProbability: number }[] = [];
     for (const versions of bySignal.values()) {
-      // determineConsensus assumes all three voters were scored (that's how a
-      // real signal is always shadow-scored -- see engine/loop.ts) -- a
-      // signal with an incomplete version set here means its rows landed on
-      // opposite sides of the lookback window boundary, or some other data
-      // gap. Skip rather than guess at the missing version's decision. Both
-      // paper and live use the same consensus rule now (2026-07-14), so this
-      // no longer branches on systemState.mode.
-      if (!versions.has("v1") || !versions.has("v2") || !versions.has("v3")) continue;
+      // determineConsensus assumes all five versions were scored (that's how
+      // a real signal is always shadow-scored -- see engine/loop.ts's
+      // scoreAllVersions, which always scores STRATEGY_VERSIONS +
+      // SHADOW_ONLY_VERSIONS together) -- a signal with an incomplete
+      // version set here means its rows landed on opposite sides of the
+      // lookback window boundary, predate v6's introduction (2026-08-02), or
+      // some other data gap. Skip rather than guess at the missing version's
+      // decision (determineConsensus itself throws on a missing "v6" entry,
+      // see its own gatedByVersion.get("v6")! call). Both paper and live use
+      // the same consensus rule now (2026-07-14), so this no longer branches
+      // on systemState.mode.
+      if (!versions.has("v1") || !versions.has("v2") || !versions.has("v3") || !versions.has("v5") || !versions.has("v6")) continue;
       const gatedByVersion = new Map<StrategyVersion, GatedScore>(
         [...versions.entries()].map(([v, s]) => [
           v,
@@ -206,28 +237,29 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
       if (!consensus.taken || !consensus.representativeVersion) continue;
       const representative = versions.get(consensus.representativeVersion);
       if (!representative) continue;
-      representativeCandidates.push(representative);
+      representativeCandidates.push({ score: representative, averageProbability: consensus.averageProbability });
     }
     // Each check is its own DB round-trip chain (bar fetch + equity/risk-state
     // computation) -- these are independent per candidate, and the candidate
     // list here is already bounded to one row per distinct signal in the
     // lookback window (naturally small), so a plain Promise.all is fine
     // without a concurrency cap.
-    const riskChecks = await Promise.all(representativeCandidates.map((c) => wouldPassRiskEngine(c, riskLimitsRow)));
+    const riskChecks = await Promise.all(representativeCandidates.map((c) => wouldPassRiskEngine(c.score, riskLimitsRow, executionSettings)));
     const candidates = representativeCandidates.filter((_, i) => riskChecks[i]);
-    candidates.sort((a, b) => b.time.getTime() - a.time.getTime());
+    candidates.sort((a, b) => b.score.time.getTime() - a.score.time.getTime());
 
     const bestPerSymbol = new Map<string, (typeof candidates)[number]>();
-    for (const score of candidates) {
+    for (const candidate of candidates) {
+      const score = candidate.score;
       if (openSymbols.has(score.symbol)) continue;
       if (bestPerSymbol.has(score.symbol)) continue; // already have the more recent one (sorted desc)
       const actionability = computeActionability(score.time, now);
       if (actionability === "expired") continue;
-      bestPerSymbol.set(score.symbol, score);
+      bestPerSymbol.set(score.symbol, candidate);
     }
 
     const { riskLimits, equity } = await loadRiskContext();
-    return [...bestPerSymbol.values()].map((s) => ({
+    return [...bestPerSymbol.values()].map(({ score: s, averageProbability }) => ({
       id: s.id,
       time: s.time,
       symbol: s.symbol,
@@ -237,7 +269,7 @@ export async function scoresRoutes(app: FastifyInstance): Promise<void> {
       explanation: s.explanation,
       actionability: computeActionability(s.time, now),
       strategyVersion: s.strategyVersion,
-      ...buildTradePlan(s, riskLimits, equity),
+      ...buildTradePlan(s, riskLimits, equity, executionSettings, averageProbability),
     }));
   });
 

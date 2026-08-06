@@ -28,6 +28,16 @@ export interface Signal {
   // signal broke through, used to validate the break is against a real,
   // multiply-tested level rather than an arbitrary swing point.
   breakoutLevelPrice?: Decimal;
+  // When BOTH are set, risk/tradePlan.ts uses them directly instead of
+  // computing a stop/target generically (structure-vs-ATR blend, R-multiple
+  // target) -- the strategy has already computed its own structurally
+  // specific stop/target and wants them used exactly as given. Currently
+  // only strategy/trendPullbackFib.ts sets these (operator spec, 2026-08-03:
+  // stop always at the 5m 20 EMA, target at the trend leg's own peak/trough,
+  // clamped to a 2:1-4:1 reward:risk band) -- every other strategy leaves
+  // both undefined and gets the existing generic behavior, unchanged.
+  explicitStopPrice?: Decimal;
+  explicitTakeProfitPrice?: Decimal;
 }
 
 export interface Strategy {

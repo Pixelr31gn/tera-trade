@@ -25,6 +25,8 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import path from "node:path";
+import { isSea } from "node:sea";
 import { prisma } from "../db/client.js";
 import { childLogger } from "../core/logger.js";
 import { TradingSession } from "../analytics/session.js";
@@ -42,8 +44,24 @@ const ALL_SESSIONS: TradingSession[] = [TradingSession.NEW_YORK, TradingSession.
 const POSITIVE_OUTCOME_LABELS = new Set(["executed_win", "missed_win"]);
 const NEGATIVE_OUTCOME_LABELS = new Set(["executed_loss", "missed_loss"]);
 
+// 2026-07-29: this used to be a plain `import.meta.url`-relative resolution,
+// which breaks two ways -- (1) under a Node SEA-packaged exe, `import.meta.url`
+// doesn't correspond to a real on-disk sibling directory at all (see
+// env.ts's identical fix); (2) even in the existing, non-packaged production
+// build (`npm run build && npm start`), `tsc` never copies the checked-in
+// `src/scoring/artifacts/*.json` model files into `dist/`, so this resolved
+// to a path that never existed -- `MLScorer.isAvailable()` has silently
+// returned false in every production build all along (only `npm run dev`'s
+// tsx, which runs directly from `src/`, ever actually found them). Fixed on
+// both fronts: SEA-aware resolution (packaged mode reads from next to the
+// exe) matching env.ts's pattern, plus `package.json`'s `build` script now
+// copies the artifacts folder into `dist/` too.
 function modelPath(session: TradingSession): string {
-  return fileURLToPath(new URL(`./artifacts/trade-scorer-v4-${session}.json`, import.meta.url));
+  const fileName = `trade-scorer-v4-${session}.json`;
+  if (isSea()) {
+    return path.join(path.dirname(process.execPath), "artifacts", fileName);
+  }
+  return fileURLToPath(new URL(`./artifacts/${fileName}`, import.meta.url));
 }
 
 export const FEATURE_COLUMNS = [

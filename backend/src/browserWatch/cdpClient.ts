@@ -13,8 +13,29 @@ import { childLogger } from "../core/logger.js";
 
 const logger = childLogger("cdpClient");
 
+// Every caller (the main engine's persistent broker, the manual-trade route,
+// the close-position route, ad-hoc diagnostics, etc.) used to open its own
+// independent connectOverCDP session -- none of them ever actually close
+// their Browser object (BrowserControlBroker.disconnect() only drops its own
+// local reference, deliberately, since closing it risks closing the user's
+// real Chrome window), so these accumulated indefinitely. 2026-07-21: traced
+// a real incident here -- a second simultaneous connectOverCDP call while
+// the engine's own connection was already active and in use consistently
+// hung for the full 30s timeout (confirmed live, multiple times, including
+// the manual-trade endpoint failing this way when testing a symbol switch).
+// Caching and reusing one connection per cdpUrl is strictly safer than what
+// every caller was already doing.
+let cachedBrowser: Browser | null = null;
+let cachedCdpUrl: string | null = null;
+
 export async function connectToChrome(cdpUrl: string): Promise<Browser> {
-  return chromium.connectOverCDP(cdpUrl);
+  if (cachedBrowser && cachedCdpUrl === cdpUrl && cachedBrowser.isConnected()) {
+    return cachedBrowser;
+  }
+  logger.info({ cdpUrl }, "opening_new_cdp_connection");
+  cachedBrowser = await chromium.connectOverCDP(cdpUrl);
+  cachedCdpUrl = cdpUrl;
+  return cachedBrowser;
 }
 
 // Without an explicit application-level dialog listener, Playwright's own
@@ -37,17 +58,95 @@ function ensureDialogHandler(page: Page): void {
   });
 }
 
-/** Finds the first open tab whose URL contains `urlMatch` (e.g. "topstepx.com"). */
-export async function findPage(browser: Browser, urlMatch: string): Promise<Page | null> {
-  for (const context of browser.contexts()) {
-    for (const page of context.pages()) {
-      if (page.url().includes(urlMatch)) {
-        ensureDialogHandler(page);
-        return page;
+// 2026-07-27 incident: the user got logged out of TopstepX, leaving a
+// "topstepx.com/login" tab open alongside (or instead of) the real trading
+// tab. That URL still contains "topstepx.com", so findPage happily returned
+// it, and every subsequent "price" extracted from it was really just stray
+// numbers off the login page's own text (extractPriceForSymbol has no way to
+// know it's reading the wrong page) -- corrupting bars_1m for several
+// minutes. Worse, minuteBarAggregator's outlier-confirmation guard assumes a
+// bad DOM scrape won't reproduce the same wrong number twice, but a static
+// login page reproduces its own text byte-for-byte every poll, so the guard
+// actually *confirmed* the garbage as a trusted new price level.
+//
+// First attempted fix was a URL path check (deny-list of "/login" etc, then
+// tightened to require "/trade"). Both were wrong: 2026-07-28 confirmed
+// live that TopstepX's app is client-side-routed and never updates the
+// visible URL to "/trade" at all when the debug-Chrome auto-launch starts
+// at the bare root ("https://topstepx.com/", see chromeLauncher.ts's default
+// start URL) -- a fully logged-in, fully live trading session with real
+// balance/order-ticket/trade-history content sat at that same bare root URL
+// indefinitely, which the "/trade"-required check rejected outright, and
+// which the earlier deny-list check would have wrongly accepted (a
+// redirect-in-progress root page fed a garbage -1000.25 price the very
+// first tick after a restart, since a fresh process has no prior accepted
+// price yet to sanity-check a first reading against).
+//
+// URL path is evidently not a reliable signal for this app at all -- content
+// is. `extractAccountSnapshot`'s BALANCE_LABELS (extract.ts) already relies
+// on a "bal:" label appearing only once genuinely authenticated and on the
+// account/trading dashboard (never present on a login screen); reusing that
+// same proven marker here instead of the URL settles which real page this
+// is, independent of whatever the address bar happens to say.
+const AUTHENTICATED_PAGE_CONTENT_MARKER = "bal:";
+
+// 2026-07-28 (later same day): the content check above added a
+// page.evaluate() call inside findPage that wasn't there before -- and every
+// real caller (BrowserWatcher's poll loop, BrowserControlBroker's order
+// placement, orderFlowListener) hits findPage independently, on its own
+// timer, with no coordination between them. Two of these landing on the same
+// page within the same tick made a live order placement's evaluate() call
+// throw (confirmed: consensus reached cleanly on both ES and NQ, immediately
+// followed by "no_matching_tab_found" then a rejected real order, even
+// though the exact same tab was serving the watcher's price extraction fine
+// moments before and after). The original silent `catch { continue }` had no
+// way to tell "this really is the wrong page" apart from "this evaluate call
+// just got unlucky" -- it treated both as a hard miss. A couple of quick
+// retries before giving up on an otherwise-URL-matching candidate covers the
+// transient case without weakening the actual login-page rejection (a real
+// login page's evaluate() succeeds fine every time; it just lacks the
+// marker).
+const EVALUATE_RETRIES = 3;
+const EVALUATE_RETRY_DELAY_MS = 150;
+
+async function readBodyTextWithRetry(page: Page): Promise<string | null> {
+  for (let attempt = 1; attempt <= EVALUATE_RETRIES; attempt++) {
+    try {
+      return await page.evaluate(() => document.body.innerText);
+    } catch (err) {
+      if (attempt === EVALUATE_RETRIES) {
+        logger.warn({ err: String(err), attempt }, "find_page_evaluate_failed_giving_up");
+        return null;
       }
+      logger.warn({ err: String(err), attempt }, "find_page_evaluate_failed_retrying");
+      await new Promise((resolve) => setTimeout(resolve, EVALUATE_RETRY_DELAY_MS));
     }
   }
-  logger.warn({ urlMatch }, "no_matching_tab_found");
+  return null;
+}
+
+/** Finds the open tab that's on `urlMatch`'s (e.g. "topstepx.com") genuine, authenticated trading dashboard -- not just any tab whose URL happens to contain the domain, which also matches a login screen or a redirect-in-progress page. Distinguishes by page *content* (see AUTHENTICATED_PAGE_CONTENT_MARKER), not URL path, since TopstepX's client-side router doesn't reliably reflect page state in the URL. */
+export async function findPage(browser: Browser, urlMatch: string): Promise<Page | null> {
+  let domainSeenButNotAuthenticated = false;
+  for (const context of browser.contexts()) {
+    for (const page of context.pages()) {
+      const url = page.url();
+      if (!url.includes(urlMatch)) continue;
+      const text = await readBodyTextWithRetry(page);
+      if (text === null) continue; // couldn't read this candidate even after retries -- try the next one
+      if (!text.toLowerCase().includes(AUTHENTICATED_PAGE_CONTENT_MARKER)) {
+        domainSeenButNotAuthenticated = true;
+        continue;
+      }
+      ensureDialogHandler(page);
+      return page;
+    }
+  }
+  if (domainSeenButNotAuthenticated) {
+    logger.warn({ urlMatch }, "matched_tab_not_authenticated");
+  } else {
+    logger.warn({ urlMatch }, "no_matching_tab_found");
+  }
   return null;
 }
 

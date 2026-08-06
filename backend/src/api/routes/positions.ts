@@ -31,7 +31,27 @@ export async function positionsRoutes(app: FastifyInstance): Promise<void> {
       score: t.score,
       explanation: t.explanation,
       brokerKind: t.brokerKind,
+      trailingStopPlaced: t.trailingStopPlaced,
+      letItRide: t.letItRide,
     }));
+  });
+
+  // v1.3 operator override: once a position's real trailing-stop order is
+  // live, this cancels the internal take-profit check in
+  // engine/loop.ts's manageLiveOpenTrade so the trade can run past its
+  // original target -- for the one case a rule-based system can't cover on
+  // its own, the operator seeing something it doesn't. Irreversible via this
+  // endpoint by design (no "un-ride" toggle) -- flipping it back off with a
+  // stale takeProfitPrice the market has already passed would immediately
+  // force-close the position the next tick, which is never what "I changed
+  // my mind" should do to a real position.
+  app.post<{ Params: { tradeId: string } }>("/api/positions/:tradeId/let-it-ride", async (request, reply) => {
+    const tradeId = Number(request.params.tradeId);
+    const trade = await prisma.trade.findUnique({ where: { id: tradeId } });
+    if (!trade || trade.status !== "open") return reply.code(404).send({ error: "Open position not found" });
+
+    await prisma.trade.update({ where: { id: tradeId }, data: { letItRide: true } });
+    return { status: "let_it_ride_enabled" };
   });
 
   // Manual close for a position opened via BrowserControlBroker -- this

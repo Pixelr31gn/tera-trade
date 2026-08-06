@@ -35,7 +35,7 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
       {message && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => respond(false)}>
           <div
-            className="mx-4 max-w-md rounded-2xl border border-white/10 bg-[#12151b] p-5 shadow-glass backdrop-blur-xl"
+            className="mx-4 max-w-md rounded-2xl border border-white/10 bg-surface p-5 shadow-glass backdrop-blur-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <p className="whitespace-pre-line text-sm text-gray-200">{message}</p>

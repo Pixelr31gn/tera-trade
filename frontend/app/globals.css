@@ -4,11 +4,31 @@
 
 html,
 body {
-  background-color: #0a0c10;
+  background-color: #0a0e15;
   color: #e6e9ee;
+  /* Snow leopard theme: two soft glacier-light washes (icy blue + pale
+     frost) plus a faint, irregularly-scattered rosette texture -- a nod to
+     the coat's spot pattern, kept subtle enough (2-5% opacity) to read as
+     ambient texture behind panels rather than a literal animal print. */
   background-image:
-    radial-gradient(ellipse 80% 50% at 20% -10%, rgba(59, 157, 255, 0.08), transparent),
-    radial-gradient(ellipse 80% 50% at 100% 0%, rgba(16, 185, 129, 0.06), transparent);
+    radial-gradient(ellipse 80% 50% at 20% -10%, rgba(125, 211, 252, 0.07), transparent),
+    radial-gradient(ellipse 80% 50% at 100% 0%, rgba(226, 232, 240, 0.05), transparent),
+    radial-gradient(circle at 12% 18%, rgba(148, 163, 184, 0.05) 0 13px, transparent 14px),
+    radial-gradient(circle at 42% 52%, rgba(148, 163, 184, 0.045) 0 9px, transparent 10px),
+    radial-gradient(circle at 78% 12%, rgba(148, 163, 184, 0.05) 0 11px, transparent 12px),
+    radial-gradient(circle at 88% 68%, rgba(148, 163, 184, 0.04) 0 15px, transparent 16px),
+    radial-gradient(circle at 28% 82%, rgba(148, 163, 184, 0.045) 0 10px, transparent 11px),
+    radial-gradient(circle at 62% 88%, rgba(148, 163, 184, 0.04) 0 12px, transparent 13px);
+  background-size:
+    auto,
+    auto,
+    280px 280px,
+    280px 280px,
+    280px 280px,
+    280px 280px,
+    280px 280px,
+    280px 280px;
+  background-repeat: no-repeat, no-repeat, repeat, repeat, repeat, repeat, repeat, repeat;
   background-attachment: fixed;
 }
 
@@ -20,11 +40,11 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #232a35;
+  background: #28323f;
   border-radius: 6px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #2d3644;
+  background: #344152;
 }
 
 table {
@@ -36,7 +56,7 @@ th,
 td {
   text-align: left;
   padding: 6px 10px;
-  border-bottom: 1px solid #232c38;
+  border-bottom: 1px solid #26303c;
   font-size: 0.8125rem;
 }
 

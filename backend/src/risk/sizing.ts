@@ -59,3 +59,44 @@ export function computePositionSize(
   }
   return { quantity, riskAmount, stopDistancePoints, cappedByMaxPosition: capped, reason };
 }
+
+/**
+ * Confidence-tier sizing (2026-07-20, operator request): quantity is set
+ * directly by the cross-version consensus average, not derived from the
+ * dollar-risk budget -- the dollar-based computePositionSize above was
+ * almost always landing on 1 contract regardless of how confident a setup
+ * was (a wide-but-valid stop against a fixed $50 budget floors there most
+ * of the time), which meant real conviction differences between setups
+ * never showed up as position size. Real $ risk now scales with the tier
+ * (quantity x stop distance x point value), not the other way around --
+ * a deliberate tradeoff the operator chose explicitly over keeping the
+ * dollar budget as a hard ceiling.
+ */
+/** Default shape only -- callers should pass the operator's current SystemState tiers (see execution/mode.ts's setConfidenceTiers); this is just the fallback when none is supplied. */
+export const DEFAULT_CONFIDENCE_TIERS: [minAverageProbability: number, quantity: number][] = [
+  [0.85, 3],
+  [0.75, 2],
+  [0.65, 1],
+];
+
+// Operator-adjustable at runtime (2026-08-02, see execution/mode.ts's
+// setConfidenceTiers) -- was a hardcoded module constant (65/71/82%) until
+// then. Kept as a plain parameter, not a DB read, so this stays a pure
+// function per CLAUDE.md's rule for risk/ -- callers resolve the current
+// tiers from SystemState/DecisionContext and pass them in.
+export function computeConfidenceTierQuantity(
+  averageProbability: number,
+  maxPositionSize: number,
+  tiers: [minAverageProbability: number, quantity: number][] = DEFAULT_CONFIDENCE_TIERS,
+): number {
+  // Consensus requires at least 2/3 versions to individually clear the score
+  // threshold to reach execution at all (see engine/loop.ts's
+  // determineConsensus) -- the *average* can still land below the lowest
+  // tier in that case (e.g. two versions just over 65% and a third near 0%).
+  // A setup that already cleared every other gate is never sized to zero for
+  // landing in that gap -- same "never below 1" floor as the dollar-based
+  // sizing above, just re-anchored to confidence tiers instead of dollars.
+  const sortedDescending = [...tiers].sort((a, b) => b[0] - a[0]);
+  const tierQuantity = sortedDescending.find(([min]) => averageProbability >= min)?.[1] ?? 1;
+  return Math.min(tierQuantity, maxPositionSize);
+}

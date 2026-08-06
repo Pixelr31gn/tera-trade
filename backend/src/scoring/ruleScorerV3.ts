@@ -7,7 +7,7 @@
  * clearing a threshold while the other is nearly as strong.
  *
  * Factors (must sum to 100):
- *   1. Trend direction (EMA50 + slope)           20 pts
+ *   1. Trend direction (daily EMA20 + slope)     20 pts
  *   2. Trend strength (ADX, magnitude-only)       20 pts
  *   3. Volatility (ATR vs. its own recent average) 15 pts
  *   4. Volume confirmation (bar volume vs 20-bar avg) 15 pts
@@ -22,13 +22,12 @@
  */
 import type { OhlcBar } from "../regime/indicators.js";
 import { atr } from "../regime/indicators.js";
-import { classifyEma50Trend, type Ema50Trend } from "../analytics/emaTrend.js";
+import type { EmaTrend } from "../analytics/emaTrend.js";
 import { lastRsi } from "../analytics/rsi.js";
 import type { MarketStructureLabel } from "../analytics/priceAction.js";
 import { fibDirectionSignal } from "../analytics/fibonacci.js";
 import { ppmDirectionSignal } from "../analytics/ppm.js";
 import { orderFlowDirectionSignal } from "../analytics/orderFlow.js";
-import { timeframeAlignmentSignal, type TimeframeTrendReadings } from "../analytics/timeframeAlignment.js";
 import type { OrderFlowSnapshot } from "../browserWatch/orderFlowListener.js";
 import type { SetupFeatures } from "./features.js";
 
@@ -45,7 +44,7 @@ export interface V3SideScore {
 }
 
 export interface V3AbsoluteReadings {
-  emaTrend: Ema50Trend;
+  emaTrend: EmaTrend;
   adx: number | null;
   atrRatio: number | null; // current ATR / recent average ATR
   volumeRatio: number | null; // current bar volume / 20-bar average volume
@@ -85,7 +84,7 @@ const ATR_AVERAGE_LOOKBACK = 20;
 const VOLUME_AVERAGE_LOOKBACK = 20;
 
 export function computeAbsoluteReadings(bars: OhlcBar[], features: SetupFeatures): V3AbsoluteReadings {
-  const emaTrend = classifyEma50Trend(bars);
+  const emaTrend = features.dailyEma20Trend;
   const rsi = lastRsi(bars);
 
   const atrSeries = atr(bars).filter((v) => !Number.isNaN(v));
@@ -107,25 +106,27 @@ export function computeAbsoluteReadings(bars: OhlcBar[], features: SetupFeatures
   return { emaTrend, adx: features.adx, atrRatio, volumeRatio, rsi, marketStructureLabel: features.marketStructureLabel };
 }
 
-// 1. Trend direction (EMA50 + slope) -- 20 pts
-function scoreEmaTrend(emaTrend: Ema50Trend, side: "long" | "short"): V3FactorContribution {
+// 1. Trend direction (daily EMA20 + slope) -- 20 pts
+function scoreEmaTrend(emaTrend: EmaTrend, side: "long" | "short"): V3FactorContribution {
   const max = 20;
   if (emaTrend.label === "neutral" || emaTrend.slope === null) {
-    return { name: "trendDirection", points: 8, maxPoints: max, description: "EMA50 is flat / price is moving sideways -- no clear trend" };
+    return { name: "trendDirection", points: 8, maxPoints: max, description: "daily EMA20 is flat / price is moving sideways -- no clear trend" };
   }
 
   const aligned = (emaTrend.label === "bullish" && side === "long") || (emaTrend.label === "bearish" && side === "short");
   // Slope magnitude scaled against a hand-set reference (0.002 normalized
-  // change over the lookback is already a meaningful intraday EMA50 move
-  // for these instruments) -- same "documented prior, not fitted" approach
-  // used throughout the rest of the scorer.
+  // change over the lookback) -- carried over unchanged from the old
+  // intraday EMA(50) version of this factor; daily closes move by a
+  // meaningfully different typical percentage per bar than 1-minute bars
+  // did, so this reference value hasn't been recalibrated for the daily
+  // EMA20 yet (see analytics/emaTrend.ts's FLAT_SLOPE_THRESHOLD comment).
   const magnitude = clip(Math.abs(emaTrend.slope) / 0.002, 0, 1);
   const points = aligned ? 12 + 8 * magnitude : 8 - 8 * magnitude;
   return {
     name: "trendDirection",
     points,
     maxPoints: max,
-    description: `EMA50 trend is ${emaTrend.label}, ${aligned ? "agrees with" : "opposes"} a ${side} setup`,
+    description: `daily EMA20 trend is ${emaTrend.label}, ${aligned ? "agrees with" : "opposes"} a ${side} setup`,
   };
 }
 
@@ -352,26 +353,43 @@ export function computeOrderFlowAdjustment(snapshot: OrderFlowSnapshot | null, s
 }
 
 // Same bounded-adjustment pattern as computeFibAdjustment/computePpmAdjustment
-// above -- not one of the six core 100-pt factors. See
-// analytics/timeframeAlignment.ts's timeframeAlignmentSignal for the -1..1
-// scale, combining up to 7 timeframes weighted so higher ones count more.
-// Bounded wider than the single-input adjustments (fib +/-8, ppm/order-flow
-// +/-10/+/-8) since this is already a weighted combination of multiple
-// independent reads, but still below the historical-similarity adjustment's
-// +/-15, since -- like the rest of the adjustments here -- it isn't yet
-// validated against real resolved-outcome data the way that one is.
-const MAX_TIMEFRAME_ALIGNMENT_ADJUSTMENT = 12;
+// above -- not one of the six core 100-pt factors, and not yet validated
+// against real outcomes, so kept in the same modest range as those rather
+// than the wider, outcome-validated historicalAdjustment's range. Rewards a
+// setup whose side agrees with where price sits relative to a fast intraday
+// 20-EMA (5-minute bars -- see analytics/intradayEmaProximity.ts, distinct
+// from the daily EMA20 trend factor above) AND is currently close to it -- a
+// classic pullback-to-the-average continuation entry. Operator request,
+// 2026-07-28: "the closer the price is to the 20 ma we should favor setup in
+// that area -- if ema is above price short, if ema is below price favor
+// long" (price below the EMA favors short, price above it favors long).
+const MAX_EMA_PROXIMITY_ADJUSTMENT = 8;
+const EMA_PROXIMITY_WRONG_SIDE_PENALTY = 4;
+// The bonus decays linearly to 0 by this many ATR away from the EMA -- the
+// same general distance scale the (now-removed) S/R proximity gate used,
+// not independently fitted.
+const EMA_PROXIMITY_ATR_RANGE = 2.0;
 
-export function computeTimeframeAlignmentAdjustment(readings: TimeframeTrendReadings, side: "long" | "short"): DirectionAdjustmentResult {
-  const raw = timeframeAlignmentSignal(readings, side);
-  const adjustmentPoints = raw * MAX_TIMEFRAME_ALIGNMENT_ADJUSTMENT;
-  const available = Object.keys(readings).length;
+export function computeEmaProximityAdjustment(distanceInAtr: number | null, side: "long" | "short"): DirectionAdjustmentResult {
+  if (distanceInAtr == null) {
+    return { adjustmentPoints: 0, description: "not enough 5-minute bars for an intraday 20-EMA reading -- no adjustment" };
+  }
+  // distanceInAtr > 0 means price is ABOVE the EMA -- per the operator's
+  // rule, that favors long; below the EMA favors short.
+  // >= / <= (not strict) so a price sitting exactly at the EMA -- distance 0,
+  // the ideal pullback point -- gets the peak bonus for either direction
+  // instead of tipping into the wrong-side penalty on one side by a coin flip.
+  const onFavoredSide = side === "long" ? distanceInAtr >= 0 : distanceInAtr <= 0;
+  const absDistance = Math.abs(distanceInAtr);
+
+  const adjustmentPoints = onFavoredSide
+    ? Math.max(0, 1 - absDistance / EMA_PROXIMITY_ATR_RANGE) * MAX_EMA_PROXIMITY_ADJUSTMENT
+    : -EMA_PROXIMITY_WRONG_SIDE_PENALTY;
+
+  const sideLabel = distanceInAtr > 0 ? "above" : "below";
   return {
     adjustmentPoints,
-    description:
-      available > 0
-        ? `multi-timeframe alignment across ${available}/7 available timeframes -- ${adjustmentPoints >= 0 ? "+" : ""}${adjustmentPoints.toFixed(1)} pt adjustment`
-        : "no timeframe reads available yet -- no adjustment",
+    description: `price is ${absDistance.toFixed(2)}x ATR ${sideLabel} the intraday 20-EMA (5m) -- ${adjustmentPoints >= 0 ? "+" : ""}${adjustmentPoints.toFixed(1)} pt adjustment`,
   };
 }
 

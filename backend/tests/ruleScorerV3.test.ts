@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { classifyEma50Trend } from "../src/analytics/emaTrend.js";
+import { classifyEmaTrend } from "../src/analytics/emaTrend.js";
 import { computeRsi } from "../src/analytics/rsi.js";
-import { computeBreakoutStrengthAdjustment, computeOrderFlowAdjustment, computeTimeframeAlignmentAdjustment, computeV3Bucket, scoreSetupV3Directional } from "../src/scoring/ruleScorerV3.js";
+import { computeBreakoutStrengthAdjustment, computeEmaProximityAdjustment, computeOrderFlowAdjustment, computeV3Bucket, scoreSetupV3Directional } from "../src/scoring/ruleScorerV3.js";
 import { computeAdjustmentFromOutcomes } from "../src/scoring/v3HistoricalAdjustment.js";
 import type { SetupFeatures } from "../src/scoring/features.js";
 import type { OhlcBar } from "../src/regime/indicators.js";
@@ -41,7 +41,8 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     fibRetracementPct: null,
     netPointsPerMinute: null,
     orderFlowSnapshot: null,
-    timeframeTrends: {},
+    dailyEma20Trend: { ema: null, slope: null, label: "neutral" },
+    intraday5mEmaDistanceAtr: null,
     ...overrides,
   };
 }
@@ -62,31 +63,31 @@ function makeDriftingBars(count: number, pointsPerBar: number, startPrice = 100,
   return bars;
 }
 
-describe("classifyEma50Trend", () => {
+describe("classifyEmaTrend", () => {
   it("reads bullish for a steady uptrend", () => {
     const bars = makeDriftingBars(120, 0.5);
-    const trend = classifyEma50Trend(bars);
+    const trend = classifyEmaTrend(bars);
     expect(trend.label).toBe("bullish");
     expect(trend.slope).toBeGreaterThan(0);
   });
 
   it("reads bearish for a steady downtrend", () => {
     const bars = makeDriftingBars(120, -0.5);
-    const trend = classifyEma50Trend(bars);
+    const trend = classifyEmaTrend(bars);
     expect(trend.label).toBe("bearish");
     expect(trend.slope).toBeLessThan(0);
   });
 
   it("reads neutral for flat/sideways bars", () => {
     const bars = makeDriftingBars(120, 0);
-    const trend = classifyEma50Trend(bars);
+    const trend = classifyEmaTrend(bars);
     expect(trend.label).toBe("neutral");
   });
 
-  it("returns nulls when there aren't enough bars for a 50-period EMA", () => {
+  it("returns nulls when there aren't enough bars for the EMA period", () => {
     const bars = makeDriftingBars(10, 0.5);
-    const trend = classifyEma50Trend(bars);
-    expect(trend.ema50).toBeNull();
+    const trend = classifyEmaTrend(bars, 20);
+    expect(trend.ema).toBeNull();
   });
 });
 
@@ -107,13 +108,25 @@ describe("computeRsi", () => {
 describe("scoreSetupV3Directional", () => {
   it("scores the bullish hypothesis higher than bearish in a strong uptrend", () => {
     const bars = makeDriftingBars(150, 0.6);
-    const result = scoreSetupV3Directional(bars, features({ side: "long", adx: 35, marketStructureLabel: "strong_uptrend" }));
+    const result = scoreSetupV3Directional(
+      bars,
+      features({
+        side: "long", adx: 35, marketStructureLabel: "strong_uptrend",
+        dailyEma20Trend: { ema: 100, slope: 0.01, label: "bullish" },
+      })
+    );
     expect(result.bullish.score).toBeGreaterThan(result.bearish.score);
   });
 
   it("scores the bearish hypothesis higher than bullish in a strong downtrend", () => {
     const bars = makeDriftingBars(150, -0.6);
-    const result = scoreSetupV3Directional(bars, features({ side: "short", adx: 35, marketStructureLabel: "strong_downtrend" }));
+    const result = scoreSetupV3Directional(
+      bars,
+      features({
+        side: "short", adx: 35, marketStructureLabel: "strong_downtrend",
+        dailyEma20Trend: { ema: 100, slope: -0.01, label: "bearish" },
+      })
+    );
     expect(result.bearish.score).toBeGreaterThan(result.bullish.score);
   });
 
@@ -255,34 +268,48 @@ describe("computeOrderFlowAdjustment", () => {
   });
 });
 
-describe("computeTimeframeAlignmentAdjustment", () => {
-  it("gives no adjustment when there are no timeframe reads available yet", () => {
-    const result = computeTimeframeAlignmentAdjustment({}, "long");
+describe("computeEmaProximityAdjustment", () => {
+  it("gives no adjustment when there's no intraday EMA reading yet", () => {
+    const result = computeEmaProximityAdjustment(null, "long");
     expect(result.adjustmentPoints).toBe(0);
-    expect(result.description).toContain("no timeframe reads available");
   });
 
-  it("gives a positive adjustment for a long when timeframes agree", () => {
-    const result = computeTimeframeAlignmentAdjustment({ "1d": { trendLabel: "up", confidence: 0.8 } }, "long");
-    expect(result.adjustmentPoints).toBeGreaterThan(0);
+  it("gives the full +8 bonus for a long sitting exactly at the EMA (price above by ~0 ATR)", () => {
+    const result = computeEmaProximityAdjustment(0, "long");
+    expect(result.adjustmentPoints).toBeCloseTo(8);
   });
 
-  it("gives a negative adjustment for a long when timeframes fight it", () => {
-    const result = computeTimeframeAlignmentAdjustment({ "1d": { trendLabel: "down", confidence: 0.8 } }, "long");
+  it("gives the full +8 bonus for a short sitting exactly at the EMA (price below by ~0 ATR)", () => {
+    const result = computeEmaProximityAdjustment(-0.001, "short");
+    expect(result.adjustmentPoints).toBeCloseTo(8, 1);
+  });
+
+  it("decays the bonus as price moves further above the EMA for a favored long", () => {
+    const close = computeEmaProximityAdjustment(0.2, "long");
+    const far = computeEmaProximityAdjustment(1.5, "long");
+    expect(close.adjustmentPoints).toBeGreaterThan(far.adjustmentPoints);
+    expect(far.adjustmentPoints).toBeGreaterThan(0);
+  });
+
+  it("fully decays to zero once price is 2.0+ ATR away from the EMA, even on the favored side", () => {
+    const result = computeEmaProximityAdjustment(3.0, "long");
+    expect(result.adjustmentPoints).toBe(0);
+  });
+
+  it("penalizes a long when price sits below the EMA (wrong side, per the operator's rule)", () => {
+    const result = computeEmaProximityAdjustment(-0.5, "long");
     expect(result.adjustmentPoints).toBeLessThan(0);
   });
 
-  it("reports the available/7 leg count in the description", () => {
-    const result = computeTimeframeAlignmentAdjustment(
-      { "1d": { trendLabel: "up", confidence: 0.8 }, "1h": { trendLabel: "up", confidence: 0.5 } },
-      "long"
-    );
-    expect(result.description).toContain("2/7 available timeframes");
+  it("penalizes a short when price sits above the EMA (wrong side)", () => {
+    const result = computeEmaProximityAdjustment(0.5, "short");
+    expect(result.adjustmentPoints).toBeLessThan(0);
   });
 
-  it("stays within the documented +/-12 bound for extreme full agreement", () => {
-    const allUp = { "1d": { trendLabel: "up" as const, confidence: 1 }, "4h": { trendLabel: "up" as const, confidence: 1 } };
-    const result = computeTimeframeAlignmentAdjustment(allUp, "long");
-    expect(result.adjustmentPoints).toBeCloseTo(12);
+  it("wrong-side penalty doesn't scale with distance -- it's a flat -4 regardless of how far past", () => {
+    const near = computeEmaProximityAdjustment(-0.1, "long");
+    const far = computeEmaProximityAdjustment(-5.0, "long");
+    expect(near.adjustmentPoints).toBeCloseTo(-4);
+    expect(far.adjustmentPoints).toBeCloseTo(-4);
   });
 });

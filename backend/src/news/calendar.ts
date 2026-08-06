@@ -32,7 +32,6 @@ interface RawCalendarEvent {
   title?: string;
   event?: string;
   impact?: string | number;
-  actual?: string | number;
   forecast?: string | number;
   previous?: string | number;
 }
@@ -42,7 +41,6 @@ interface ParsedEvent {
   country: string;
   name: string;
   impact: string;
-  actual: string | null;
   forecast: string | null;
   previous: string | null;
 }
@@ -72,7 +70,6 @@ function parseEvents(rawItems: RawCalendarEvent[]): ParsedEvent[] {
         country: String(item.country ?? "").toUpperCase().slice(0, 8),
         name: String(item.title ?? item.event ?? "Unknown event").slice(0, 256),
         impact: normalizeImpact(item.impact),
-        actual: item.actual !== undefined && item.actual !== "" ? String(item.actual).slice(0, 64) : null,
         forecast: item.forecast !== undefined && item.forecast !== "" ? String(item.forecast).slice(0, 64) : null,
         previous: item.previous !== undefined && item.previous !== "" ? String(item.previous).slice(0, 64) : null,
       });
@@ -106,7 +103,7 @@ export async function refreshCalendar(): Promise<number> {
   for (const event of events) {
     await prisma.newsEvent.upsert({
       where: { eventTime_country_name: { eventTime: event.eventTime, country: event.country, name: event.name } },
-      update: { actual: event.actual, forecast: event.forecast, previous: event.previous },
+      update: { forecast: event.forecast, previous: event.previous },
       create: event,
     });
   }

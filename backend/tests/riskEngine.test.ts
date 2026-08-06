@@ -1,6 +1,7 @@
 import { Decimal } from "decimal.js";
 import { describe, expect, it } from "vitest";
 import { RiskEngine } from "../src/risk/engine.js";
+import { DEFAULT_CONFIDENCE_TIERS } from "../src/risk/sizing.js";
 import type { AccountRiskState, RiskLimitsConfig } from "../src/risk/circuitBreakers.js";
 import type { NewsRiskStatus } from "../src/news/risk.js";
 import type { OhlcBar } from "../src/regime/indicators.js";
@@ -58,7 +59,11 @@ describe("RiskEngine.assessNewTrade with fixed-dollar risk/profit", () => {
     const engine = new RiskEngine();
     const limits: RiskLimitsConfig = { ...BASE_LIMITS, perTradeRiskDollars: new Decimal("50") };
 
-    // ATR-based stop distance of 10 points on MNQ (pointValue $2) -- risk/contract = $20 -> floor(50/20) = 2 contracts.
+    // Quantity now comes from the confidence tier (75%+ avg -> 2 contracts,
+    // default tiers 65/71/82% -> 65/75/85% 2026-08-02, see
+    // risk/sizing.ts's computeConfidenceTierQuantity), not the dollar
+    // budget -- the dollar math ($50 / $20 risk-per-contract) is still
+    // computed and reported in the reason for reference only.
     const assessment = engine.assessNewTrade({
       side: "long",
       entryPrice: new Decimal(20000),
@@ -69,7 +74,10 @@ describe("RiskEngine.assessNewTrade with fixed-dollar risk/profit", () => {
       pointValue: new Decimal(2),
       tickSize: new Decimal("0.25"),
       newsStatus: NO_NEWS,
-      bars: barsWithPivotLowNear(19997), // 3 points below entry -- well within the 1.0x ATR (6.667) gate
+      bars: barsWithPivotLowNear(19990), // 10 points below entry -- 1.5x ATR, inside the 0.25x-1.95x ATR band
+      averageProbability: 0.75,
+      takeProfitRMultiple: new Decimal("2.0"),
+      confidenceTiers: DEFAULT_CONFIDENCE_TIERS,
     });
 
     expect(assessment.approved).toBe(true);
@@ -92,7 +100,10 @@ describe("RiskEngine.assessNewTrade with fixed-dollar risk/profit", () => {
       pointValue: new Decimal(2),
       tickSize: new Decimal("0.25"),
       newsStatus: NO_NEWS,
-      bars: barsWithPivotLowNear(19997),
+      bars: barsWithPivotLowNear(19990),
+      averageProbability: 0.75, // 75%+ tier -> 2 contracts
+      takeProfitRMultiple: new Decimal("2.0"),
+      confidenceTiers: DEFAULT_CONFIDENCE_TIERS,
     });
 
     expect(assessment.quantity).toBe(2);
@@ -115,7 +126,10 @@ describe("RiskEngine.assessNewTrade with fixed-dollar risk/profit", () => {
       pointValue: new Decimal(2),
       tickSize: new Decimal("0.25"),
       newsStatus: NO_NEWS,
-      bars: barsWithPivotHighNear(20003), // 3 points above entry -- resistance, relevant for a short
+      bars: barsWithPivotHighNear(20010), // 10 points above entry -- 1.5x ATR, inside the 0.25x-1.95x ATR band
+      averageProbability: 0.75,
+      takeProfitRMultiple: new Decimal("2.0"),
+      confidenceTiers: DEFAULT_CONFIDENCE_TIERS,
     });
 
     expect(assessment.takeProfitPrice?.toNumber()).toBeCloseTo(entryPrice.minus(30).toNumber(), 1);
@@ -136,12 +150,19 @@ describe("RiskEngine.assessNewTrade with fixed-dollar risk/profit", () => {
       pointValue: new Decimal(2),
       tickSize: new Decimal("0.25"),
       newsStatus: NO_NEWS,
-      bars: barsWithPivotLowNear(19997),
+      bars: barsWithPivotLowNear(19990),
+      averageProbability: 0.75,
+      takeProfitRMultiple: new Decimal("2.0"),
+      confidenceTiers: DEFAULT_CONFIDENCE_TIERS,
     });
 
-    // Default takeProfitRMultiple is 3.0x the stop distance -- should NOT be the fixed-dollar-derived 30pt target.
+    // 2.0x the stop distance is SystemState.takeProfitRMultiple's seeded
+    // default (2026-07-29, operator request tied to v5 becoming a required
+    // execution gate -- see its own comment; made operator-adjustable
+    // 2026-08-02) -- should NOT be the fixed-dollar-derived 30pt target, and
+    // NOT stops.ts's own bare default of 3.0x either.
     const stopDistance = entryPrice.minus(assessment.stopPrice!).abs();
-    expect(assessment.takeProfitPrice?.toNumber()).toBeCloseTo(entryPrice.plus(stopDistance.times(3)).toNumber(), 1);
+    expect(assessment.takeProfitPrice?.toNumber()).toBeCloseTo(entryPrice.plus(stopDistance.times(2)).toNumber(), 1);
   });
 
   it("respects the fixed-dollar daily loss circuit breaker ahead of sizing", () => {
@@ -189,18 +210,29 @@ describe("RiskEngine.assessNewTrade -- support/resistance proximity gate", () =>
     const assessment = engine.assessNewTrade({
       side: "long", entryPrice: new Decimal(20000), atrValue: new Decimal(6.667), structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
       accountState: accountState(), limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
-      bars: barsWithPivotLowNear(19950), // 50 points away -- 7.5x ATR, well past the 1.0x gate
+      bars: barsWithPivotLowNear(19950), // 50 points away -- 7.5x ATR, well past the 1.95x ceiling
     });
     expect(assessment.approved).toBe(false);
     expect(assessment.reason).toContain("x ATR from the nearest support level");
   });
 
-  it("approves a long whose entry sits within 1.0x ATR of a real support level", () => {
+  it("rejects a long whose entry sits too close to the nearest support level (under the 0.25x ATR floor)", () => {
     const engine = new RiskEngine();
     const assessment = engine.assessNewTrade({
       side: "long", entryPrice: new Decimal(20000), atrValue: new Decimal(6.667), structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
       accountState: accountState(), limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
-      bars: barsWithPivotLowNear(19997),
+      bars: barsWithPivotLowNear(19999), // 1 point away -- 0.15x ATR, under the 0.25x floor
+    });
+    expect(assessment.approved).toBe(false);
+    expect(assessment.reason).toContain("too close");
+  });
+
+  it("approves a long whose entry sits within the 0.25x-1.95x ATR band of a real support level", () => {
+    const engine = new RiskEngine();
+    const assessment = engine.assessNewTrade({
+      side: "long", entryPrice: new Decimal(20000), atrValue: new Decimal(6.667), structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
+      accountState: accountState(), limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
+      bars: barsWithPivotLowNear(19990), // 10 points away -- 1.5x ATR, inside the band
     });
     expect(assessment.approved).toBe(true);
     expect(assessment.nearestSrLevel?.type).toBe("support");
@@ -211,21 +243,27 @@ describe("RiskEngine.assessNewTrade -- support/resistance proximity gate", () =>
     const assessment = engine.assessNewTrade({
       side: "long", entryPrice: new Decimal(20000), atrValue: new Decimal(6.667), structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
       accountState: accountState(), limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
-      bars: barsWithPivotHighNear(20003), // only a resistance level exists near entry, no relevant support
+      // Shifted well above entry (not 20003) so the fixture's mirrored-shape
+      // low-side edges (price-11) never dip down near/below entry either --
+      // otherwise this coincidentally forms an incidental support pivot whose
+      // distance-from-entry keeps landing right on whatever MAX_ENTRY_DISTANCE_ATR
+      // happens to be tuned to (hit once already at 1.2x, again at 1.25x).
+      // Pushing the whole shape away from entry removes the coincidence
+      // instead of just dodging today's specific gate value.
+      bars: barsWithPivotHighNear(20030),
     });
     // Either "no support level found" or "too far from the nearest support" is
-    // correct here -- the fixture's mirrored peak shape can incidentally form
-    // a weak, distant support pivot at its own low-side edges, but either way
-    // a resistance level above entry must never approve a long.
+    // correct here -- but either way, a resistance level above entry must
+    // never approve a long.
     expect(assessment.approved).toBe(false);
   });
 
-  it("approves a short whose entry sits within 1.0x ATR of a real resistance level", () => {
+  it("approves a short whose entry sits within the 0.25x-1.95x ATR band of a real resistance level", () => {
     const engine = new RiskEngine();
     const assessment = engine.assessNewTrade({
       side: "short", entryPrice: new Decimal(20000), atrValue: new Decimal(6.667), structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
       accountState: accountState(), limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
-      bars: barsWithPivotHighNear(20003),
+      bars: barsWithPivotHighNear(20010),
     });
     expect(assessment.approved).toBe(true);
     expect(assessment.nearestSrLevel?.type).toBe("resistance");
@@ -237,21 +275,58 @@ describe("RiskEngine.assessNewTrade -- breakout signal gate", () => {
 
   it("approves a short breakout entered close to the validated (2+ touch) level it broke, even with no other nearby resistance", () => {
     const engine = new RiskEngine();
-    // A real support level at 20003 (touched twice, per barsWithPivotHighNear's
+    // A real resistance level at 20010 (touched twice, per barsWithPivotHighNear's
     // two-block shape -- see its top comment) that price has just broken below;
-    // entry sits just past it, not near any unrelated resistance level.
+    // entry sits 10 points past it (1.5x ATR, inside the 0.25x-1.95x band), not
+    // near any unrelated resistance level.
     const assessment = engine.assessNewTrade({
       side: "short",
       entryPrice: new Decimal(20000),
       atrValue: new Decimal(6.667),
       structureSwingPrice: null,
       signalKind: "breakout",
-      breakoutLevelPrice: new Decimal(20003),
+      breakoutLevelPrice: new Decimal(20010),
       accountState: accountState(),
       limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
-      bars: barsWithPivotHighNear(20003),
+      bars: barsWithPivotHighNear(20010),
     });
     expect(assessment.approved).toBe(true);
+  });
+
+  it("approves a short breakout even when it's run well past MAX_ENTRY_DISTANCE_ATR from the broken level -- 2026-08-01: the ceiling is reversal-only now, since a breakout running far from the level it broke is the strategy working, not a stale setup (see risk/engine.ts's comment on the real ES incident this fixes)", () => {
+    const engine = new RiskEngine();
+    // A validated (2+ touch) resistance level at 20025 that price broke below;
+    // entry sits 25 points past it -- 3.75x ATR, well beyond the old 1.95x
+    // ceiling that used to reject this.
+    const assessment = engine.assessNewTrade({
+      side: "short",
+      entryPrice: new Decimal(20000),
+      atrValue: new Decimal(6.667),
+      structureSwingPrice: null,
+      signalKind: "breakout",
+      breakoutLevelPrice: new Decimal(20025),
+      accountState: accountState(),
+      limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
+      bars: barsWithPivotHighNear(20025),
+    });
+    expect(assessment.approved).toBe(true);
+  });
+
+  it("still rejects a reversal at that same extended distance -- the ceiling stays reversal-only, not removed outright", () => {
+    const engine = new RiskEngine();
+    const assessment = engine.assessNewTrade({
+      side: "short",
+      entryPrice: new Decimal(20000),
+      atrValue: new Decimal(6.667),
+      structureSwingPrice: null,
+      signalKind: "reversal",
+      breakoutLevelPrice: null,
+      accountState: accountState(),
+      limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
+      bars: barsWithPivotHighNear(20025),
+    });
+    expect(assessment.approved).toBe(false);
+    expect(assessment.reason).toContain(`needs to be within ${1.95}x ATR`);
   });
 
   it("rejects a breakout against a level that was only ever touched once (not a validated S/R zone)", () => {

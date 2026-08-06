@@ -22,7 +22,12 @@ export function explainScore(symbol: string, side: string, gated: GatedScore, th
   // shown always actually explain the decision instead of just being the
   // loudest numbers regardless of which way they point.
   const sorted = [...gated.factors].sort((a, b) => (gated.decision === "taken" ? b.contribution - a.contribution : a.contribution - b.contribution));
-  const topFactors = sorted.slice(0, 3);
+  // v6 is a fixed set of exactly 5 weighted criteria (see ruleScorerV6.ts),
+  // not a variable-length list of minor adjustments like v1/v2/v3/v5 --
+  // truncating to 3 silently drops 2 of them, and since a skipped setup
+  // often has several criteria all tied at 0 contribution, which 2 survive
+  // the cut is arbitrary (stable-sort insertion order). Show all 5 always.
+  const topFactors = gated.modelUsed === "rule_v6" ? sorted : sorted.slice(0, 3);
   const factorText = topFactors.map((f) => f.description).join("; ");
 
   if (gated.decision === "taken") {

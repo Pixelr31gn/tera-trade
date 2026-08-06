@@ -45,8 +45,37 @@ export interface RiskAssessment {
 // concrete. Hand-set (not fitted): 0.5 ATR is already the level-clustering
 // tolerance (see supportResistance.ts), so 1.0 ATR gives a little room
 // around a level's own footprint without allowing an entry chosen mid-air
-// far from any real pivot.
-const MAX_ENTRY_DISTANCE_ATR = 1.0;
+// far from any real pivot. (2026-07-20: loosened 25%, 1.0 -> 1.25, after
+// several strong-trend setups were getting rejected for running slightly
+// past this on continuous-scan signals. 2026-07-22: loosened again, 1.25 ->
+// 1.9, operator request, after a sustained strong-trend session blocked
+// essentially every continuous-scan signal on both ES and NQ -- entries were
+// running 6-9x ATR past the nearest level, well beyond what the 25% bump
+// covered. 2026-07-27: loosened again, 1.9 -> 3.0, operator request, same
+// pattern recurring -- entries still getting blocked at ~2.9x ATR during a
+// strong trend. 2026-07-28: removed entirely, operator request, then
+// reinstated the same day at the same 1.25x-3.0x band. 2026-07-29: tightened
+// back, 3.0 -> 1.95, operator request. 2026-08-01: scoped to reversal signals
+// only -- this ceiling was being applied identically to breakout signals,
+// which invert the premise: a reversal that's run far from the level it was
+// supposed to bounce off really is stale, but a breakout is *supposed* to
+// run away from the level it broke, and "too extended" is exactly the
+// conviction a breakout strategy is trying to catch. Concrete evidence: a
+// real ES short breakout (v1/v2/v3 all agreed, 68-97% confidence) was
+// rejected three times as the move strengthened -- 1.00x -> 2.05x -> 3.88x
+// ATR past the broken level -- purely because this ceiling didn't
+// distinguish breakout from reversal (see docs/BUILD_HISTORY.md's account of
+// this incident). The touch-count validation and MIN_ENTRY_DISTANCE_ATR
+// floor below still apply to breakouts; only this ceiling is now
+// reversal-only.
+const MAX_ENTRY_DISTANCE_ATR = 1.95;
+
+// Floor for the same check, added alongside the 2026-07-27 ceiling bump --
+// entries sitting too close to the level itself are rejected too, not just
+// ones that have run too far past it. Together these carve out a
+// 0.25x-1.95x ATR "sweet spot" band instead of a single one-sided ceiling.
+// (2026-07-29: loosened 1.25 -> 0.25, operator request.)
+const MIN_ENTRY_DISTANCE_ATR = 0.25;
 
 export class RiskEngine {
   assessNewTrade(params: {
@@ -62,8 +91,17 @@ export class RiskEngine {
     tickSize: Decimal;
     newsStatus: NewsRiskStatus;
     bars: OhlcBar[];
+    /** Cross-version consensus average probability (0-1) -- see risk/tradePlan.ts's computeTradePlan. */
+    averageProbability: number;
+    /** Operator-adjustable (SystemState, see execution/mode.ts's setTakeProfitRMultiple) -- see this param's use below for the value's own history. */
+    takeProfitRMultiple: Decimal;
+    /** Operator-adjustable (SystemState, see execution/mode.ts's setConfidenceTiers). */
+    confidenceTiers: [minAverageProbability: number, quantity: number][];
+    /** Strategy-provided explicit stop/target -- see strategy/types.ts's Signal.explicitStopPrice/explicitTakeProfitPrice and risk/tradePlan.ts's computeTradePlan for how this overrides the generic stop/target. */
+    explicitStopPrice?: Decimal;
+    explicitTakeProfitPrice?: Decimal;
   }): RiskAssessment {
-    const { side, entryPrice, atrValue, structureSwingPrice, signalKind, breakoutLevelPrice, accountState, limits, pointValue, tickSize, bars } = params;
+    const { side, entryPrice, atrValue, structureSwingPrice, signalKind, breakoutLevelPrice, accountState, limits, pointValue, tickSize, bars, averageProbability, takeProfitRMultiple, confidenceTiers, explicitStopPrice, explicitTakeProfitPrice } = params;
 
     const breaker = checkCircuitBreakers(accountState, limits);
     if (!breaker.allowed) {
@@ -101,13 +139,20 @@ export class RiskEngine {
         tripKillSwitch: false, nearestSrLevel: nearest.level,
       };
     }
-    if (nearest.distanceInAtr > MAX_ENTRY_DISTANCE_ATR) {
+    // Reversal-only: see MAX_ENTRY_DISTANCE_ATR's 2026-08-01 comment. A
+    // breakout running far past the level it broke is the strategy working,
+    // not a reason to reject it -- only a reversal signal stales out this way.
+    if (signalKind === "reversal" && nearest.distanceInAtr > MAX_ENTRY_DISTANCE_ATR) {
       return {
         approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
-        reason:
-          signalKind === "breakout"
-            ? `entry is ${nearest.distanceInAtr.toFixed(2)}x ATR past the broken level (${nearest.level.price.toFixed(2)}, ${nearest.level.touches} touches) -- too extended, needs to be within ${MAX_ENTRY_DISTANCE_ATR}x ATR`
-            : `entry is ${nearest.distanceInAtr.toFixed(2)}x ATR from the nearest ${nearest.level.type} level (${nearest.level.price.toFixed(2)}, ${nearest.level.touches} touches) -- needs to be within ${MAX_ENTRY_DISTANCE_ATR}x ATR`,
+        reason: `entry is ${nearest.distanceInAtr.toFixed(2)}x ATR from the nearest ${nearest.level.type} level (${nearest.level.price.toFixed(2)}, ${nearest.level.touches} touches) -- needs to be within ${MAX_ENTRY_DISTANCE_ATR}x ATR`,
+        tripKillSwitch: false, nearestSrLevel: nearest.level,
+      };
+    }
+    if (nearest.distanceInAtr < MIN_ENTRY_DISTANCE_ATR) {
+      return {
+        approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
+        reason: `entry is only ${nearest.distanceInAtr.toFixed(2)}x ATR from the nearest ${nearest.level.type} level (${nearest.level.price.toFixed(2)}, ${nearest.level.touches} touches) -- too close, needs to be at least ${MIN_ENTRY_DISTANCE_ATR}x ATR away`,
         tripKillSwitch: false, nearestSrLevel: nearest.level,
       };
     }
@@ -119,6 +164,22 @@ export class RiskEngine {
     const plan = computeTradePlan({
       side, entryPrice, atrValue, structureSwingPrice, tickSize, pointValue,
       riskAmount, profitDollars: limits.perTradeProfitDollars ?? null, maxPositionSize: limits.maxPositionSize,
+      averageProbability,
+      // Was hardcoded 2:1 here (2026-07-29, operator request, effective the
+      // same day v5 became a required gate on every real execution -- v5's
+      // own backtested win rate, 28.1% as of that change, was measured
+      // against stops.ts's 3:1 default, an easier target to miss than 2:1;
+      // that number does NOT directly carry over to real 2:1 performance,
+      // breakeven moves from ~25% to ~33.3%, so re-validate once enough
+      // real/simulated-at-2:1 outcomes accumulate rather than assuming the
+      // same edge holds). 2026-08-02: made operator-adjustable at runtime
+      // instead (SystemState.takeProfitRMultiple) -- 2:1 remains the
+      // seeded default (see the migration), so nothing changes until the
+      // operator deliberately moves it.
+      takeProfitRMultiple,
+      confidenceTiers,
+      explicitStopPrice,
+      explicitTakeProfitPrice,
     });
 
     return {

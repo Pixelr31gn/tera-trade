@@ -15,7 +15,9 @@ import { getSettings } from "../core/config.js";
 import type { TradingSession } from "../analytics/session.js";
 import type { SetupFeatures } from "./features.js";
 import { scoreSetup, type FactorContribution, type StrategyVersion } from "./ruleScorer.js";
-import { computeBreakoutStrengthAdjustment, computeFibAdjustment, computeOrderFlowAdjustment, computePpmAdjustment, computeRiskRewardAdjustment, computeTimeframeAlignmentAdjustment, computeV3Bucket, scoreSetupV3Directional } from "./ruleScorerV3.js";
+import { computeBreakoutStrengthAdjustment, computeEmaProximityAdjustment, computeFibAdjustment, computeOrderFlowAdjustment, computePpmAdjustment, computeRiskRewardAdjustment, computeV3Bucket, scoreSetupV3Directional } from "./ruleScorerV3.js";
+import { scoreSetupV5 } from "./ruleScorerV5.js";
+import { scoreSetupV6 } from "./ruleScorerV6.js";
 import { computeHistoricalAdjustment } from "./v3HistoricalAdjustment.js";
 import { MLScorer } from "./training.js";
 
@@ -23,7 +25,7 @@ export interface GatedScore {
   probability: number;
   decision: "taken" | "skipped_score";
   factors: FactorContribution[];
-  modelUsed: "rule_v1" | "ml_v4" | "rule_v1_fallback" | "rule_v3";
+  modelUsed: "rule_v1" | "ml_v4" | "rule_v1_fallback" | "rule_v3" | "rule_v5" | "rule_v6";
   /** Set when a setup that otherwise cleared the probability threshold was blocked by a hard rule (v3's directional-conviction check below) -- lets explainScore report the real reason instead of a misleading "below threshold". */
   blockReason: string | null;
   /** Only set for v3 -- the categorical fingerprint this setup was scored under, persisted on the Score row so future setups can look up how similar-looking ones performed (see v3HistoricalAdjustment.ts). */
@@ -44,18 +46,40 @@ function getMlScorer(session: TradingSession): MLScorer | null {
 // clear the threshold -- if the opposite-direction hypothesis is nearly as
 // strong, that's exactly the ambiguous case the spec says to sit out (its
 // worked example: 66% bullish vs 63% bearish -> no trade, despite 66
-// nominally clearing 65%). Hand-set margin, not fitted.
-const MIN_DIRECTIONAL_MARGIN_POINTS = 10;
+// nominally clearing 65%). Hand-set margin, not fitted. (2026-07-20: lowered
+// 10 -> 7 -- operator judged several 8-9 point margins as good enough to
+// take rather than sit out.)
+const MIN_DIRECTIONAL_MARGIN_POINTS = 7;
 
 /** Pure -- no DB access -- so the override rule itself is directly unit-testable (see tests/scoring.test.ts). */
 export function shouldOverrideToTaken(v1Gated: GatedScore | undefined, v2Gated: GatedScore | undefined): boolean {
   return v1Gated?.decision === "taken" && v2Gated?.decision === "taken";
 }
 
+/**
+ * v3's own directional-conviction override (v1v2Override below) and v6's
+ * ensemble base both need OTHER versions' already-computed results -- this
+ * carries whichever ones the caller has on hand at that point. Field usage
+ * by version: v3 needs bars/v1Gated/v2Gated/signalKind; v6 needs
+ * bars/v1Gated/v2Gated/v3Gated/v5Gated. Was v3-only ("v3Inputs") until v6
+ * needed the same shape (2026-08-02) -- renamed rather than adding a second,
+ * near-identical parameter.
+ */
+export interface ScoringInputs {
+  bars: OhlcBar[];
+  v1Gated?: GatedScore;
+  v2Gated?: GatedScore;
+  v3Gated?: GatedScore;
+  v5Gated?: GatedScore;
+  signalKind?: "breakout" | "reversal";
+}
+
 export async function evaluateSetup(
   features: SetupFeatures,
   version: StrategyVersion = "v1",
-  v3Inputs?: { bars: OhlcBar[]; v1Gated?: GatedScore; v2Gated?: GatedScore; signalKind?: "breakout" | "reversal" }
+  /** As-of time for this setup's decision -- threaded to computeHistoricalAdjustment's time bound (see that file's comment). Always the bar/signal time, never wall-clock Date.now(), so replay can pass a historical bar time and get the same look-ahead protection live gets for free. */
+  at: Date,
+  extra?: ScoringInputs
 ): Promise<GatedScore> {
   const settings = getSettings();
 
@@ -63,13 +87,14 @@ export async function evaluateSetup(
     // v3 is a different scoring *mechanism* entirely (six independent
     // 0-100-point factors evaluated for both directions) -- it doesn't go
     // through the v4 ML-scorer branch below.
-    if (!v3Inputs) throw new Error("evaluateSetup: v3Inputs is required when version is 'v3'");
+    if (!extra) throw new Error("evaluateSetup: extra is required when version is 'v3'");
+    const v3Inputs = extra;
     const { readings, bullish, bearish } = scoreSetupV3Directional(v3Inputs.bars, features);
     const mySide = features.side === "long" ? bullish : bearish;
     const otherSide = features.side === "long" ? bearish : bullish;
     const bucket = computeV3Bucket(readings, features.side);
 
-    const historical = await computeHistoricalAdjustment(features.symbol, bucket);
+    const historical = await computeHistoricalAdjustment(features.symbol, bucket, at);
 
     // Breakout conviction adjustment -- only meaningful for breakout-kind
     // signals (see ruleScorerV3.ts's computeBreakoutStrengthAdjustment for
@@ -85,13 +110,20 @@ export async function evaluateSetup(
     const fib = computeFibAdjustment(features.fibSwingDirection, features.fibRetracementPct, features.side);
     const ppm = computePpmAdjustment(features.netPointsPerMinute, features.side);
     const orderFlow = computeOrderFlowAdjustment(features.orderFlowSnapshot, features.side);
-    const timeframeAlignment = computeTimeframeAlignmentAdjustment(features.timeframeTrends, features.side);
+    const emaProximity = computeEmaProximityAdjustment(features.intraday5mEmaDistanceAtr, features.side);
 
     const adjustedScore = Math.max(
       0,
       Math.min(
         100,
-        mySide.score + historical.adjustmentPoints + (breakoutStrength?.adjustmentPoints ?? 0) + riskReward.adjustmentPoints + fib.adjustmentPoints + ppm.adjustmentPoints + orderFlow.adjustmentPoints + timeframeAlignment.adjustmentPoints
+        mySide.score +
+          historical.adjustmentPoints +
+          (breakoutStrength?.adjustmentPoints ?? 0) +
+          riskReward.adjustmentPoints +
+          fib.adjustmentPoints +
+          ppm.adjustmentPoints +
+          orderFlow.adjustmentPoints +
+          emaProximity.adjustmentPoints
       )
     );
     const probability = Math.round((adjustedScore / 100) * 1e5) / 1e5;
@@ -128,7 +160,7 @@ export async function evaluateSetup(
     factors.push({ name: "fibDirectionAdjustment", contribution: fib.adjustmentPoints, description: fib.description });
     factors.push({ name: "ppmAdjustment", contribution: ppm.adjustmentPoints, description: ppm.description });
     factors.push({ name: "orderFlowAdjustment", contribution: orderFlow.adjustmentPoints, description: orderFlow.description });
-    factors.push({ name: "timeframeAlignmentAdjustment", contribution: timeframeAlignment.adjustmentPoints, description: timeframeAlignment.description });
+    factors.push({ name: "emaProximityAdjustment", contribution: emaProximity.adjustmentPoints, description: emaProximity.description });
 
     // Hard override: if v1 AND v2 both independently took this exact same
     // setup, v3 takes it too, even if its own score/conviction check
@@ -150,6 +182,35 @@ export async function evaluateSetup(
     }
 
     return { probability, decision, factors, modelUsed: "rule_v3", blockReason, v3Bucket: bucket };
+  }
+
+  if (version === "v5") {
+    // v5 is a plain weighted-logit scorer (same shape as v1/v2) built from
+    // real mined outcome patterns, not v3's dual-hypothesis/adjustment
+    // machinery -- no v3Inputs, no directional-conviction margin, no
+    // historical-similarity lookup. See ruleScorerV5.ts's header for where
+    // its factors came from.
+    const result = scoreSetupV5(features);
+    const decision: "taken" | "skipped_score" = result.probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
+    return { probability: result.probability, decision, factors: result.factors, modelUsed: "rule_v5", blockReason: null, v3Bucket: null };
+  }
+
+  if (version === "v6") {
+    // v6 is a complete, self-contained scorer as of 2026-08-03 (operator
+    // spec: five weighted criteria on the trend-pullback-fib setup) -- it no
+    // longer averages v1/v2/v3/v5 internally, so unlike the version this
+    // replaced, it doesn't need their GatedScores as input. It only needs
+    // the raw bars (see ruleScorerV6.ts's header for the full breakdown).
+    // The outer v6-mandatory consensus rule (engine/loop.ts) still requires
+    // v1/v2/v3/v5's OWN results to exist in gatedByVersion, but that's a
+    // separate map this function's caller manages, not something evaluateSetup
+    // itself needs to see.
+    if (!extra?.bars) {
+      throw new Error("evaluateSetup: extra.bars is required when version is 'v6'");
+    }
+    const result = scoreSetupV6(features, extra.bars);
+    const decision: "taken" | "skipped_score" = result.probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
+    return { probability: result.probability, decision, factors: result.factors, modelUsed: "rule_v6", blockReason: null, v3Bucket: null };
   }
 
   // v4 is the independently-trained ML model (see scoring/training.ts) --

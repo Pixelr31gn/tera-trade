@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { computeVolumeDelta, extractAccountSnapshot, extractPriceForSymbol, extractVolumeForSymbol, parseMoney } from "../src/browserWatch/extract.js";
+import {
+  computeVolumeDelta,
+  extractAccountSnapshot,
+  extractActiveAccountIdentity,
+  extractPriceForSymbol,
+  extractVolumeForSymbol,
+  parseMoney,
+} from "../src/browserWatch/extract.js";
 
 describe("parseMoney", () => {
   it("parses plain and dollar-prefixed amounts", () => {
@@ -67,12 +74,47 @@ describe("extractAccountSnapshot", () => {
     expect(snapshot.balance).toBeCloseTo(50000);
     expect(snapshot.pnl).toBeCloseTo(0); // UP&L
     expect(snapshot.equity).toBeCloseTo(50000); // synthesized: no explicit equity label on this page
+    expect(snapshot.accountName).toBe("$50K TRADING COMBINE");
+    expect(snapshot.brokerAccountId).toBe("50KTC-V2-170199-40086833");
   });
 
   it("synthesizes equity as balance + unrealized P&L when there's an open position", () => {
     const pageText = "BAL: $50,000.00\nUP&L: $325.50";
     const snapshot = extractAccountSnapshot(pageText);
     expect(snapshot.equity).toBeCloseTo(50325.5);
+  });
+});
+
+describe("extractActiveAccountIdentity", () => {
+  it("reads the newer format with a trailing eligibility status", () => {
+    // Captured verbatim 2026-07-21 -- the exact incident that motivated
+    // per-account equity-curve separation (three real accounts were being
+    // blended into one curve).
+    const pageText = ["50K DLL COMBINE|50KTC-V2-DLL-170199-51281387 (Ineligible)", "BAL: $49,959.92"].join("\n");
+    const identity = extractActiveAccountIdentity(pageText);
+    expect(identity?.name).toBe("50K DLL COMBINE");
+    expect(identity?.brokerAccountId).toBe("50KTC-V2-DLL-170199-51281387");
+  });
+
+  it("reads the older format with no eligibility status suffix", () => {
+    const pageText = "$50K TRADING COMBINE|50KTC-V2-170199-40086833\nBAL: $50,000.00";
+    const identity = extractActiveAccountIdentity(pageText);
+    expect(identity?.name).toBe("$50K TRADING COMBINE");
+    expect(identity?.brokerAccountId).toBe("50KTC-V2-170199-40086833");
+  });
+
+  it("picks the first matching account line when it appears multiple times on the page", () => {
+    const pageText = [
+      "50K DLL COMBINE|50KTC-V2-DLL-170199-51281387 (Ineligible)",
+      "BAL: $49,959.92",
+      "50K DLL COMBINE|50KTC-V2-DLL-170199-51281387 (Ineligible)", // repeated in a second widget, same account
+    ].join("\n");
+    const identity = extractActiveAccountIdentity(pageText);
+    expect(identity?.brokerAccountId).toBe("50KTC-V2-DLL-170199-51281387");
+  });
+
+  it("returns null when no account identity line is present", () => {
+    expect(extractActiveAccountIdentity("Welcome to the platform\nNothing useful here")).toBeNull();
   });
 });
 

@@ -10,13 +10,15 @@ import { useConfirm } from "@/components/ConfirmDialog";
 
 const SESSION_LABELS: Record<string, string> = { new_york: "New York", london: "London", asian: "Asian" };
 const SESSION_ORDER = ["new_york", "london", "asian"];
-const VERSIONS = ["v1", "v2", "v3"] as const;
+const VERSIONS = ["v1", "v2", "v3", "v5", "v6"] as const;
 type Version = (typeof VERSIONS)[number];
 
 const VERSION_DESCRIPTIONS: Record<Version, string> = {
   v1: "Baseline: trend, momentum, volatility, news, historical/opening-range, risk/reward, Fibonacci direction, and points-per-minute edge.",
   v2: "v1 + marketStructureEdge and liquidityEdge, added from real session-performance data.",
   v3: "0-100 confidence score: EMA50 trend (20), ADX strength (20), ATR volatility (15), volume vs 20-bar avg (15), RSI momentum (10), price structure (20) -- scored for both directions, requires conviction margin, adjusted by recent similar-setup performance, risk/reward shape, Fibonacci direction, and points-per-minute.",
+  v5: "Built from mining real outcome data rather than intuition (2026-07-21): ADX-regime asymmetry (very strong trend favors shorts, hurts longs), weak-trend fade (fading a weak trend beat following it), and price-action normalcy (dramatic-looking candles underperformed normal ones). Shadow-scored only -- not yet a consensus voter (see engine/loop.ts's SHADOW_ONLY_VERSIONS).",
+  v6: "An ensemble, not an independently mined pattern set (2026-08-02): averages v1/v2/v3/v5's own probabilities by logit, plus a confirmation bonus when its own trend-pullback-fib setup rules (rising/falling 15m trend, 40-60% Fibonacci pullback, 5m break) independently agree. Shadow-scored only -- same promotion bar as v5, not skipped for being newer.",
 };
 
 function pct(x: number | null): string {
@@ -52,18 +54,18 @@ export default function StrategyComparisonPage() {
     <div className="space-y-6">
       <Panel title="Strategy Version">
         <p className="mb-4 text-sm text-gray-400">
-          v1, v2, and v3 shadow-score every single signal in parallel -- same bars, same market conditions -- so the numbers
-          below are a true apples-to-apples comparison, not different time periods. (v4, an experimental ML model, was tried
-          and removed 2026-07-15 -- see the Recommendation Feed&apos;s version filter for its historical rows.) Execution
-          doesn&apos;t depend on a single
-          &quot;active&quot; version below -- both paper and live take a trade whenever at least{" "}
-          <strong>2 of the 3 versions independently clear the 65% score threshold</strong> (2026-07-16, a straight
-          majority vote on the raw score) -- replacing an earlier average-based rule that let one strongly-disagreeing
-          version veto a setup two others liked. The toggle below is informational only and does not change what
-          actually trades.
+          v1, v2, v3, and v5 shadow-score every single signal in parallel -- same bars, same market conditions -- so the
+          numbers below are a true apples-to-apples comparison, not different time periods. (v4, an experimental ML model,
+          was tried and removed 2026-07-15 -- see the Recommendation Feed&apos;s version filter for its historical rows.)
+          Execution doesn&apos;t depend on a single &quot;active&quot; version below -- the toggle is informational only.
+          As of 2026-08-02, both paper and live take a trade only when{" "}
+          <strong>v6 independently clears 65% AND at least one of v1/v2/v3/v5 also clears 65%</strong> -- v6 (an ensemble of
+          the other four plus its own setup-rule bonus, not an independently mined model like v5) is now the mandatory
+          anchor, the same role v5 held in the rule before it. v6&apos;s own weight is unvalidated -- zero resolved live
+          trades exist behind it yet.
         </p>
         {error && <p className="mb-3 text-sm text-bad">{error}</p>}
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">
           {VERSIONS.map((version) => (
             <button
               key={version}
@@ -141,7 +143,7 @@ export default function StrategyComparisonPage() {
                 <p className="text-sm text-gray-500">Loading...</p>
               ) : (
                 <div className="space-y-3 text-sm">
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                     {statsByVersion.map(({ version, stats }) =>
                       stats ? (
                         <div key={version} className={`rounded-lg border px-2 py-2 ${active === version ? "border-accent/50 bg-accent/5" : "border-white/10"}`}>

@@ -1,10 +1,18 @@
-# Launches the backend and frontend, each in its own window so you can see
-# their logs directly. Close either window to stop that half of the app.
+# Launches local Postgres (if not already up) plus the backend and frontend,
+# each of the latter two in its own window so you can see their logs
+# directly. Close either window to stop that half of the app.
 
 $root = Split-Path -Parent $PSScriptRoot
 
 if (-not (Test-Path "$root\backend\.env")) {
-    Write-Host "backend\.env not found -- run scripts\setup.ps1 first, fill in .env, then scripts\migrate.ps1." -ForegroundColor Red
+    Write-Host "backend\.env not found -- run scripts\setup.ps1 first." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Starting local Postgres (if not already running)..." -ForegroundColor Cyan
+docker compose -f "$root\docker-compose.yml" --env-file "$root\.env" up -d
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Could not start the local Postgres container -- is Docker Desktop running? See docker compose logs for details." -ForegroundColor Red
     exit 1
 }
 
