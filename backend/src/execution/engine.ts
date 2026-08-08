@@ -53,6 +53,19 @@ export async function executeIfApproved(
     return { executed: false, tradeId: null, reason: "analysis-only mode: setup qualified but no order was placed" };
   }
 
+  // Tried a pre-entry broker.isPositionFlat() check here (2026-07-19
+  // operator request, as a belt-and-suspenders check alongside the DB-side
+  // `hasOpen` check upstream in loop.ts) but reverted it the same night:
+  // BrowserControlBroker's isPositionFlat reads a DOM element that, in this
+  // "nothing tracked, verify truly flat" context, doesn't actually contain
+  // any position-status text at all (confirmed via diagnostic logging --
+  // see git history) -- it was returning a confident-looking `false` on a
+  // genuinely flat account, blocking every real entry. The exact same
+  // function IS reliable in manageLiveOpenTrade's different context
+  // (checking whether an already-tracked open trade has closed), so that
+  // usage is untouched. The DB-side `hasOpen` check remains the only
+  // pre-entry guard until isPositionFlat's DOM read is fixed to target the
+  // right element.
   const side = signal.side === "long" ? OrderSide.BUY : OrderSide.SELL;
   const orderRequest: OrderRequest = {
     accountId: brokerAccountId,

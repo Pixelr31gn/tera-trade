@@ -17,14 +17,13 @@ import { logger } from "./core/logger.js";
 import { prisma } from "./db/client.js";
 import { setLiveBrokerConnected } from "./execution/mode.js";
 import { setLatestBrowserAccountSnapshot } from "./engine/liveAccountOverride.js";
-import { setLatestOrderFlowSnapshot } from "./engine/liveOrderFlowCache.js";
+import { appendOrderFlowHistory, setLatestOrderFlowSnapshot } from "./engine/liveOrderFlowCache.js";
 import { TradingEngine } from "./engine/loop.js";
 import { evaluatePendingOutcomes } from "./engine/outcomeEvaluator.js";
-import { ensureInstrumentsSeeded } from "./marketData/backfill.js";
+import { backfillDaily, ensureInstrumentsSeeded } from "./marketData/backfill.js";
 import { ACTIVE_INSTRUMENTS } from "./marketData/instruments.js";
 import { LiveBarPoller } from "./marketData/live.js";
 import { MinuteBarAggregator } from "./marketData/minuteBarAggregator.js";
-import { refreshAllRollups } from "./marketData/rollup.js";
 
 // Defense in depth: a crashed backend means zero risk oversight (no kill
 // switch enforcement, no position monitoring, nothing) until someone notices
@@ -216,26 +215,15 @@ async function main(): Promise<void> {
     // WebSocket traffic (order book / trade-aggressor flow / TopstepX's own
     // crowd-positioning "Tilt" feed) instead of scraping rendered text --
     // see browserWatch/orderFlowListener.ts for why the DOM ladder widget
-    // itself isn't a reliable source. Purely observational for now: results
-    // are persisted and exposed via /api/market/order-flow but nothing in
-    // scoring reads them yet, pending validation that the feed is accurate.
+    // itself isn't a reliable source. Kept in-memory only (bounded ring
+    // buffer, see liveOrderFlowCache.ts) rather than persisted to Postgres
+    // -- the 2026-07-20 DB audit confirmed nothing in scoring ever read the
+    // old persisted table back, only the in-memory latest snapshot.
     const orderFlowListener = new OrderFlowListener(
       { cdpUrl: settings.browserCdpUrl, urlMatch: settings.browserUrlMatch, flushSeconds: settings.orderFlowFlushSeconds },
       async (snapshot) => {
         setLatestOrderFlowSnapshot(snapshot);
-        await prisma.orderFlowSnapshot.create({
-          data: {
-            time: new Date(),
-            symbol: snapshot.symbol,
-            bestBidSize: snapshot.bestBidSize?.toString(),
-            bestAskSize: snapshot.bestAskSize?.toString(),
-            buyVolume: snapshot.buyVolume.toString(),
-            sellVolume: snapshot.sellVolume.toString(),
-            tradeCount: snapshot.tradeCount,
-            tiltLongBias: snapshot.tiltLongBias?.toString(),
-            tiltShortBias: snapshot.tiltShortBias?.toString(),
-          },
-        });
+        appendOrderFlowHistory(snapshot, new Date());
       }
     );
     stopOrderFlow = () => orderFlowListener.stop();
@@ -276,28 +264,6 @@ async function main(): Promise<void> {
   runOutcomeEvaluation();
   const outcomeEvaluationTimer = setInterval(runOutcomeEvaluation, OUTCOME_EVALUATION_INTERVAL_MS);
 
-  // Keeps bars_rollup fresh for the 30m/1h/4h (and 5m/15m) legs of the
-  // multi-timeframe trend read (see engine/timeframeTrendCache.ts) -- doesn't
-  // need continuousScanTimer's 15s cadence: a rollup only needs to be as
-  // fresh as its own bucket size, and the fastest resolution rolled up here
-  // is 5 minutes. Same overlap-guard shape as outcomeEvaluationTimer above.
-  const ROLLUP_REFRESH_INTERVAL_MS = 5 * 60_000;
-  let rollupRefreshRunning = false;
-  const runRollupRefresh = (): void => {
-    if (rollupRefreshRunning) {
-      logger.warn("rollup_refresh_still_running_skipping_tick");
-      return;
-    }
-    rollupRefreshRunning = true;
-    refreshAllRollups()
-      .catch((err) => logger.error({ err: String(err) }, "rollup_refresh_failed"))
-      .finally(() => {
-        rollupRefreshRunning = false;
-      });
-  };
-  runRollupRefresh();
-  const rollupRefreshTimer = setInterval(runRollupRefresh, ROLLUP_REFRESH_INTERVAL_MS);
-
   // A running v3 confidence read per instrument, independent of whether any
   // strategy actually fired a signal -- see TradingEngine.runContinuousScan's
   // comment for why this is observational only and never executes. Guarded
@@ -331,11 +297,39 @@ async function main(): Promise<void> {
   runContinuousScan();
   const continuousScanTimer = setInterval(runContinuousScan, CONTINUOUS_SCAN_INTERVAL_MS);
 
+  // bars_daily (dailyTrendCache.ts's v1/v2 daily-trend factor, and
+  // dailyEmaTrendCache.ts's v3 daily-EMA20 factor) was found 11 days stale
+  // (2026-07-20 DB audit) -- nothing had ever kept it current after the
+  // initial one-off runFullBackfill. backfillDaily's own createMany uses
+  // skipDuplicates, so calling this repeatedly is safe/idempotent; running
+  // it a few times a day (rather than exactly once) is cheap insurance
+  // against a missed cycle mattering for a whole extra day.
+  const DAILY_BAR_REFRESH_INTERVAL_MS = 6 * 60 * 60_000;
+  let dailyBarRefreshRunning = false;
+  const runDailyBarRefresh = (): void => {
+    if (dailyBarRefreshRunning) {
+      logger.warn("daily_bar_refresh_still_running_skipping_tick");
+      return;
+    }
+    dailyBarRefreshRunning = true;
+    (async () => {
+      for (const spec of ACTIVE_INSTRUMENTS) {
+        await backfillDaily(spec, 30);
+      }
+    })()
+      .catch((err) => logger.error({ err: String(err) }, "daily_bar_refresh_failed"))
+      .finally(() => {
+        dailyBarRefreshRunning = false;
+      });
+  };
+  runDailyBarRefresh();
+  const dailyBarRefreshTimer = setInterval(runDailyBarRefresh, DAILY_BAR_REFRESH_INTERVAL_MS);
+
   const shutdown = async () => {
     logger.info("terra_trade_stopping");
     clearInterval(outcomeEvaluationTimer);
-    clearInterval(rollupRefreshTimer);
     clearInterval(continuousScanTimer);
+    clearInterval(dailyBarRefreshTimer);
     stopDataSource();
     await dataSourcePromise;
     stopOrderFlow?.();

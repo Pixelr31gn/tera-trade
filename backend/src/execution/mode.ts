@@ -35,7 +35,9 @@ export async function getSystemState(): Promise<SystemState> {
   let state = await prisma.systemState.findUnique({ where: { id: 1 } });
   if (!state) {
     const settings = getSettings();
-    state = await prisma.systemState.create({ data: { id: 1, mode: settings.tradingMode, killSwitch: false } });
+    state = await prisma.systemState.create({
+      data: { id: 1, mode: settings.tradingMode, killSwitch: false, executionDecisionEngineEnabled: settings.executionDecisionEngineEnabled },
+    });
   }
   return state;
 }
@@ -81,4 +83,12 @@ export async function tripKillSwitch(reason: string): Promise<SystemState> {
 export async function setActiveStrategyVersion(version: StrategyVersion): Promise<SystemState> {
   await getSystemState();
   return prisma.systemState.update({ where: { id: 1 }, data: { activeStrategyVersion: version } });
+}
+
+// Dashboard-toggleable, live -- no restart needed (see engine/loop.ts's
+// attemptExecution, which reads this fresh from the DB every time instead of
+// the once-cached EXECUTION_DECISION_ENGINE_ENABLED env value it seeds from).
+export async function setExecutionDecisionEngineEnabled(enabled: boolean): Promise<SystemState> {
+  await getSystemState();
+  return prisma.systemState.update({ where: { id: 1 }, data: { executionDecisionEngineEnabled: enabled } });
 }

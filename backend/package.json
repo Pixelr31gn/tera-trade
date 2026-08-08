@@ -1,11 +1,11 @@
 {
   "name": "tera-trade-backend",
-  "version": "0.1.0",
+  "version": "1.4.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').cpSync('src/scoring/artifacts','dist/scoring/artifacts',{recursive:true})\"",
     "start": "node dist/index.js",
     "test": "vitest run",
     "prisma:generate": "prisma generate",

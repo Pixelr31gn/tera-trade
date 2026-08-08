@@ -7,6 +7,16 @@ frontend/.turbo/
 *.tsbuildinfo
 backend/src/scoring/artifacts/*.json
 
+# 1.4 .exe build output (scripts\build-exe.ps1) -- regenerated per build, not
+# source. Names below match the SEA compile working dirs Build-SeaExe
+# actually uses today; confirmed live 2026-07-30 that a stale mismatch here
+# (this used to say backend/dist-launcher/ + frontend/dist-exe/, an older
+# architecture's paths) let ~180MB of regenerable SEA build output slip into
+# a scripts\package.ps1 source zip undetected.
+scripts/dist-setup-exe/
+scripts/dist-launcher-exe/
+backend/dist-launcher/
+
 # Env / secrets
 .env
 .env.*

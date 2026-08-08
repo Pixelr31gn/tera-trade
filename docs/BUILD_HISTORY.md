@@ -13,8 +13,8 @@ their micro equivalents MES/MNQ/MCL/MGC), built to run against the user's real T
 account. It watches price and account data, scores candidate setups with a rule-based
 strategy engine, sizes and manages risk on every trade, and can either surface recommendations
 for manual execution or place/manage trades itself — gated behind explicit mode switches so
-nothing trades for real until deliberately turned on. Currently running in **paper mode**
-(`SimulatedBroker`, real prices, simulated fills) to validate the system before any live use.
+nothing trades for real until deliberately turned on. As of v1.2, running live against a real, funded
+TopstepX account (`BrowserControlBroker`) alongside paper mode's validation runs.
 
 ## Timeline
 
@@ -240,36 +240,158 @@ being confident. Replaced `determineConsensus` (`engine/loop.ts`) with: **take t
 if at least 2 of the 3 versions individually clear the 65% score threshold**, full stop —
 applies to both paper and live.
 
-### Multi-timeframe trend alignment (2026-07-19)
+### v1.2 — Pattern-mined scoring, live-incident hardening, per-account equity, and a themed UI (2026-07-21 – 2026-07-22)
 
-Replaced the single-timeframe `dailyTrendAlignment` factor with a 7-timeframe composite —
-**1D, 4H, 1H, 30M, 15M, 5M, 1M** — weighted so higher timeframes count more (`1d:6, 4h:5,
-1h:4, 30m:3, 15m:2, 5m:1.5, 1m:1`, hand-set), confirmed as a scoring *nudge*, not a hard
-gate (operator explicitly ruled out blocking trades on this). 1D still absorbs into the
-composite rather than staying a separate factor, so the same daily-trend evidence isn't
-scored twice.
+**v5, the first scoring version built from mined data rather than intuition**: added a
+documented pattern-mining methodology to a new `add-scoring-version` skill, then ran it against
+real resolved outcomes (`executed_win`/`executed_loss`/`missed_win`/`missed_loss`, ~36k+ scores).
+Found three real, asymmetric patterns — ADX-regime asymmetry (a very strong trend, ADX≥40, favors
+shorts and hurts longs), weak-trend fade (fading a weak trend beat following it, both sides), and
+price-action normalcy (a "normal" candle outperformed every dramatic shape). Built into
+`ruleScorerV5.ts` as a weighted-logit scorer and wired in as **shadow-only**
+(`SHADOW_ONLY_VERSIONS` in `engine/loop.ts`) — scored on every signal, visible everywhere v1/v2/v3
+are, but deliberately excluded from `STRATEGY_VERSIONS` so it can never affect consensus or a real
+trade until it's earned promotion on its own live track record.
 
-Revived `marketData/rollup.ts` (`bars_1m` → `bars_rollup`, previously dead code with zero
-callers) and added 30m/4h resolutions on top of the existing 5m/15m/1h, each with a
-per-resolution lookback window sized for `classifyRegime`'s ~114-bar appetite (5m: 48h,
-15m: 72h, 30m: 120h, 1h: 240h, 4h: 720h). Dropped the dead `1d` rollup entry — 1D reuses
-the existing `dailyTrendCache.ts`/`bars_daily` path, which already has real ~1yr depth.
-Found and fixed a latent bug while widening the lookback: the aggregation could overwrite
-a previously-complete bucket with an incomplete one when the query window's start fell
-mid-bucket; fixed by only upserting buckets whose own start is `>= since`. Wired
-`refreshAllRollups()` into a new 5-minute scheduled job (same overlap-guard shape as the
-outcome-evaluation timer) — it had never been called from anywhere before this.
+**Corrupted-bar incident and the fixes it drove**: a live price-extraction outage produced a
+single degenerate 1-minute bar (ES read as 2.30 against a real ~7549) that fed a continuous-scan
+entry a nonsensical ATR-derived stop/target; the resulting bracket order was rejected outright by
+TopstepX (invalid price levels), leaving the position briefly unprotected until `manageLiveOpenTrade`'s
+own stop-crossed check forced a close a few seconds later (net real loss: -$1.25). Root-caused to
+`minuteBarAggregator.ts`'s implausible-move guard, which had a rejection-timeout escape hatch that
+accepted the *first* post-timeout outlier tick with zero corroboration. Fixed to require 3
+consecutive matching ticks before trusting a big price move as real. A second, related gap found
+the same night: even a single bad bar that self-heals immediately still poisons Wilder's-smoothed
+ATR (and everything downstream — stops, targets, v3's volatility factor) for many minutes after,
+since the smoothing only decays ~7%/bar. Fixed at the source (`regime/indicators.ts`'s
+`trueRange()`) by clipping any single bar's true range to at most 10x the trailing local median
+before it ever reaches ATR/ADX/choppiness calculations.
 
-New `engine/timeframeTrendCache.ts` (4h/1h/30m/15m/5m legs, TTL-cached per resolution) and
-`analytics/timeframeAlignment.ts` (pure combination logic, same `(data, side) -> -1..1`
-shape as the fib/PPM/order-flow signals) feed a new `SetupFeatures.timeframeTrends` field.
-A timeframe with fewer than ~114 rolled-up bars is omitted from the composite entirely
-(renormalized around, not treated as a fabricated neutral reading) — expected for 15m/5m
-for a while after a fresh `bars_1m` history reset, though live verification the same day
-showed 4h/1h/30m already usable (the migrated historical data gave rollup a head start
-this build didn't originally expect). Wired into v1/v2 as a reweighted factor (`2.2`,
-replacing the old `1.8`) and into v3 as a new bounded adjustment (`computeTimeframeAlignmentAdjustment`,
-±12 points).
+**Per-account equity-curve separation**: the account switcher on TopstepX (three real funded
+accounts observed: an Express account and two DLL Combines) was never tracked at all — every
+equity point landed on one shared internal account row regardless of which real account was
+selected, silently blending all three histories into one curve. Added
+`extractActiveAccountIdentity` (reads the account-switcher's `<name>|<real ID>` text off the
+page), `ensureAccountForBrokerId` (get-or-create an `Account` row per real `brokerAccountId`,
+using the schema's previously-unused field), and a dashboard account picker defaulting to
+whichever account is live right now. Starting balance is inferred from the account name (Express
+tiers start at $0; Combine tiers start at their full size) rather than a flat $50k default —
+deliberately scoped to equity-curve display only; trades and risk-limit/circuit-breaker tracking
+still use the single shared account row (an operator call, not an oversight — see Known
+limitations).
+
+**S/R proximity gate retuned live**: `MAX_ENTRY_DISTANCE_ATR` (`risk/engine.ts`) raised 1.25 →
+1.9 after a sustained strong-trend session (ADX 44-47) blocked nearly every continuous-scan
+signal on both ES and NQ, several scoring 90%+ across all versions, for running too far from the
+last real S/R pivot.
+
+**"Snow leopard" UI theme**: retint of the whole dashboard's Tailwind color tokens (cool
+granite/slate darks, an icy glacier-blue accent replacing the prior saturated blue), a faint
+scattered-texture background nodding at the coat's rosette pattern, a glowing paw-print nav mark,
+and a matching glow treatment on the equity curve chart. `good`/`bad`/`warn` semantic colors were
+deliberately left untouched — this is a live-money dashboard, and win/loss/caution clarity took
+priority over full-theme consistency.
+
+**Phantom-trade incidents (open — not yet fixed)**: multiple real occurrences this session (5
+trades total) of a Trade row recorded as `status: open` with no corresponding real position on
+the actual TopstepX account. Traced to `execution/engine.ts` / `browserControlBroker.placeOrder()`
+treating a successful Buy/Sell button click as an immediate, confirmed fill, with no verification
+step afterward — a silent broker-side rejection (a lockout, a margin check, anything that doesn't
+throw a Playwright exception) still produces a permanent phantom "open" trade. Each occurrence was
+reconciled (closed out, exit data left null rather than fabricated) via a new `clear-pos` skill,
+but the underlying fix — verify via `isPositionFlat` that a real position actually appeared before
+creating the Trade row — has been scoped and proposed but not yet implemented; see Known
+limitations.
+
+**New operator skills** (`.claude/skills/`, not part of the shipped app):
+`diagnose-signal` (trace why a specific Recommendation Feed row did or didn't execute),
+`browser-automation-dev` (safely write/test new Playwright automation against the live page),
+`reconcile-trade` (fix the trades table when it disagrees with the real account — phantom/missed/
+undetected-close shapes), `add-scoring-version` (now includes the pattern-mining methodology
+above), `tune-risk-constant` (safely retune a hand-set risk/scoring constant from live evidence),
+and `clear-pos` (fast-path phantom-position cleanup once the operator's confirmed it directly on
+TopstepX).
+
+**Chrome page-detection hardening + price-corruption incidents (2026-07-28)**: two real corrupted-
+price incidents this session, both traced to `browserWatch/cdpClient.ts`'s `findPage` selecting the
+wrong tab. First: a logged-out `/login` tab still matched the "topstepx.com" URL check, so price
+extraction quietly scraped login-page text as if it were a quote. Fixed by requiring `/trade` in
+the URL — but the very next fresh debug-Chrome auto-launch (`chromeLauncher.ts`) landed on the bare
+`topstepx.com/` root (mid client-side-redirect), which the `/trade` requirement rejected even
+though the page was, in a separately-confirmed case, a *fully authenticated* session that never
+updates its URL path at all. URL path turned out to be an unreliable signal for this app either
+way. Final fix: `findPage` now checks page *content* for the account-balance panel (`extractAccountSnapshot`'s
+existing `"bal:"` marker) to confirm authentication, independent of URL. Separately, a stray
+`MNQU26` mention in TopstepX's closed-trade-history table (a different panel than the live quote
+table) let `extractPriceForSymbol`'s un-anchored decimal regex pull a timestamp fragment
+(`16:01:00.991` → `0.991`) out as a fake price — fixed by anchoring the price regex to the whole
+line and recognizing the Micro-contract `M` prefix as a proper contract-code match. ~2,700
+historical corrupted `bars_1m` rows (from this and earlier incidents going back to 2026-07-10) were
+found still sitting inside the ATR lookback window, inflating ES's ATR to 623 (should be ~2-10) —
+deleted after confirming each was outside any sane price range for its symbol.
+
+**Stale-data trading gap fixed**: `scanSymbolContinuously` (`engine/loop.ts`) is timer-driven, not
+tick-driven — it re-reads the DB every ~15s regardless of whether new price data has arrived, and
+its only protection against re-scoring the same bar twice was an in-memory map that resets on every
+process restart. With the price feed dead for ~17 hours (Chrome stuck off the trade view) and
+several routine backend restarts in between, a restart reset that map and made the same 17-hour-old
+bar look "new" again, opening a real (paper-mode, no real money) trade off stale data. Fixed with an
+absolute staleness check: any bar older than 5 minutes is rejected outright, independent of restart
+timing.
+
+**Consecutive-loss circuit breaker now resets daily**: previously computed from the last 50 closed
+trades with no time bound, which meant a losing streak could permanently wedge the account — the
+breaker blocks all new entries, and only a win clears it, but a win requires a new entry. Scoped to
+UTC-day-boundary, matching how `tradesToday`/daily-loss-% already work.
+
+**S/R ATR-distance gate removed entirely**: `MAX_ENTRY_DISTANCE_ATR`/`MIN_ENTRY_DISTANCE_ATR`
+(`risk/engine.ts`) — reactively loosened four times (1.0 → 1.25 → 1.9 → 3.0, then a 1.25 floor
+added) over the life of this project with no backtested basis behind any of the specific bounds,
+and it played no role in stop/target pricing for continuous-scan signals (computed independently
+from ATR) — it only ever decided approve/reject, duplicating risk-shaping the scoring models
+already do via weighted factors. Operator request, after discussing that a hard proximity gate is a
+blunter instrument than letting the scoring models weigh it. The S/R *validation* requirement (a
+real, previously-tested 2+ touch level must exist nearby at all) is unchanged.
+
+**S/R ATR-distance gate reinstated, then retuned (2026-07-29)**: same day, operator asked for it
+back — restored at the same 1.25x-3.0x band, then retuned to **0.25x-1.95x** the same session.
+
+**Consensus rule unified into a single "mutual agreement" requirement (2026-07-29)**: previously
+two different shapes — real-strategy signals needed a plain 2-of-3 majority at the 65%
+`minScoreThreshold` (`determineConsensus`), continuous-scan signals needed just one standout
+version at 70% plus a 30% floor on the other two (`determineContinuousScanConsensus`), so a single
+strong continuous-scan version could effectively drive a trade with the other two barely
+tolerating it. Operator request: "v1/2/3 need each other, none should execute on its own." Both
+functions now share one rule (`hasMutualAgreement` in `engine/loop.ts`): **at least 2 of the 3
+versions must independently clear 75%, and the remaining (weakest) one must clear at least 56%.**
+
+**Tera Trade 1.4 — compiled `.exe` deliverable**: a real, double-clickable Windows distribution
+alongside the existing source-zip (`scripts/package.ps1`, still used for v1.1-v1.3-style
+distribution). Two packaging approaches were tried and confirmed dead ends before landing on what
+works, worth recording so it isn't retried:
+- **`pkg`** (Vercel's tool): its only available Windows Node18 prebuilt binary is 18.5.0, which
+  predates a `node:diagnostics_channel` API fastify 5 requires (`tracingChannel`) — crashes on
+  startup with `TypeError: undefined is not a function`. No Node20 prebuilt exists in `pkg`'s cache
+  to fall back to (`pkg -t node20-win-x64` → "No available node version satisfies 'node20'").
+- **Node's built-in Single Executable Application (SEA) feature**, fully embedding the bundled app:
+  SEA's embedded-script `require()` can resolve Node built-ins only — never an external file, not
+  even by absolute path. Both Prisma's native query-engine loader and Playwright-core's own
+  internals (e.g. reading their own `package.json` for a version string) do exactly this kind of
+  dynamic file-based `require()` internally, unavoidably, crashing the instant either runs
+  (`ERR_UNKNOWN_BUILTIN_MODULE`).
+
+**What actually works**: a hybrid. The backend ships as a *tiny* SEA-compiled launcher exe
+(`backend/scripts/launcher.cjs`, using only `child_process`/`path` builtins — nothing SEA can't
+handle) that spawns a completely ordinary, separate `node.exe` process against a portable,
+*unmodified* `app/` folder (real `dist/` + real `node_modules/`, copied wholesale) — Prisma and
+Playwright run exactly as they do outside packaging, since neither is ever SEA-embedded. The
+frontend, by contrast, ships as a genuinely single-file SEA exe: its static file server
+(`frontend/serve.cjs`) is deliberately dependency-free (only Node builtins, serving the
+`next.config.mjs` `output: "export"` static bundle via plain `fs` reads, which aren't subject to
+SEA's `require()` restriction at all). `scripts/build-exe.ps1` orchestrates the whole pipeline;
+`env.ts`/`scoring/training.ts` gained `node:sea`-aware path resolution (`isSea()`) as part of this,
+falling back to their original behavior unchanged outside packaging. Postgres and Chrome remain
+external in both cases, same as every other Tera Trade distribution.
 
 ## Current architecture
 
@@ -323,16 +445,20 @@ BrowserWatcher (CDP tick, ~5-10s)
 `SystemState.mode` gates everything: `analysis_only` places no order anywhere (not even
 simulated); `paper` runs through `SimulatedBroker` with the cross-version consensus rule above;
 `live` requires `BrowserControlBroker` configured, `LIVE_TRADING_CONFIRMED=true`, and
-`DRY_RUN_ORDERS=false` — never auto-escalates. Currently running in `paper` mode.
+`DRY_RUN_ORDERS=false` — never auto-escalates. As of v1.2, running in `live` mode against a real
+funded account.
 
 ### Database (Prisma / local Postgres via Docker)
 
 `Instrument`, `Bar`, `BarRollup`, `DailyBar`, `Account`, `RiskLimit`, `SystemState`,
 `RegimeSnapshot`, `NewsEvent`, `Score`, `Trade`, `OrderRecord`, `PositionRecord`,
-`EquityCurvePoint`, `OrderFlowSnapshot`. Two `Account` rows are actually in use: `default`
-(id=1, the real-money-shaped account) and `paper` (id=2, the one currently active per
-`BROKER_KIND=simulated`), each with its own `RiskLimit` row so risk budgets don't leak between
-them.
+`EquityCurvePoint`, `OrderFlowSnapshot`. Two `Account` rows carry real trade/risk-limit history —
+`default` (id=1, live real-money trades) and `paper` (the simulated-broker validation account),
+each with its own `RiskLimit` row so risk budgets don't leak between them. As of v1.2, one
+additional `Account` row exists per real TopstepX account the browser watcher has observed
+(keyed by the real `brokerAccountId`, see the v1.2 timeline entry) — these carry equity-curve
+history only, deliberately not their own `RiskLimit` row, since trades/risk tracking still all
+route through the single shared `default` row above.
 
 **Moved off Neon to a local Postgres container** (2026-07-17, operator request — easier
 backups/resets, no cloud dependency): `docker-compose.yml` at repo root runs `postgres:18`
@@ -350,6 +476,16 @@ mounting at the old path fails the container's healthcheck with a clear error.
 
 ## Known limitations / open items
 
+- ~~`execution/engine.ts` / `browserControlBroker.placeOrder()` treat a successful order-entry
+  button click as an immediately-confirmed fill~~ **Fixed (v1.3.1)**: `placeOrder`'s market-order
+  path now polls `isPositionFlat` (up to 4 attempts, 750ms apart) after a successful click before
+  ever reporting `status: "filled"` — a persistent "still flat" or unresolvable result is now
+  treated the same as a broker rejection, so `execution/engine.ts` never creates a Trade row for
+  it (no changes needed there at all — the fix is entirely at the source). Occurred 6 times in
+  one session (trades 185, 186, 234, 235, 239, 240) before this landed; each was reconciled via
+  the `clear-pos` skill, which as of the same pass also runs this reconciliation automatically
+  every tick (`engine/loop.ts`'s `manageLiveOpenTrade`) rather than requiring the operator to
+  notice and ask for it.
 - Order-flow's directional signal (buy/sell aggressor volume + book imbalance) now feeds v3
   scoring as a bounded adjustment; its accuracy under live conditions still hasn't been
   validated against real outcomes the way the historical-similarity adjustment has, and the

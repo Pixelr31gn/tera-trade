@@ -16,12 +16,21 @@ you are automating real order entry on a real funded account.
 2. Finds the order-entry widget currently showing the instrument's contract (matched by CME
    contract code, e.g. "MNQU26" for a September 2026 Micro Nasdaq contract).
 3. Sets the quantity the risk engine sized the trade to.
-4. Computes the stop-loss/take-profit as dollar amounts (TopstepX's "Position Brackets" panel
-   takes `Risk (~$)` / `Profit (~$)` for the whole position, not tick offsets or absolute
-   prices) and fills them in, making sure "Automatically apply Risk / Profit bracket to new
-   Positions" is checked -- **without this, a Buy/Sell click places a position with no stop
-   attached at all**, which was confirmed OFF by default on the account this was built against.
-5. Clicks Buy or Sell.
+4. Clicks Buy or Sell.
+
+**2026-07-21 update: no longer configures TopstepX's own Position Brackets.** An earlier version
+of this automation also filled in `Risk (~$)` / `Profit (~$)` and checked "Automatically apply
+Risk / Profit bracket to new Positions" before submitting. That popover's own button row switches
+from "Close" to "Cancel"/"Save Changes" once anything in it is edited, and the first cut of this
+automation kept clicking "Close" -- which discards the edit -- while every readback check still
+looked correct, since those checks only ever read the popover's own live input state, not whether
+anything was actually persisted. This produced two real, confirmed unprotected live positions in
+one night before being caught. Rather than keep hardening that DOM interaction, the operator chose
+to drop it entirely: every open position's real protection is now `engine/loop.ts`'s
+`manageLiveOpenTrade`, which polls every price tick against the trade's own stop/target and
+actively force-closes the position the moment either is crossed, independent of anything
+broker-side. Known tradeoff, accepted knowingly: while the backend itself is down, an open
+position has no stop at all, since nothing broker-side is watching it either.
 
 If TopstepX is showing any modal dialog (loss-limit lockouts, etc.) when an order is attempted,
 placement is refused immediately with the modal's text rather than retrying against a covered
@@ -60,9 +69,8 @@ checked inside `BrowserControlBroker` itself, **defaulting to `true`**.
 ### Dry run (default)
 
 With `DRY_RUN_ORDERS=true` (or unset), every step short of the final click still happens for
-real -- the correct widget is found, quantity is set, and the $ risk/profit bracket fields are
-filled and the auto-apply checkbox is checked -- so you can watch the real screen and confirm
-it's targeting the right instrument with the right numbers. The Buy/Sell/Close button itself is
+real -- the correct widget is found and quantity is set -- so you can watch the real screen and
+confirm it's targeting the right instrument with the right numbers. The Buy/Sell/Close button itself is
 highlighted (a red outline) instead of clicked, and the order is recorded as rejected with a
 `DRY_RUN_ORDERS is enabled -- would have clicked "..."` reason, visible in the recommendation
 feed/live event stream. No `trades` row is created for a dry-run "order".

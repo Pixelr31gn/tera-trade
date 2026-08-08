@@ -6,6 +6,7 @@ import { apiFetch, fetcher } from "@/lib/api";
 import { AccountSummary, SystemState } from "@/lib/types";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 const MODES: Array<{ value: "analysis_only" | "paper" | "live"; label: string; description: string }> = [
   { value: "analysis_only", label: "Analysis Only", description: "Scores and regime detection run, but no orders are ever placed." },
@@ -19,6 +20,7 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const account = accounts?.[0];
+  const confirm = useConfirm();
 
   async function changeMode(mode: string) {
     setError(null);
@@ -33,6 +35,22 @@ export default function SettingsPage() {
   async function clearKillSwitch() {
     await apiFetch("/api/system/kill-switch/clear", { method: "POST" });
     mutateState();
+  }
+
+  async function toggleExecutionDecisionEngine(enabled: boolean) {
+    if (enabled) {
+      const ok = await confirm(
+        "Enable the Execution Decision Engine? Once live trading is active on the browser-control broker, this places real resting limit orders on TopstepX instead of immediate market orders. If you haven't watched it against a real fill yet, test with DRY_RUN_ORDERS=true first -- see docs/EXECUTION_DECISION_ENGINE.md."
+      );
+      if (!ok) return;
+    }
+    setError(null);
+    try {
+      await apiFetch("/api/system/execution-decision-engine", { method: "POST", body: JSON.stringify({ enabled }) });
+      mutateState();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update Execution Decision Engine setting");
+    }
   }
 
   function optionalNumber(formData: FormData, name: string): number | null {
@@ -101,6 +119,41 @@ export default function SettingsPage() {
             </button>
           )}
         </div>
+      </Panel>
+
+      <Panel
+        title="Execution Decision Engine"
+        action={<Badge text={systemState?.executionDecisionEngineEnabled ? "enabled" : "disabled"} tone={systemState?.executionDecisionEngineEnabled ? "good" : "bad"} />}
+      >
+        <p className="text-sm text-gray-300">
+          Routes an approved signal through fair-value-map scoring and a resting limit order instead
+          of an immediate market order. Only takes effect once the broker is browser_control (live
+          mode) -- safe to leave on otherwise, since paper/analysis-only always fall back to the
+          existing immediate-market-order path regardless of this toggle.
+        </p>
+        <button
+          onClick={() => toggleExecutionDecisionEngine(!systemState?.executionDecisionEngineEnabled)}
+          role="switch"
+          aria-checked={systemState?.executionDecisionEngineEnabled ?? false}
+          className={`mt-3 flex items-center gap-3 rounded-md border px-4 py-2 transition-colors ${
+            systemState?.executionDecisionEngineEnabled ? "border-accent bg-accent/10" : "border-border"
+          }`}
+        >
+          <span
+            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+              systemState?.executionDecisionEngineEnabled ? "bg-accent" : "bg-white/10"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
+                systemState?.executionDecisionEngineEnabled ? "translate-x-5" : "translate-x-0.5"
+              }`}
+            />
+          </span>
+          <span className="text-sm font-medium text-white">
+            {systemState?.executionDecisionEngineEnabled ? "Enabled" : "Disabled"}
+          </span>
+        </button>
       </Panel>
 
       <Panel title="Risk Limits">

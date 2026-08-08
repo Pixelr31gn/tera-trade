@@ -109,8 +109,16 @@ export async function computeAccountRiskState(account: Account, currentEquity: D
   });
   const dailyStartingEquity = firstToday ? new Decimal(firstToday.equity.toString()) : currentEquity;
 
+  // Scoped to trades closed today (same UTC day boundary as tradesToday
+  // below) -- operator request, 2026-07-27: a losing streak used to persist
+  // across days indefinitely, since the circuit breaker it feeds blocks all
+  // new entries and a win is the only thing that clears it, which meant a
+  // bad session could permanently wedge the account with no way to recover
+  // without a manual risk_limits edit. Scoping to today gives yesterday's
+  // streak a hard reset at UTC midnight, same as the daily-trade-count and
+  // daily-loss-% breakers already get.
   const recentClosed = await prisma.trade.findMany({
-    where: { accountId: account.id, status: "closed", brokerKind },
+    where: { accountId: account.id, status: "closed", brokerKind, exitTime: { gte: todayStart } },
     orderBy: { exitTime: "desc" },
     take: 50,
     select: { pnl: true },

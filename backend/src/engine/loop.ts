@@ -8,26 +8,36 @@
 import { Decimal } from "decimal.js";
 import { prisma } from "../db/client.js";
 import { childLogger } from "../core/logger.js";
-import { BrokerKind, getSettings, TradingMode } from "../core/config.js";
+import { AccountSource, BrokerKind, getSettings, TradingMode } from "../core/config.js";
 import type { BrokerClient, ClosedSimTrade } from "../brokers/types.js";
 import { SimulatedBroker } from "../brokers/simulatedBroker.js";
 import { computeAccountEquity, computeAccountRiskState, recordEquityPoint } from "./accounting.js";
-import { ensureDefaultAccount, loadRecentBars } from "./bootstrap.js";
+import { ensureAccountForBrokerId, ensureDefaultAccount, loadRecentBars } from "./bootstrap.js";
+import { getLatestBrowserAccountSnapshot } from "./liveAccountOverride.js";
 import { classifySession } from "../analytics/session.js";
 import { getDailyTrend } from "./dailyTrendCache.js";
-import { getHigherTimeframeTrends } from "./timeframeTrendCache.js";
+import { getDailyEma20Trend } from "./dailyEmaTrendCache.js";
 import { getFixedTargetEdge } from "./fixedTargetEdgeCache.js";
 import { getLatestOrderFlowSnapshot } from "./liveOrderFlowCache.js";
+import { setLatestRegimeSnapshot } from "./regimeSnapshotCache.js";
 import { getOpeningRangeStats } from "./openingRangeCache.js";
 import { explainKillSwitch, explainRiskRejection, explainScore, explainTradeExit } from "../explain/engine.js";
 import { executeIfApproved } from "../execution/engine.js";
+import { evaluateExecutionOpportunity, pollRestingOpportunities } from "../execution/executionDecisionEngine.js";
 import { getSystemState, tripKillSwitch } from "../execution/mode.js";
+import type { EmaTrend } from "../analytics/emaTrend.js";
 import { getInstrument, type InstrumentSpec } from "../marketData/instruments.js";
 import { getNewsRiskStatus, type NewsRiskStatus } from "../news/risk.js";
 import { classifyRegime } from "../regime/classifier.js";
 import type { RegimeResult } from "../regime/classifier.js";
 import { atr as computeAtr, type OhlcBar } from "../regime/indicators.js";
-import { computeInitialStop, RiskEngine, type RiskLimitsConfig } from "../risk/index.js";
+import {
+  computeInitialStop,
+  hasReachedTrailingStopActivation,
+  RiskEngine,
+  TRAILING_STOP_DISTANCE_TICKS,
+  type RiskLimitsConfig,
+} from "../risk/index.js";
 import { buildSetupFeatures, type SetupFeatures } from "../scoring/features.js";
 import { evaluateSetup, type GatedScore } from "../scoring/gate.js";
 import type { StrategyVersion } from "../scoring/ruleScorer.js";
@@ -48,6 +58,14 @@ import type { Account, Trade } from "@prisma/client";
 // the aggregate consensus rule below, which reads all three independently.
 const STRATEGY_VERSIONS: StrategyVersion[] = ["v1", "v2", "v3"];
 
+// Scored on every signal alongside STRATEGY_VERSIONS (visible in the
+// Recommendation Feed, directly comparable) but deliberately excluded from
+// both consensus functions below, which only ever read from
+// STRATEGY_VERSIONS -- shadow-only until the operator decides a version here
+// is ready to actually vote. v5 (2026-07-21, see ruleScorerV5.ts) starts
+// here; move a version to STRATEGY_VERSIONS instead once it's promoted.
+const SHADOW_ONLY_VERSIONS: StrategyVersion[] = ["v5"];
+
 // Both paper AND live take a trade when at least 2 of the 3 versions'
 // probabilities individually clear the score threshold (65%, see
 // core/config.ts's minScoreThreshold) -- a straight majority vote on the raw
@@ -67,62 +85,72 @@ interface ConsensusDecision {
   summary: string;
 }
 
+// Mutual-agreement consensus rule (2026-07-29, operator request): no single
+// version should be able to drive a trade "on its own" -- v5 needs at least
+// one of v1/v2/v3 to also confirm. Went through two shapes the same day
+// before landing here: first "top 2 of 3 clear 75%, weakest just needs 56%"
+// (no v5 involvement at all), then tightened to "all three of v1/v2/v3
+// unanimously, AND v5 also clears 75%" -- confirmed live that stricter
+// version was far too strict (individually each version only clears 75%+
+// ~7-12% of the time; requiring all four simultaneously produced zero
+// actionable recommendations and zero trades over several hours). Loosened
+// back to: v5 must independently clear its own gate, AND at least ONE of
+// v1/v2/v3 (not all three) must also clear the same bar -- v5 still can't
+// act alone, but doesn't need a full v1/v2/v3 unanimous vote behind it
+// either. v5 does not "vote" in the STRATEGY_VERSIONS sense (no
+// representative-explanation slot, not part of the averaged probability
+// below) -- it's a hard AND-gate alongside whichever single v1/v2/v3 version
+// confirms. Applied identically to both real-strategy signals
+// (determineConsensus) and continuous-scan signals
+// (determineContinuousScanConsensus).
+const MUTUAL_AGREEMENT_HIGH_THRESHOLD = 0.75;
+const V5_EXECUTION_GATE_THRESHOLD = 0.75;
+
+function hasMutualAgreement(probabilities: number[], v5Probability: number): boolean {
+  return probabilities.some((p) => p >= MUTUAL_AGREEMENT_HIGH_THRESHOLD) && v5Probability >= V5_EXECUTION_GATE_THRESHOLD;
+}
+
+function mutualAgreementSummary(gatedByVersion: Map<StrategyVersion, GatedScore>, averageProbability: number): string {
+  const agreeCount = STRATEGY_VERSIONS.filter((v) => gatedByVersion.get(v)!.probability >= MUTUAL_AGREEMENT_HIGH_THRESHOLD).length;
+  const v5Probability = gatedByVersion.get("v5")!.probability;
+  return `${agreeCount}/3 at ${Math.round(MUTUAL_AGREEMENT_HIGH_THRESHOLD * 100)}%+ (at least 1 needed), v5 gate needs ${Math.round(V5_EXECUTION_GATE_THRESHOLD * 100)}%+ (avg=${Math.round(averageProbability * 100)}%): ${STRATEGY_VERSIONS.map((v) => `${v}=${Math.round(gatedByVersion.get(v)!.probability * 100)}%`).join(", ")}, v5=${Math.round(v5Probability * 100)}%`;
+}
+
 export function determineConsensus(gatedByVersion: Map<StrategyVersion, GatedScore>): ConsensusDecision {
-  const minScoreThreshold = getSettings().minScoreThreshold;
   const probabilities = STRATEGY_VERSIONS.map((v) => gatedByVersion.get(v)!.probability);
   const averageProbability = probabilities.reduce((a, b) => a + b, 0) / probabilities.length;
-  const clearingVersions = STRATEGY_VERSIONS.filter((v) => gatedByVersion.get(v)!.probability >= minScoreThreshold);
-  const taken = clearingVersions.length >= 2;
+  const taken = hasMutualAgreement(probabilities, gatedByVersion.get("v5")!.probability);
 
-  const takenVersions = STRATEGY_VERSIONS.filter((v) => gatedByVersion.get(v)!.decision === "taken");
   // Prefer a version that itself agrees ("taken") for the most meaningful
-  // representative explanation. v1/v2's own "taken" decision is exactly
-  // "probability >= threshold" (see scoring/gate.ts), so any version counted
-  // in clearingVersions is also in takenVersions except possibly v3 (whose
-  // own decision can additionally be blocked by its directional-conviction
-  // margin check even with probability >= threshold) -- since at least 2 of
-  // 3 versions clear to reach `taken` at all, at least one of them is
-  // guaranteed to be v1 or v2, so takenVersions is never empty here; the
-  // fallback below is defensive only.
+  // representative explanation, falling back to CONSENSUS_REPRESENTATIVE_ORDER[0]
+  // if none of the three's own decision happens to read "taken" (possible
+  // since a version's own gate decision can be blocked by its own additional
+  // checks -- e.g. v3's directional-conviction margin -- even when its raw
+  // probability contributed to mutual agreement here).
+  const takenVersions = STRATEGY_VERSIONS.filter((v) => gatedByVersion.get(v)!.decision === "taken");
   const representativeVersion = taken ? (CONSENSUS_REPRESENTATIVE_ORDER.find((v) => takenVersions.includes(v)) ?? CONSENSUS_REPRESENTATIVE_ORDER[0]!) : null;
 
-  const summary = `${clearingVersions.length}/3 versions >= ${Math.round(minScoreThreshold * 100)}% (avg=${Math.round(averageProbability * 100)}%): ${STRATEGY_VERSIONS.map((v) => {
-    const g = gatedByVersion.get(v)!;
-    return `${v}=${g.probability >= minScoreThreshold ? "clears" : "below"} (${Math.round(g.probability * 100)}%)`;
-  }).join(", ")}`;
+  const summary = mutualAgreementSummary(gatedByVersion, averageProbability);
 
   return { taken, representativeVersion, averageProbability, summary };
 }
 
 // Continuous-scan setups (see scanSymbolContinuously) have no detected chart
 // pattern behind them -- unlike a real strategy signal, they're a bar-level
-// directional read taken unconditionally on a timer. That earns a stricter,
-// standalone-conviction bar rather than the plain majority vote above: at
-// least one version must show real standout confidence (>=70%), and neither
-// of the other two can be meaningfully against it (each >=50%) -- 2026-07-16
-// operator request, made executable for the first time (previously v3-only
-// and purely observational, never reaching risk assessment or execution).
-const CONTINUOUS_SCAN_STANDOUT_THRESHOLD = 0.7;
-const CONTINUOUS_SCAN_FLOOR_THRESHOLD = 0.5;
-
+// directional read taken unconditionally on a timer. Uses the same shared
+// mutual-agreement rule as determineConsensus above (see its comment) --
+// previously continuous-scan had its own separate, looser standout+floor
+// shape, but the operator asked for one unified rule across both signal types.
 export function determineContinuousScanConsensus(gatedByVersion: Map<StrategyVersion, GatedScore>): ConsensusDecision {
   const probabilities = STRATEGY_VERSIONS.map((v) => gatedByVersion.get(v)!.probability);
   const averageProbability = probabilities.reduce((a, b) => a + b, 0) / probabilities.length;
-  const minProbability = Math.min(...probabilities);
-  const maxProbability = Math.max(...probabilities);
-  const taken = minProbability >= CONTINUOUS_SCAN_FLOOR_THRESHOLD && maxProbability >= CONTINUOUS_SCAN_STANDOUT_THRESHOLD;
+  const taken = hasMutualAgreement(probabilities, gatedByVersion.get("v5")!.probability);
 
-  // Same representative-selection shape as determineConsensus: prefer a
-  // version whose own decision is "taken"; the standout version's raw
-  // probability can clear 70% while its own decision still reads
-  // skipped_score (v3's directional-conviction margin can fail even with a
-  // high raw score), so takenVersions can in principle be empty here even
-  // when taken=true -- the CONSENSUS_REPRESENTATIVE_ORDER[0] fallback below
-  // covers that case.
+  // Same representative-selection shape as determineConsensus above.
   const takenVersions = STRATEGY_VERSIONS.filter((v) => gatedByVersion.get(v)!.decision === "taken");
   const representativeVersion = taken ? (CONSENSUS_REPRESENTATIVE_ORDER.find((v) => takenVersions.includes(v)) ?? CONSENSUS_REPRESENTATIVE_ORDER[0]!) : null;
 
-  const summary = `standout ${Math.round(maxProbability * 100)}%, floor ${Math.round(minProbability * 100)}% (avg=${Math.round(averageProbability * 100)}%): ${STRATEGY_VERSIONS.map((v) => `${v}=${Math.round(gatedByVersion.get(v)!.probability * 100)}%`).join(", ")}`;
+  const summary = mutualAgreementSummary(gatedByVersion, averageProbability);
 
   return { taken, representativeVersion, averageProbability, summary };
 }
@@ -130,6 +158,22 @@ export function determineContinuousScanConsensus(gatedByVersion: Map<StrategyVer
 const logger = childLogger("engineLoop");
 
 const MIN_BARS_FOR_REGIME = 120;
+
+// scanSymbolContinuously is timer-driven (runs on a fixed interval, not off
+// live ticks -- see its own header comment), so it re-reads "the last N
+// bars" from the DB every tick regardless of whether new price data has
+// actually arrived. Its only protection against re-scoring the same bar
+// twice was lastContinuousScanBarTime (below) -- an in-memory map that
+// resets to empty on every process restart. 2026-07-28 incident: the live
+// price feed had been dead for ~17 hours (Chrome stuck on a non-trade page,
+// see cdpClient.ts), but a routine backend restart (for an unrelated code
+// change) reset that map, so the very next tick treated the same 17-hour-old
+// bar as "new" again, re-ran consensus, and opened a real trade off a close
+// price with zero live market data behind it. This is an absolute staleness
+// check instead: reject outright whenever the newest bar itself is older
+// than a live feed could ever legitimately produce, independent of whatever
+// state the dedup map happens to be in.
+const MAX_CONTINUOUS_SCAN_BAR_STALENESS_MS = 5 * 60_000;
 
 // strategyId markers for TradingEngine.runContinuousScan's rows -- exported
 // so callers (e.g. the actionable-recommendations endpoint) can exclude
@@ -234,13 +278,37 @@ export class TradingEngine {
     }
 
     const equity = await computeAccountEquity(account, new Map([[symbol, price]]));
-    const now = Date.now();
-    const lastAt = lastEquityPointAt.get(account.id) ?? 0;
-    if (now - lastAt >= EQUITY_POINT_MIN_INTERVAL_MS) {
-      lastEquityPointAt.set(account.id, now);
-      await recordEquityPoint(account.id, equity, new Decimal(account.startingBalance.toString()), time, this.brokerKindForMode(systemState.mode as TradingMode));
+
+    // Equity-curve history is tracked per real TopstepX account (2026-07-21
+    // fix, scoped deliberately narrow) -- manageOpenTrades/trades/risk above
+    // still use the single shared `account`, but the displayed equity curve
+    // must not blend multiple real accounts an operator switches between in
+    // the browser into one history. Falls back to the shared account
+    // whenever there's no live browser snapshot yet (paper/analysis-only, or
+    // before the watcher's first successful poll).
+    const settings = getSettings();
+    const mode = systemState.mode as TradingMode;
+    let equityCurveAccount = account;
+    if (settings.accountSource === AccountSource.BROWSER && mode === TradingMode.LIVE) {
+      const snapshot = getLatestBrowserAccountSnapshot();
+      if (snapshot?.brokerAccountId) {
+        equityCurveAccount = await ensureAccountForBrokerId(snapshot.brokerAccountId, snapshot.accountName ?? snapshot.brokerAccountId);
+      }
     }
-    await this.emit({ type: "equity_update", accountId: account.id, equity: equity.toString(), time: time.toISOString() });
+
+    const now = Date.now();
+    const lastAt = lastEquityPointAt.get(equityCurveAccount.id) ?? 0;
+    if (now - lastAt >= EQUITY_POINT_MIN_INTERVAL_MS) {
+      lastEquityPointAt.set(equityCurveAccount.id, now);
+      await recordEquityPoint(
+        equityCurveAccount.id,
+        equity,
+        new Decimal(equityCurveAccount.startingBalance.toString()),
+        time,
+        this.brokerKindForMode(mode)
+      );
+    }
+    await this.emit({ type: "equity_update", accountId: equityCurveAccount.id, equity: equity.toString(), time: time.toISOString() });
   }
 
   // Called only when a genuinely new, completed bar is available (once per
@@ -318,33 +386,86 @@ export class TradingEngine {
   // 2026-07-15: trade #122 sat "open" for hours after TopstepX's bracket had
   // already closed it for a real, positive P&L). Now: once price crosses the
   // stop/target level in our own bar data, confirm what's actually true on
-  // the broker before acting, rather than assuming either "it already closed
-  // itself" or "it needs closing":
+  // the broker before acting:
   //   - confirmed flat (bracket did its job) -> just sync our record
-  //   - confirmed still open (bracket failed to fire) -> this is the
-  //     dangerous case from trade #121 (unprotected position past its
-  //     intended exit) -- force-close it now
-  //   - can't tell either way -> don't guess; log loudly for manual review
+  //   - confirmed still open, OR can't tell either way -> actively close it
+  //     now (2026-07-19 operator report: a position that stayed open
+  //     because isPositionFlat kept returning "can't tell" was exactly this
+  //     gap -- "don't guess" is the right call for deciding *whether the
+  //     broker's bracket already fired*, but the wrong call for deciding
+  //     whether to act at all once our own stop/target has clearly been
+  //     crossed; an unprotected position past its intended exit is worse
+  //     than the small chance of a redundant close attempt). Tries the
+  //     dedicated Close-Position button first, and falls back to flattening
+  //     with an opposite-side order of the same quantity (reusing the same
+  //     Buy/Sell click path already proven reliable for entries) if that
+  //     doesn't work.
   private async manageLiveOpenTrade(account: Account, openTrade: Trade, symbol: string, barTime: Date, h: Decimal, l: Decimal): Promise<void> {
+    const broker = this.brokerForTrade(openTrade);
+    const brokerAccountId = (await broker.getAccounts())[0]!.accountId;
     const stopPrice = new Decimal(openTrade.stopPrice.toString());
     const takeProfitPrice = openTrade.takeProfitPrice ? new Decimal(openTrade.takeProfitPrice.toString()) : null;
+    const entryPrice = new Decimal(openTrade.entryPrice.toString());
+    const side = openTrade.side as "long" | "short";
 
-    let hitStop: boolean;
-    let hitTarget: boolean;
-    if (openTrade.side === "long") {
-      hitStop = l.lte(stopPrice);
-      hitTarget = takeProfitPrice !== null && h.gte(takeProfitPrice);
-    } else {
-      hitStop = h.gte(stopPrice);
-      hitTarget = takeProfitPrice !== null && l.lte(takeProfitPrice);
+    // v1.3: once price reaches halfway to the take-profit target, place a
+    // real broker-side Trailing Stop order and stop relying on our own
+    // internal stopPrice check below for this trade going forward -- see
+    // risk/stops.ts's hasReachedTrailingStopActivation/activateTrailingStop.
+    let trailingStopPlaced = openTrade.trailingStopPlaced;
+    if (!trailingStopPlaced && takeProfitPrice !== null && hasReachedTrailingStopActivation(entryPrice, takeProfitPrice, side, h, l)) {
+      trailingStopPlaced = await this.activateTrailingStop(openTrade, symbol);
     }
+
+    // Automates the clear-pos skill: previously, isPositionFlat was only
+    // ever checked *after* our own stored stop/target levels were crossed
+    // below -- a phantom trade that was never really filled (the click
+    // succeeded but the broker silently rejected the order -- see
+    // execution/engine.ts's known fill-verification gap) or a position
+    // closed out-of-band could otherwise sit "open" here indefinitely,
+    // waiting for a price level that may never line up with real action.
+    // Checking unconditionally, every tick, means it gets reconciled
+    // automatically instead of requiring the operator to notice on the
+    // dashboard and ask for it by hand.
+    const isFlatNow = await broker.isPositionFlat?.(symbol);
+    if (isFlatNow === true) {
+      if (trailingStopPlaced) {
+        // A real trailing-stop order was genuinely resting -- likely a real
+        // fill. Its actual (server-side, trailed) trigger level isn't
+        // visible to us, so this bar's adverse extreme is the best estimate.
+        const exitPrice = side === "long" ? l : h;
+        await this.closeTrade(account, { symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason: "stop", customTag: "estimated_from_trailing_stop" });
+        logger.info({ symbol, tradeId: openTrade.id }, "live_trade_closed_via_trailing_stop");
+      } else {
+        // No real protective order was ever resting for this trade -- could
+        // be a phantom that was never really filled, or a real position
+        // closed out-of-band; no reliable exit economics exist for either
+        // case (see reconcileBrokerFlatTrade).
+        await this.reconcileBrokerFlatTrade(openTrade);
+      }
+      return;
+    }
+
+    // letItRide (Positions panel operator override, v1.3) cancels the
+    // internal take-profit check -- from then on only a real fill (the
+    // trailing stop, or a manual close) can end the trade.
+    const hitTarget = !openTrade.letItRide && takeProfitPrice !== null && (side === "long" ? h.gte(takeProfitPrice) : l.lte(takeProfitPrice));
+    // Once a real trailing-stop order is resting, IT -- not our stored
+    // stopPrice -- is this trade's downside protection; a broker-driven fill
+    // is caught by the isPositionFlat check above instead, since the real
+    // trailing level (tracked server-side on TopstepX) can differ from
+    // whatever stopPrice was computed at entry.
+    const hitStop = !trailingStopPlaced && (side === "long" ? l.lte(stopPrice) : h.gte(stopPrice));
+
     if (!hitStop && !hitTarget) return;
 
     const exitReason: "stop" | "target" = hitStop ? "stop" : "target";
     const exitPrice = hitStop ? stopPrice : takeProfitPrice!;
-    const broker = this.brokerForTrade(openTrade);
-    const brokerAccountId = (await broker.getAccounts())[0]!.accountId;
 
+    // Re-check right here (not just reuse isFlatNow from above) --
+    // requestClosePosition's own DOM interaction takes real time below, and
+    // TopstepX's bracket can fill for real in the window since isFlatNow was
+    // last read.
     const isFlat = await broker.isPositionFlat?.(symbol);
 
     if (isFlat === true) {
@@ -354,17 +475,75 @@ export class TradingEngine {
       // trade #122 reconciliation this replaces.
       await this.closeTrade(account, { symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: "estimated_from_bracket" });
       logger.info({ symbol, tradeId: openTrade.id, exitReason, exitPrice: exitPrice.toString() }, "live_trade_closed_synced_from_broker");
-    } else if (isFlat === false) {
-      logger.error({ symbol, tradeId: openTrade.id, exitReason }, "live_bracket_failed_forcing_close");
-      const closeResult = await broker.requestClosePosition?.(symbol);
-      if (closeResult && closeResult.status !== "rejected") {
-        await this.closeTrade(account, { symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: "forced_after_bracket_failure" });
-      } else {
-        logger.error({ symbol, tradeId: openTrade.id, error: closeResult?.error }, "live_forced_close_failed");
-      }
-    } else {
-      logger.warn({ symbol, tradeId: openTrade.id, exitReason }, "live_trade_past_exit_position_state_unknown");
+      return;
     }
+
+    logger.error({ symbol, tradeId: openTrade.id, exitReason, isFlat }, "live_position_past_exit_forcing_close");
+
+    let closeResult = await broker.requestClosePosition?.(symbol);
+    let closeTag = "forced_after_bracket_failure";
+
+    if (!closeResult || closeResult.status === "rejected") {
+      // Re-check right here, not just once at the top -- requestClosePosition's
+      // own DOM interaction takes real time, and TopstepX's bracket can fill
+      // for real in that window. flattenPosition places a raw opposite-side
+      // MARKET order with no awareness of whether anything is actually still
+      // open: firing it against an already-flat position doesn't close
+      // anything, it OPENS a new unwanted position (2026-07-19 incident: this
+      // exact race left an untracked phantom long on the real account after
+      // trade #156's short had already been closed by the broker's own
+      // bracket -- see trade #157's reconciliation note).
+      const stillOpen = await broker.isPositionFlat?.(symbol);
+      if (stillOpen === true) {
+        logger.info({ symbol, tradeId: openTrade.id }, "position_closed_itself_during_close_attempt_skipping_flatten");
+        await this.closeTrade(account, { symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: "estimated_from_bracket" });
+        return;
+      }
+      logger.warn({ symbol, tradeId: openTrade.id, error: closeResult?.error }, "close_position_failed_falling_back_to_flatten");
+      closeResult = await broker.flattenPosition?.(symbol, openTrade.side as "long" | "short", openTrade.quantity);
+      closeTag = "forced_close_via_opposite_order";
+    }
+
+    if (closeResult && closeResult.status !== "rejected") {
+      await this.closeTrade(account, { symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: closeTag });
+    } else {
+      logger.error({ symbol, tradeId: openTrade.id, error: closeResult?.error }, "live_forced_close_failed");
+    }
+  }
+
+  // v1.3: places the real broker-side Trailing Stop order that supersedes
+  // this trade's internal stopPrice check (see manageLiveOpenTrade above and
+  // risk/stops.ts's hasReachedTrailingStopActivation). Returns false (and
+  // leaves trailingStopPlaced unset) on any failure -- the caller retries on
+  // the next tick rather than silently leaving the trade unprotected.
+  private async activateTrailingStop(openTrade: Trade, symbol: string): Promise<boolean> {
+    const broker = this.brokerForTrade(openTrade);
+    if (!broker.placeTrailingStop) {
+      logger.warn({ symbol, tradeId: openTrade.id }, "trailing_stop_not_supported_by_broker");
+      return false;
+    }
+
+    const result = await broker.placeTrailingStop(symbol, openTrade.side as "long" | "short", openTrade.quantity, TRAILING_STOP_DISTANCE_TICKS);
+    if (result.status === "rejected") {
+      logger.warn({ symbol, tradeId: openTrade.id, error: result.error }, "trailing_stop_activation_failed");
+      return false;
+    }
+
+    await prisma.trade.update({ where: { id: openTrade.id }, data: { trailingStopPlaced: true } });
+    await prisma.orderRecord.create({
+      data: {
+        tradeId: openTrade.id,
+        brokerOrderId: result.brokerOrderId,
+        accountId: openTrade.accountId,
+        symbol,
+        orderType: "trailing_stop",
+        side: openTrade.side === "long" ? "sell" : "buy",
+        quantity: openTrade.quantity,
+        status: "pending",
+      },
+    });
+    logger.info({ symbol, tradeId: openTrade.id, trailTicks: TRAILING_STOP_DISTANCE_TICKS }, "trailing_stop_activated");
+    return true;
   }
 
   private trackExcursion(trade: { id: number; side: string; entryPrice: unknown }, h: Decimal, l: Decimal): void {
@@ -377,6 +556,35 @@ export class TradingEngine {
 
     const existing = tradeExcursion.get(trade.id) ?? { mfe: new Decimal(0), mae: new Decimal(0) };
     tradeExcursion.set(trade.id, { mfe: Decimal.max(existing.mfe, favorableMove), mae: Decimal.max(existing.mae, adverseMove) });
+  }
+
+  // Automates the clear-pos skill for the one case closeTrade can't cover:
+  // a trade with no real protective order ever resting (trailingStopPlaced
+  // false), where the broker now reports flat but our own price levels
+  // never crossed. Two indistinguishable real causes -- a phantom trade
+  // that was never actually filled (see execution/engine.ts's known fill-
+  // verification gap), or a real position closed entirely out-of-band (the
+  // operator closing it directly, a lockout, anything broker-side) -- and
+  // neither has a reliable exit price or pnl to report, so both are left
+  // null rather than fabricated, exactly matching the clear-pos skill's own
+  // manual convention.
+  private async reconcileBrokerFlatTrade(trade: Trade): Promise<void> {
+    const today = new Date().toISOString().slice(0, 10);
+    await prisma.trade.update({
+      where: { id: trade.id },
+      data: {
+        status: "closed",
+        exitTime: new Date(),
+        exitReason: "auto_reconciled",
+        explanation:
+          `${trade.explanation} [AUTO-RECONCILED ${today}: TopstepX confirmed no open position for this symbol, ` +
+          `but this trade had no real protective order ever resting -- either a phantom trade that was never ` +
+          `really filled, or a real position closed out-of-band. exit_price/pnl intentionally left null, since ` +
+          `neither can be reliably determined for either case (see the clear-pos skill).]`,
+      },
+    });
+    logger.warn({ symbol: trade.symbol, tradeId: trade.id }, "trade_auto_reconciled_broker_flat");
+    await this.emit({ type: "trade_closed", tradeId: trade.id, symbol: trade.symbol, pnl: "0", explanation: "auto-reconciled: broker confirmed no open position" });
   }
 
   private async closeTrade(account: Account, closed: ClosedSimTrade): Promise<void> {
@@ -401,9 +609,13 @@ export class TradingEngine {
     const tagNote =
       closed.customTag === "estimated_from_bracket"
         ? " [exit price is an ESTIMATE from the configured stop/target, not a confirmed fill -- TopstepX's own bracket order closed this position server-side]"
-        : closed.customTag === "forced_after_bracket_failure"
-          ? " [bracket failed to fire -- this app force-closed the position after price crossed the stop/target level]"
-          : "";
+        : closed.customTag === "estimated_from_trailing_stop"
+          ? " [exit price is an ESTIMATE (this bar's adverse extreme), not a confirmed fill -- the real broker-side Trailing Stop order (v1.3) closed this position server-side, and its actual trailing level isn't visible to this app]"
+          : closed.customTag === "forced_after_bracket_failure"
+            ? " [bracket failed to fire -- this app force-closed the position after price crossed the stop/target level]"
+            : closed.customTag === "forced_close_via_opposite_order"
+              ? " [bracket failed to fire and the Close-Position button didn't work either -- this app force-closed the position with an opposite-side order after price crossed the stop/target level]"
+              : "";
     await prisma.trade.update({
       where: { id: trade.id },
       data: {
@@ -444,7 +656,7 @@ export class TradingEngine {
     const settings = getSettings();
     const gatedByVersion = new Map<StrategyVersion, GatedScore>();
     const scoreIdByVersion = new Map<StrategyVersion, number>();
-    for (const version of STRATEGY_VERSIONS) {
+    for (const version of [...STRATEGY_VERSIONS, ...SHADOW_ONLY_VERSIONS]) {
       // v3 runs last (see STRATEGY_VERSIONS order), so v1/v2's results are
       // already in gatedByVersion by the time it's v3's turn -- passed
       // through so v3 can hard-override to "taken" when both v1 and v2
@@ -509,8 +721,9 @@ export class TradingEngine {
     newsStatus: NewsRiskStatus;
     bars: OhlcBar[];
     barTime: Date;
+    emaTrend: EmaTrend;
   }): Promise<{ outcome: "consensus_not_reached" | "risk_rejected" | "kill_switch" | "executed"; executed: boolean }> {
-    const { consensus, gatedByVersion, scoreIdByVersion, account, mode, symbol, side, strategyId, structureSwingPrice, signalKind, breakoutLevelPrice, closePrice, atrValue, instrument, regime, newsStatus, bars, barTime } = params;
+    const { consensus, gatedByVersion, scoreIdByVersion, account, mode, symbol, side, strategyId, structureSwingPrice, signalKind, breakoutLevelPrice, closePrice, atrValue, instrument, regime, newsStatus, bars, barTime, emaTrend } = params;
 
     if (!consensus.taken || !consensus.representativeVersion) {
       // Was worth persistently logging -- at least one version said "taken"
@@ -551,6 +764,7 @@ export class TradingEngine {
       signalKind, breakoutLevelPrice,
       accountState, limits,
       pointValue: instrument.pointValue, tickSize: instrument.tickSize, newsStatus, bars,
+      averageProbability: consensus.averageProbability,
     });
 
     if (assessment.tripKillSwitch) {
@@ -574,6 +788,38 @@ export class TradingEngine {
     const decisionExplanation = decisionExplanationPrefix + explainScore(symbol, side, decisionGated, settings.minScoreThreshold);
     const broker = this.brokerForMode(mode);
     const brokerAccountId = (await broker.getAccounts())[0]!.accountId;
+    const brokerKind = this.brokerKindForMode(mode);
+
+    // Resting-limit-order path (Execution Decision Engine) instead of an
+    // immediate market order -- gated on broker kind, not trading mode,
+    // since brokerKindForMode only ever returns BROWSER_CONTROL when mode is
+    // already LIVE (paper/analysis-only always resolve to SIMULATED above),
+    // and SimulatedBroker doesn't implement isPositionFlat/cancelRestingOrder
+    // that this path depends on (see executionDecisionEngine.ts's header).
+    // Read fresh from the DB (not settings.executionDecisionEngineEnabled,
+    // which is parsed from env once and cached for the process's lifetime)
+    // so the dashboard toggle (see api/routes/system.ts) takes effect
+    // immediately, same as the mode/kill-switch toggles.
+    const executionDecisionEngineEnabled = (await getSystemState()).executionDecisionEngineEnabled;
+    if (executionDecisionEngineEnabled && brokerKind === BrokerKind.BROWSER_CONTROL) {
+      const edeResult = await evaluateExecutionOpportunity({
+        symbol, side, strategyId, signalScore: decisionGated.probability,
+        currentPrice: closePrice, atrValue, tickSize: instrument.tickSize,
+        stopPrice: assessment.stopPrice!, takeProfitPrice: assessment.takeProfitPrice,
+        quantity: assessment.quantity, bars, barTime, emaTrend,
+        broker, brokerKind, accountId: account.id, brokerAccountId,
+        regimeTrend: regime.trendLabel, regimeVol: regime.volLabel,
+        explanation: decisionExplanation, scoreId: decisionScoreId,
+      });
+      await this.emit({ type: "execution", symbol, executed: edeResult.action === "filled", reason: edeResult.reason, tradeId: edeResult.tradeId });
+      // waiting/already_resting/placed_resting_order/cancelled all mean "no
+      // position opened (yet)" from this tick's point of view -- only a
+      // confirmed fill is a real trade. kill_switch/risk_rejected/
+      // consensus_not_reached are already handled above and don't reach
+      // here, so "executed" is the only outcome bucket left that fits.
+      return { outcome: "executed", executed: edeResult.action === "filled" };
+    }
+
     // executeIfApproved only ever reads signal.symbol/side/strategyId --
     // structureSwingPrice on this object is unused there (it already fed the
     // stop-plan computation via RiskEngine.assessNewTrade above), so a
@@ -586,7 +832,7 @@ export class TradingEngine {
       breakoutLevelPrice: breakoutLevelPrice ?? undefined,
     };
     const result = await executeIfApproved(
-      broker, this.brokerKindForMode(mode), mode, account.id, brokerAccountId, signalForExecution, decisionGated, assessment,
+      broker, brokerKind, mode, account.id, brokerAccountId, signalForExecution, decisionGated, assessment,
       closePrice, regime.trendLabel, regime.volLabel, decisionExplanation, barTime, decisionScoreId
     );
     await this.emit({ type: "execution", symbol, executed: result.executed, reason: result.reason, tradeId: result.tradeId });
@@ -598,10 +844,9 @@ export class TradingEngine {
     if (bars.length < MIN_BARS_FOR_REGIME) return;
 
     const regime = classifyRegime(bars);
-    await prisma.regimeSnapshot.upsert({
-      where: { time_symbol: { time: barTime, symbol } },
-      update: { trendLabel: regime.trendLabel, volLabel: regime.volLabel, confidence: regime.confidence.toString(), features: JSON.parse(JSON.stringify(regime.features)) },
-      create: { time: barTime, symbol, trendLabel: regime.trendLabel, volLabel: regime.volLabel, confidence: regime.confidence.toString(), features: JSON.parse(JSON.stringify(regime.features)) },
+    setLatestRegimeSnapshot(symbol, {
+      time: barTime, trendLabel: regime.trendLabel, volLabel: regime.volLabel,
+      confidence: regime.confidence.toString(), features: JSON.parse(JSON.stringify(regime.features)),
     });
     await this.emit({ type: "regime", symbol, trendLabel: regime.trendLabel, volLabel: regime.volLabel, confidence: regime.confidence });
 
@@ -611,7 +856,7 @@ export class TradingEngine {
 
     const newsStatus = await getNewsRiskStatus(barTime);
     const openingRangeStats = await getOpeningRangeStats(symbol);
-    const [dailyTrend, higherTimeframeTrends] = await Promise.all([getDailyTrend(symbol), getHigherTimeframeTrends(symbol)]);
+    const [dailyTrend, dailyEma20Trend] = await Promise.all([getDailyTrend(symbol), getDailyEma20Trend(symbol)]);
     const session = classifySession(barTime);
 
     for (const strategy of ALL_STRATEGIES) {
@@ -649,7 +894,7 @@ export class TradingEngine {
         null, openingRangeBreakoutProbability, openingRangeStats.sessionsAnalyzed,
         dailyTrend.trendLabel, dailyTrend.confidence,
         longTargetEdge?.winRate ?? null, longTargetEdge?.sampleSize ?? 0,
-        riskRewardRatio, getLatestOrderFlowSnapshot(symbol), higherTimeframeTrends
+        riskRewardRatio, getLatestOrderFlowSnapshot(symbol), dailyEma20Trend
       );
 
       // Shadow-score every signal under all three strategy versions in
@@ -669,7 +914,7 @@ export class TradingEngine {
       const result = await this.attemptExecution({
         consensus, gatedByVersion, scoreIdByVersion, account, mode, symbol, side: signal.side, strategyId: signal.strategyId,
         structureSwingPrice: signal.structureSwingPrice, signalKind: signal.signalKind, breakoutLevelPrice: signal.breakoutLevelPrice ?? null,
-        closePrice, atrValue, instrument, regime, newsStatus, bars, barTime,
+        closePrice, atrValue, instrument, regime, newsStatus, bars, barTime, emaTrend: dailyEma20Trend,
       });
       if (result.outcome === "consensus_not_reached" || result.outcome === "risk_rejected") continue;
       return; // one new position per symbol per bar (kill_switch or executed both stop here)
@@ -711,20 +956,52 @@ export class TradingEngine {
 
   private async scanSymbolContinuously(symbol: string, account: Account, mode: TradingMode): Promise<void> {
     const barTime = new Date();
+
+    // Poll any already-resting EDE opportunity for this symbol (both sides)
+    // on every tick -- deliberately BEFORE the bar-dedup/consensus checks
+    // below, since a fill-check gated behind a fresh signal reaching
+    // consensus again silently stops running the moment that signal lapses
+    // (see execution/executionDecisionEngine.ts's header comment on the
+    // 2026-07-20 incident this fixes). Wrapped in try/catch so a broker
+    // hiccup here (e.g. live broker momentarily disconnected) can't block
+    // this tick's regular scoring/analysis below.
+    const brokerKindForPoll = this.brokerKindForMode(mode);
+    if (brokerKindForPoll === BrokerKind.BROWSER_CONTROL) {
+      try {
+        const systemState = await getSystemState();
+        if (systemState.executionDecisionEngineEnabled) {
+          const broker = this.brokerForMode(mode);
+          const pollResults = await pollRestingOpportunities({ symbol, broker, brokerKind: brokerKindForPoll, barTime });
+          for (const pollResult of pollResults) {
+            await this.emit({ type: "execution", symbol, executed: pollResult.action === "filled", reason: pollResult.reason, tradeId: pollResult.tradeId });
+          }
+        }
+      } catch (err) {
+        logger.warn({ symbol, err: String(err) }, "execution_decision_engine_poll_failed");
+      }
+    }
+
     // None of these four depend on each other's result -- they were
     // previously awaited one at a time, paying for each one's DB round-trip
     // (or, on a cache miss, a genuinely expensive aggregate query) serially.
-    const [bars, newsStatus, openingRangeStats, dailyTrend, higherTimeframeTrends] = await Promise.all([
+    const [bars, newsStatus, openingRangeStats, dailyTrend, dailyEma20Trend] = await Promise.all([
       loadRecentBars(symbol, 300),
       getNewsRiskStatus(barTime),
       getOpeningRangeStats(symbol),
       getDailyTrend(symbol),
-      getHigherTimeframeTrends(symbol),
+      getDailyEma20Trend(symbol),
     ]);
     if (bars.length < MIN_BARS_FOR_REGIME) return;
 
     const lastBar = bars[bars.length - 1]!;
     const lastBarTimeMs = lastBar.time.getTime();
+
+    const staleForMs = barTime.getTime() - lastBarTimeMs;
+    if (staleForMs > MAX_CONTINUOUS_SCAN_BAR_STALENESS_MS) {
+      logger.warn({ symbol, lastBarTime: lastBar.time.toISOString(), staleForMs }, "continuous_scan_skipped_stale_data");
+      return;
+    }
+
     if (lastContinuousScanBarTime.get(symbol) === lastBarTimeMs) return; // nothing new since the last tick -- skip the recompute and the duplicate write
     lastContinuousScanBarTime.set(symbol, lastBarTimeMs);
 
@@ -757,7 +1034,7 @@ export class TradingEngine {
           null, openingRangeBreakoutProbability, openingRangeStats.sessionsAnalyzed,
           dailyTrend.trendLabel, dailyTrend.confidence,
           longTargetEdge?.winRate ?? null, longTargetEdge?.sampleSize ?? 0,
-          riskRewardRatio, getLatestOrderFlowSnapshot(symbol), higherTimeframeTrends
+          riskRewardRatio, getLatestOrderFlowSnapshot(symbol), dailyEma20Trend
         );
 
         const strategyId = side === "long" ? CONTINUOUS_SCAN_STRATEGY_IDS[0] : CONTINUOUS_SCAN_STRATEGY_IDS[1];
@@ -795,7 +1072,7 @@ export class TradingEngine {
       const result = await this.attemptExecution({
         consensus, gatedByVersion, scoreIdByVersion, account, mode, symbol, side, strategyId,
         structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
-        closePrice, atrValue, instrument, regime, newsStatus, bars, barTime,
+        closePrice, atrValue, instrument, regime, newsStatus, bars, barTime, emaTrend: dailyEma20Trend,
       });
       if (result.outcome === "kill_switch") return;
     }

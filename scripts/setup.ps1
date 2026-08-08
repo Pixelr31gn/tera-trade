@@ -1,9 +1,8 @@
 # Tera Trade first-time setup.
 # Run this once after extracting the package: installs dependencies for both
-# backend and frontend, creates .env files, generates a real API key
-# automatically, and walks you through connecting a free Neon database
-# (there's no way to create that account for you -- Neon requires you to
-# sign up -- but everything around that one manual step is automated).
+# backend and frontend, creates .env files, generates a real API key and a
+# real Postgres password automatically, and spins up your own local Postgres
+# in Docker -- no hosted database account needed anywhere.
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -45,6 +44,17 @@ if (-not ($chromeCandidates | Where-Object { Test-Path $_ })) {
     Write-Host "Google Chrome was not found in its usual install location. The app can still run, but you'll need to set CHROME_EXECUTABLE_PATH in backend\.env, or install Chrome from https://google.com/chrome." -ForegroundColor Yellow
 }
 
+if (-not (Test-CommandExists "docker")) {
+    Write-Host "Docker was not found on PATH. Tera Trade runs its own local Postgres database in Docker -- install Docker Desktop from https://www.docker.com/products/docker-desktop, make sure it's running, and re-run this script." -ForegroundColor Red
+    exit 1
+}
+docker info *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Docker is installed but doesn't seem to be running. Start Docker Desktop and re-run this script." -ForegroundColor Red
+    exit 1
+}
+Write-Host "Found Docker $(docker --version)"
+
 Write-Host "`nInstalling backend dependencies..." -ForegroundColor Cyan
 Push-Location "$root\backend"
 npm install
@@ -74,30 +84,51 @@ if ([string]::IsNullOrWhiteSpace($currentApiKey) -or $currentApiKey -eq "change-
     $apiKeyToShareWithFrontend = $currentApiKey
 }
 
-# --- Database: guide through Neon, since there's no account to automate around ---
-$currentDbUrl = Get-EnvValue ".env" "DATABASE_URL"
-if ($currentDbUrl -match "ep-example-12345") {
-    Write-Host "`n--- Database setup ---" -ForegroundColor Cyan
-    Write-Host "Opening Neon's project creation page in your browser (free tier, no card needed)."
-    Write-Host "Create a project, then copy its connection string (Dashboard -> Connect -> the 'postgresql://...' string)."
-    Start-Process "https://console.neon.tech/app/projects?modal=create-project"
-    $pasted = Read-Host "`nPaste your Neon connection string here"
-    if ($pasted) {
-        Set-EnvValue ".env" "DATABASE_URL" $pasted
-        Write-Host "Saved to backend\.env." -ForegroundColor Green
-
-        Write-Host "Testing the connection and setting up the database schema..." -ForegroundColor Cyan
-        npx prisma migrate deploy
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Could not connect/migrate -- double check the connection string (it should include ?sslmode=require) and re-run scripts\migrate.ps1 once fixed." -ForegroundColor Red
-        } else {
-            Write-Host "Database connected and schema is up to date." -ForegroundColor Green
-        }
-    } else {
-        Write-Host "Skipped -- set DATABASE_URL in backend\.env yourself, then run scripts\migrate.ps1." -ForegroundColor Yellow
-    }
+# --- Database: your own local Postgres in Docker, no hosted account needed ---
+$rootEnvPath = "$root\.env"
+if (-not (Test-Path $rootEnvPath)) {
+    Copy-Item "$root\.env.example" $rootEnvPath
+    Write-Host "Created .env (repo root) from the template."
+}
+$currentPgPassword = Get-EnvValue $rootEnvPath "POSTGRES_PASSWORD"
+if ([string]::IsNullOrWhiteSpace($currentPgPassword) -or $currentPgPassword -eq "change-me") {
+    $randomBytes = New-Object byte[] 24
+    (New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($randomBytes)
+    $pgPassword = ($randomBytes | ForEach-Object { $_.ToString("x2") }) -join ""
+    Set-EnvValue $rootEnvPath "POSTGRES_PASSWORD" $pgPassword
+    Write-Host "Generated a real POSTGRES_PASSWORD (was the shared placeholder)." -ForegroundColor Green
 } else {
-    Write-Host "`nbackend\.env already has a DATABASE_URL set, leaving it as-is."
+    $pgPassword = $currentPgPassword
+}
+
+Write-Host "`n--- Database setup ---" -ForegroundColor Cyan
+Write-Host "Starting local Postgres in Docker..." -ForegroundColor Cyan
+docker compose -f "$root\docker-compose.yml" --env-file $rootEnvPath up -d
+if ($LASTEXITCODE -ne 0) { Write-Host "docker compose up failed -- see the error above." -ForegroundColor Red; Pop-Location; exit 1 }
+
+Write-Host "Waiting for Postgres to become healthy..."
+$healthy = $false
+for ($i = 0; $i -lt 30; $i++) {
+    $status = docker inspect --format='{{.State.Health.Status}}' teratrade-postgres 2>$null
+    if ($status -eq "healthy") { $healthy = $true; break }
+    Start-Sleep -Seconds 2
+}
+if (-not $healthy) {
+    Write-Host "Postgres didn't report healthy in time -- check 'docker compose logs' in the repo root." -ForegroundColor Red
+    Pop-Location
+    exit 1
+}
+Write-Host "Postgres is up." -ForegroundColor Green
+
+Set-EnvValue ".env" "DATABASE_URL" "postgresql://teratrade:$pgPassword@localhost:5432/teratrade?schema=public"
+Write-Host "Set DATABASE_URL in backend\.env to the local container."
+
+Write-Host "Applying database schema..." -ForegroundColor Cyan
+npx prisma migrate deploy
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Migration failed -- see the error above. Re-run scripts\migrate.ps1 once fixed." -ForegroundColor Red
+} else {
+    Write-Host "Database schema is up to date." -ForegroundColor Green
 }
 Pop-Location
 

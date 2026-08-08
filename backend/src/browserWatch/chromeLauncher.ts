@@ -79,7 +79,17 @@ export async function ensureDebugChromeRunning(opts: {
     return;
   }
 
-  const executable = opts.executablePath ?? findChromeExecutable();
+  // `||`, not `??` -- CHROME_EXECUTABLE_PATH/CHROME_DEBUG_USER_DATA_DIR come
+  // through zod's `z.string().optional()` (core/config.ts), which yields ""
+  // (not undefined) for a blank `KEY=` line in .env -- the standard, default,
+  // documented way to leave these unset. `??` only falls through on
+  // null/undefined, so an empty string silently skipped auto-detection
+  // entirely (confirmed live, 2026-07-29: chrome_executable_not_found fired
+  // immediately on every run with the default blank config, even with a real
+  // Chrome install sitting at one of findChromeExecutable's own candidate
+  // paths) -- this broke the auto-launch feature's whole purpose for anyone
+  // using the recommended default (blank) configuration.
+  const executable = opts.executablePath || findChromeExecutable();
   if (!executable) {
     logger.warn(
       { platform: process.platform },
@@ -88,7 +98,7 @@ export async function ensureDebugChromeRunning(opts: {
     return;
   }
 
-  const userDataDir = opts.userDataDir ?? defaultUserDataDir();
+  const userDataDir = opts.userDataDir || defaultUserDataDir();
   const port = extractPort(opts.cdpUrl);
 
   logger.info({ executable, userDataDir, port }, "launching_debug_chrome");

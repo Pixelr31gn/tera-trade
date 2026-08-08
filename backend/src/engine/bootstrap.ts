@@ -41,6 +41,38 @@ export async function ensureDefaultAccount(): Promise<Account> {
   return account;
 }
 
+// TopstepX's funded-account starting balance depends on account *type*, not
+// just its size tier -- confirmed live 2026-07-21 by the operator's own
+// three real accounts: "$50K EXPRESS" starts at $0 (Express accounts fund
+// differently -- there's no evaluation-phase balance to inherit), while
+// "50K DLL COMBINE" / "100K DLL COMBINE" start at their full size tier
+// ($50,000 / $100,000). Falls back to $50,000 for an unrecognized name shape
+// rather than guessing at $0, since that's the more common case among
+// existing accounts and was the previous fixed default.
+export function inferStartingBalance(accountName: string): string {
+  if (/express/i.test(accountName)) return "0";
+  const sizeMatch = accountName.match(/(\d+)\s*K/i);
+  if (sizeMatch) return String(Number(sizeMatch[1]) * 1000);
+  return "50000";
+}
+
+// Separate from ensureDefaultAccount -- trades and risk-limit tracking
+// deliberately still use the single shared "default" account (2026-07-21
+// scoping decision), so this exists purely to give each real TopstepX
+// account (identified by its scraped brokerAccountId, e.g.
+// "50KTC-V2-DLL-170199-51281387") its own row for equity-curve history,
+// instead of blending every account an operator switches through in the
+// browser into one curve. No RiskLimit row is created for these -- nothing
+// reads risk limits against them, only equity_curve rows key off their id.
+export async function ensureAccountForBrokerId(brokerAccountId: string, name: string): Promise<Account> {
+  const existing = await prisma.account.findFirst({ where: { brokerAccountId } });
+  if (existing) return existing;
+
+  return prisma.account.create({
+    data: { name, brokerAccountId, startingBalance: inferStartingBalance(name), isActive: true },
+  });
+}
+
 export async function loadRecentBars(symbol: string, limit = 300): Promise<OhlcBar[]> {
   const rows = await prisma.bar.findMany({
     where: { symbol },

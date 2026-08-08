@@ -59,3 +59,33 @@ export function computePositionSize(
   }
   return { quantity, riskAmount, stopDistancePoints, cappedByMaxPosition: capped, reason };
 }
+
+/**
+ * Confidence-tier sizing (2026-07-20, operator request): quantity is set
+ * directly by the cross-version consensus average, not derived from the
+ * dollar-risk budget -- the dollar-based computePositionSize above was
+ * almost always landing on 1 contract regardless of how confident a setup
+ * was (a wide-but-valid stop against a fixed $50 budget floors there most
+ * of the time), which meant real conviction differences between setups
+ * never showed up as position size. Real $ risk now scales with the tier
+ * (quantity x stop distance x point value), not the other way around --
+ * a deliberate tradeoff the operator chose explicitly over keeping the
+ * dollar budget as a hard ceiling.
+ */
+const CONFIDENCE_TIERS: [minAverageProbability: number, quantity: number][] = [
+  [0.82, 3],
+  [0.71, 2],
+  [0.65, 1],
+];
+
+export function computeConfidenceTierQuantity(averageProbability: number, maxPositionSize: number): number {
+  // Consensus requires at least 2/3 versions to individually clear the score
+  // threshold to reach execution at all (see engine/loop.ts's
+  // determineConsensus) -- the *average* can still land below 65% in that
+  // case (e.g. two versions just over 65% and a third near 0%). A setup
+  // that already cleared every other gate is never sized to zero for
+  // landing in that gap -- same "never below 1" floor as the dollar-based
+  // sizing above, just re-anchored to confidence tiers instead of dollars.
+  const tierQuantity = CONFIDENCE_TIERS.find(([min]) => averageProbability >= min)?.[1] ?? 1;
+  return Math.min(tierQuantity, maxPositionSize);
+}

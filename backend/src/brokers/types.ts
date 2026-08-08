@@ -102,4 +102,39 @@ export interface BrokerClient {
    * not as either true or false.
    */
   isPositionFlat?(symbol: string): Promise<boolean | null>;
+  /**
+   * Closes a position by placing a plain opposite-side order of `quantity`
+   * (flattening a long means selling, flattening a short means buying) --
+   * no new stop/target bracket is configured, since this is a closing trade,
+   * not a new entry. A fallback for when requestClosePosition's dedicated
+   * "Close" button doesn't work or isn't available: reuses the exact
+   * Buy/Sell click path already proven reliable for entries (2026-07-19
+   * operator request), rather than depending on a second, less-exercised UI
+   * element. Only implemented by brokers that support it (e.g.
+   * BrowserControlBroker).
+   */
+  flattenPosition?(symbol: string, side: "long" | "short", quantity: number): Promise<OrderResult>;
+  /**
+   * Places a real, broker-native trailing-stop order protecting an existing
+   * position -- opposite side from the position itself (sell to protect a
+   * long, buy to protect a short), same quantity, trailing `trailTicks`
+   * ticks behind the best price reached. v1.3: this is what actually
+   * replaces the internal hard-stop-price check once a trade reaches the
+   * halfway-to-target activation point (see engine/loop.ts). A trailing
+   * stop is a resting order, not an immediate fill -- returns `status:
+   * "pending"` on success, same as a limit order. Only implemented by
+   * brokers that support it (e.g. BrowserControlBroker).
+   */
+  placeTrailingStop?(symbol: string, side: "long" | "short", quantity: number, trailTicks: number): Promise<OrderResult>;
+  /**
+   * Cancels every resting order for `symbol` -- not a single order by ID.
+   * The existing `cancelOrder(accountId, brokerOrderId)` method's signature
+   * has no way to carry symbol, and TopstepX's ticket only offers "Cancel
+   * Orders" for the whole symbol anyway (no per-order cancel button), so
+   * this is a separate, symbol-scoped method rather than a forced fit into
+   * the existing one (2026-07-20, Execution Decision Engine's time-decay/
+   * opportunity-cost cancellation). Only implemented by brokers that support
+   * it (e.g. BrowserControlBroker).
+   */
+  cancelRestingOrder?(symbol: string): Promise<OrderResult>;
 }

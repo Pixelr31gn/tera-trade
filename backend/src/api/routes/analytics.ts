@@ -99,7 +99,7 @@ async function computeVersionDivergence() {
   // v2 stopped receiving new scores 2026-07-14 but stays in this comparison
   // -- its historical rows are still there and still worth being able to
   // recall/compare against, per the reason it's kept in the DB at all.
-  const versions = ["v1", "v2", "v3", "v4"] as const;
+  const versions = ["v1", "v2", "v3", "v4", "v5"] as const;
   const rows = await prisma.score.findMany({
     where: { strategyVersion: { in: [...versions] }, time: { gte: analyticsLookbackSince() } },
     select: { time: true, symbol: true, strategyId: true, strategyVersion: true, decision: true, outcomeLabel: true },
@@ -244,7 +244,7 @@ function summarizeSessionScores(session: TradingSession, rows: SessionScoreRow[]
 const ALL_SESSIONS: TradingSession[] = [TradingSession.NEW_YORK, TradingSession.LONDON, TradingSession.ASIAN];
 
 /** One query for every session (optionally scoped to one strategy version), grouped in memory -- see summarizeSessionScores's comment for why this replaces N per-session round trips. */
-async function computeSessionPerformanceForAllSessions(strategyVersion?: "v1" | "v2" | "v3" | "v4"): Promise<Record<TradingSession, ReturnType<typeof summarizeSessionScores>>> {
+async function computeSessionPerformanceForAllSessions(strategyVersion?: "v1" | "v2" | "v3" | "v4" | "v5"): Promise<Record<TradingSession, ReturnType<typeof summarizeSessionScores>>> {
   const rows = await prisma.score.findMany({
     where: { time: { gte: analyticsLookbackSince() }, ...(strategyVersion ? { strategyVersion } : {}) },
     select: { session: true, outcomeLabel: true, outcomeRMultiple: true, marketStructureLabel: true, liquidityLabel: true, priceActionLabel: true },
@@ -263,8 +263,8 @@ async function computeSessionPerformanceForAllSessions(strategyVersion?: "v1" | 
 }
 
 /** One query covering every (version, session) combination, grouped in memory -- replaces what was 9 separate round trips. */
-async function computeStrategyComparison(): Promise<Record<"v1" | "v2" | "v3" | "v4", Record<TradingSession, ReturnType<typeof summarizeSessionScores>>>> {
-  const versions = ["v1", "v2", "v3", "v4"] as const;
+async function computeStrategyComparison(): Promise<Record<"v1" | "v2" | "v3" | "v4" | "v5", Record<TradingSession, ReturnType<typeof summarizeSessionScores>>>> {
+  const versions = ["v1", "v2", "v3", "v4", "v5"] as const;
   const rows = await prisma.score.findMany({
     where: { time: { gte: analyticsLookbackSince() }, strategyVersion: { in: [...versions] } },
     select: { session: true, strategyVersion: true, outcomeLabel: true, outcomeRMultiple: true, marketStructureLabel: true, liquidityLabel: true, priceActionLabel: true },
@@ -278,7 +278,7 @@ async function computeStrategyComparison(): Promise<Record<"v1" | "v2" | "v3" | 
     byVersionSession.set(key, list);
   }
 
-  const results = {} as Record<"v1" | "v2" | "v3" | "v4", Record<TradingSession, ReturnType<typeof summarizeSessionScores>>>;
+  const results = {} as Record<"v1" | "v2" | "v3" | "v4" | "v5", Record<TradingSession, ReturnType<typeof summarizeSessionScores>>>;
   for (const version of versions) {
     results[version] = {} as Record<TradingSession, ReturnType<typeof summarizeSessionScores>>;
     for (const session of ALL_SESSIONS) {

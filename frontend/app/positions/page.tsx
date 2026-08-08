@@ -25,6 +25,22 @@ export default function PositionsPage() {
     }
   }
 
+  async function letItRide(tradeId: number, symbol: string) {
+    if (
+      !(await confirm(
+        `Let the ${symbol} position ride past its take-profit target? This cancels the automatic take-profit close -- from then on, only the trailing stop (or a manual close) will end this trade. This can't be undone from here.`
+      ))
+    )
+      return;
+    setError(null);
+    try {
+      await apiFetch(`/api/positions/${tradeId}/let-it-ride`, { method: "POST" });
+      mutate();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to enable let-it-ride");
+    }
+  }
+
   return (
     <div className="space-y-6">
       <Panel
@@ -43,6 +59,7 @@ export default function PositionsPage() {
               <th>Target</th>
               <th>Strategy</th>
               <th>Score</th>
+              <th>Protection</th>
               <th>Explanation</th>
               <th></th>
             </tr>
@@ -60,14 +77,30 @@ export default function PositionsPage() {
                 <td className="text-good">{p.takeProfitPrice ?? "-"}</td>
                 <td className="text-gray-400">{p.strategyId}</td>
                 <td>{p.score !== null ? `${(p.score * 100).toFixed(0)}%` : "-"}</td>
+                <td>
+                  <div className="flex gap-1">
+                    <Badge text={p.trailingStopPlaced ? "trailing" : "hard stop"} tone={p.trailingStopPlaced ? "good" : "neutral"} />
+                    {p.letItRide && <Badge text="riding" tone="warn" />}
+                  </div>
+                </td>
                 <td className="max-w-xl text-gray-300">{p.explanation}</td>
                 <td>
-                  <button
-                    onClick={() => closePosition(p.tradeId, p.symbol)}
-                    className="whitespace-nowrap rounded-md bg-bad/20 px-2.5 py-1 text-xs font-medium text-bad hover:bg-bad/30"
-                  >
-                    Close
-                  </button>
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={() => closePosition(p.tradeId, p.symbol)}
+                      className="whitespace-nowrap rounded-md bg-bad/20 px-2.5 py-1 text-xs font-medium text-bad hover:bg-bad/30"
+                    >
+                      Close
+                    </button>
+                    {!p.letItRide && (
+                      <button
+                        onClick={() => letItRide(p.tradeId, p.symbol)}
+                        className="whitespace-nowrap rounded-md bg-warn/20 px-2.5 py-1 text-xs font-medium text-warn hover:bg-warn/30"
+                      >
+                        Let it ride
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}

@@ -6,7 +6,7 @@
  * not a separate, stale approximation.
  */
 import { Decimal } from "decimal.js";
-import { computePositionSize } from "./sizing.js";
+import { computeConfidenceTierQuantity, computePositionSize } from "./sizing.js";
 import { computeInitialStop } from "./stops.js";
 
 export interface TradePlan {
@@ -41,11 +41,27 @@ export function computeTradePlan(params: {
   riskAmount: Decimal;
   profitDollars: Decimal | null;
   maxPositionSize: number;
+  /** Cross-version consensus average probability (0-1) -- sets quantity directly via confidence tiers (see risk/sizing.ts's computeConfidenceTierQuantity), replacing the dollar-risk-derived quantity below (2026-07-20, operator request). */
+  averageProbability: number;
+  /** Overrides stops.ts's default 3:1 -- see risk/engine.ts's assessNewTrade for why every real trade now passes 2:1 (2026-07-29, operator request tied to v5 becoming a required execution gate). */
+  takeProfitRMultiple?: Decimal;
 }): TradePlan {
-  const { side, entryPrice, atrValue, structureSwingPrice, tickSize, pointValue, riskAmount, profitDollars, maxPositionSize } = params;
+  const { side, entryPrice, atrValue, structureSwingPrice, tickSize, pointValue, riskAmount, profitDollars, maxPositionSize, averageProbability, takeProfitRMultiple } = params;
 
-  const stopPlan = computeInitialStop(entryPrice, side, atrValue, structureSwingPrice, { tickSize });
-  const sizing = computePositionSize(riskAmount, stopPlan.stopDistancePoints, pointValue, maxPositionSize);
+  const stopPlan = computeInitialStop(entryPrice, side, atrValue, structureSwingPrice, { tickSize, takeProfitRMultiple });
+  // Dollar-based sizing is still computed -- its `reason` documents what the
+  // $ budget alone would have sized to, for comparison against the
+  // confidence-tier quantity that's actually used below.
+  const dollarSizing = computePositionSize(riskAmount, stopPlan.stopDistancePoints, pointValue, maxPositionSize);
+  const confidenceQuantity = computeConfidenceTierQuantity(averageProbability, maxPositionSize);
+  const quantity = dollarSizing.quantity > 0 ? confidenceQuantity : 0; // no stop, no trade -- see computePositionSize's own zero-quantity cases
+
+  const riskPerContract = stopPlan.stopDistancePoints.times(pointValue);
+  const actualRiskDollarsAtTier = riskPerContract.times(quantity);
+  const sizing = {
+    quantity,
+    reason: `confidence tier: ${Math.round(averageProbability * 100)}% avg -> ${quantity} contract(s) (actual risk $${actualRiskDollarsAtTier.toFixed(2)}). Dollar-budget sizing alone: ${dollarSizing.reason}`,
+  };
 
   let stopPrice = stopPlan.stopPrice;
   let stopDistancePoints = stopPlan.stopDistancePoints;

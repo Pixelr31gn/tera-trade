@@ -9,7 +9,7 @@
 
 # Tera Trade Software License Agreement
 
-**Licensor**: [YOUR NAME / BUSINESS NAME]
+**Licensor**: Genesislinx LLC
 **Effective upon**: the Licensee's first use of the Software, or acceptance during setup,
 whichever is earlier.
 

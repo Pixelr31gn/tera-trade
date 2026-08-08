@@ -19,6 +19,7 @@ describe("computeTradePlan -- minimum risk:reward floor", () => {
       riskAmount: new Decimal(65),
       profitDollars: new Decimal(130),
       maxPositionSize: 3,
+      averageProbability: 0.82, // 82%+ tier -> 3 contracts (quantity is now confidence-tier-driven, not dollar-derived)
     });
 
     expect(plan.quantity).toBe(3);

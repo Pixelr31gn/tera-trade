@@ -15,7 +15,8 @@ import { getSettings } from "../core/config.js";
 import type { TradingSession } from "../analytics/session.js";
 import type { SetupFeatures } from "./features.js";
 import { scoreSetup, type FactorContribution, type StrategyVersion } from "./ruleScorer.js";
-import { computeBreakoutStrengthAdjustment, computeFibAdjustment, computeOrderFlowAdjustment, computePpmAdjustment, computeRiskRewardAdjustment, computeTimeframeAlignmentAdjustment, computeV3Bucket, scoreSetupV3Directional } from "./ruleScorerV3.js";
+import { computeBreakoutStrengthAdjustment, computeEmaProximityAdjustment, computeFibAdjustment, computeOrderFlowAdjustment, computePpmAdjustment, computeRiskRewardAdjustment, computeV3Bucket, scoreSetupV3Directional } from "./ruleScorerV3.js";
+import { scoreSetupV5 } from "./ruleScorerV5.js";
 import { computeHistoricalAdjustment } from "./v3HistoricalAdjustment.js";
 import { MLScorer } from "./training.js";
 
@@ -23,7 +24,7 @@ export interface GatedScore {
   probability: number;
   decision: "taken" | "skipped_score";
   factors: FactorContribution[];
-  modelUsed: "rule_v1" | "ml_v4" | "rule_v1_fallback" | "rule_v3";
+  modelUsed: "rule_v1" | "ml_v4" | "rule_v1_fallback" | "rule_v3" | "rule_v5";
   /** Set when a setup that otherwise cleared the probability threshold was blocked by a hard rule (v3's directional-conviction check below) -- lets explainScore report the real reason instead of a misleading "below threshold". */
   blockReason: string | null;
   /** Only set for v3 -- the categorical fingerprint this setup was scored under, persisted on the Score row so future setups can look up how similar-looking ones performed (see v3HistoricalAdjustment.ts). */
@@ -44,8 +45,10 @@ function getMlScorer(session: TradingSession): MLScorer | null {
 // clear the threshold -- if the opposite-direction hypothesis is nearly as
 // strong, that's exactly the ambiguous case the spec says to sit out (its
 // worked example: 66% bullish vs 63% bearish -> no trade, despite 66
-// nominally clearing 65%). Hand-set margin, not fitted.
-const MIN_DIRECTIONAL_MARGIN_POINTS = 10;
+// nominally clearing 65%). Hand-set margin, not fitted. (2026-07-20: lowered
+// 10 -> 7 -- operator judged several 8-9 point margins as good enough to
+// take rather than sit out.)
+const MIN_DIRECTIONAL_MARGIN_POINTS = 7;
 
 /** Pure -- no DB access -- so the override rule itself is directly unit-testable (see tests/scoring.test.ts). */
 export function shouldOverrideToTaken(v1Gated: GatedScore | undefined, v2Gated: GatedScore | undefined): boolean {
@@ -85,13 +88,20 @@ export async function evaluateSetup(
     const fib = computeFibAdjustment(features.fibSwingDirection, features.fibRetracementPct, features.side);
     const ppm = computePpmAdjustment(features.netPointsPerMinute, features.side);
     const orderFlow = computeOrderFlowAdjustment(features.orderFlowSnapshot, features.side);
-    const timeframeAlignment = computeTimeframeAlignmentAdjustment(features.timeframeTrends, features.side);
+    const emaProximity = computeEmaProximityAdjustment(features.intraday5mEmaDistanceAtr, features.side);
 
     const adjustedScore = Math.max(
       0,
       Math.min(
         100,
-        mySide.score + historical.adjustmentPoints + (breakoutStrength?.adjustmentPoints ?? 0) + riskReward.adjustmentPoints + fib.adjustmentPoints + ppm.adjustmentPoints + orderFlow.adjustmentPoints + timeframeAlignment.adjustmentPoints
+        mySide.score +
+          historical.adjustmentPoints +
+          (breakoutStrength?.adjustmentPoints ?? 0) +
+          riskReward.adjustmentPoints +
+          fib.adjustmentPoints +
+          ppm.adjustmentPoints +
+          orderFlow.adjustmentPoints +
+          emaProximity.adjustmentPoints
       )
     );
     const probability = Math.round((adjustedScore / 100) * 1e5) / 1e5;
@@ -128,7 +138,7 @@ export async function evaluateSetup(
     factors.push({ name: "fibDirectionAdjustment", contribution: fib.adjustmentPoints, description: fib.description });
     factors.push({ name: "ppmAdjustment", contribution: ppm.adjustmentPoints, description: ppm.description });
     factors.push({ name: "orderFlowAdjustment", contribution: orderFlow.adjustmentPoints, description: orderFlow.description });
-    factors.push({ name: "timeframeAlignmentAdjustment", contribution: timeframeAlignment.adjustmentPoints, description: timeframeAlignment.description });
+    factors.push({ name: "emaProximityAdjustment", contribution: emaProximity.adjustmentPoints, description: emaProximity.description });
 
     // Hard override: if v1 AND v2 both independently took this exact same
     // setup, v3 takes it too, even if its own score/conviction check
@@ -150,6 +160,17 @@ export async function evaluateSetup(
     }
 
     return { probability, decision, factors, modelUsed: "rule_v3", blockReason, v3Bucket: bucket };
+  }
+
+  if (version === "v5") {
+    // v5 is a plain weighted-logit scorer (same shape as v1/v2) built from
+    // real mined outcome patterns, not v3's dual-hypothesis/adjustment
+    // machinery -- no v3Inputs, no directional-conviction margin, no
+    // historical-similarity lookup. See ruleScorerV5.ts's header for where
+    // its factors came from.
+    const result = scoreSetupV5(features);
+    const decision: "taken" | "skipped_score" = result.probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
+    return { probability: result.probability, decision, factors: result.factors, modelUsed: "rule_v5", blockReason: null, v3Bucket: null };
   }
 
   // v4 is the independently-trained ML model (see scoring/training.ts) --

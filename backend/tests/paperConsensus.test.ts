@@ -7,105 +7,94 @@ function gated(decision: "taken" | "skipped_score", probability: number): GatedS
   return { probability, decision, factors: [], modelUsed: "rule_v1", blockReason: null, v3Bucket: null };
 }
 
-function map(v1: GatedScore, v2: GatedScore, v3: GatedScore): Map<StrategyVersion, GatedScore> {
+function map(v1: GatedScore, v2: GatedScore, v3: GatedScore, v5: GatedScore = gated("taken", 0.8)): Map<StrategyVersion, GatedScore> {
   return new Map([
     ["v1", v1],
     ["v2", v2],
     ["v3", v3],
+    ["v5", v5],
   ]);
 }
 
-// Threshold is 65% (core/config.ts's MIN_SCORE_THRESHOLD, backend/.env confirms 0.65 in this environment).
-describe("determineConsensus -- majority-vote rule (2026-07-16 operator request)", () => {
-  it("takes when exactly 2 of 3 versions clear 65%, even with the third strongly disagreeing", () => {
-    const result = determineConsensus(map(gated("taken", 0.72), gated("skipped_score", 0.35), gated("taken", 0.65)));
+// Mutual-agreement rule (2026-07-29, operator request, revised twice the same
+// day): went from a looser "top 2 of 3 clear 75%, weakest just needs 56%"
+// shape, to a stricter "all three of v1/v2/v3 unanimously, plus v5 also
+// clears 75%" shape -- confirmed live that stricter version was far too
+// strict (each version individually only clears 75%+ ~7-12% of the time;
+// requiring all four simultaneously produced zero actionable recommendations
+// and zero trades over several hours). Landed here: v5 -- otherwise
+// shadow-only, see engine/loop.ts's SHADOW_ONLY_VERSIONS -- must
+// independently clear its own 75% gate, AND at least ONE (not all three) of
+// v1/v2/v3 must also clear the same bar. v5 doesn't "vote" the way v1/v2/v3
+// do (no representative-explanation slot, excluded from the averaged
+// probability) -- it's a hard AND-gate alongside whichever single v1/v2/v3
+// version confirms. Both determineConsensus and determineContinuousScanConsensus
+// share this exact rule.
+describe.each([
+  ["determineConsensus", determineConsensus],
+  ["determineContinuousScanConsensus", determineContinuousScanConsensus],
+] as const)("%s -- mutual-agreement rule (2026-07-29 operator request, revised to a single v1/v2/v3 confirmation)", (_name, fn) => {
+  it("takes when all three of v1/v2/v3 clear 75% and v5 also clears 75%", () => {
+    const result = fn(map(gated("taken", 0.8), gated("taken", 0.76), gated("taken", 0.77), gated("taken", 0.75)));
     expect(result.taken).toBe(true);
   });
 
-  it("takes when all 3 versions clear 65% (unanimous is still a majority)", () => {
-    const result = determineConsensus(map(gated("taken", 0.7), gated("taken", 0.68), gated("taken", 0.75)));
-    expect(result.taken).toBe(true);
+  it("takes when only ONE of v1/v2/v3 clears 75%, as long as v5 also clears its own gate", () => {
+    const v1Alone = fn(map(gated("taken", 0.8), gated("skipped_score", 0.6), gated("skipped_score", 0.6), gated("taken", 0.8)));
+    expect(v1Alone.taken).toBe(true);
+    const v3Alone = fn(map(gated("skipped_score", 0.6), gated("skipped_score", 0.6), gated("taken", 0.8), gated("taken", 0.8)));
+    expect(v3Alone.taken).toBe(true);
   });
 
-  it("does not take when only 1 of 3 clears 65%, no matter how high its score is", () => {
-    const v1Alone = determineConsensus(map(gated("taken", 0.99), gated("skipped_score", 0.3), gated("skipped_score", 0.3)));
-    expect(v1Alone.taken).toBe(false);
-    const v3Alone = determineConsensus(map(gated("skipped_score", 0.3), gated("skipped_score", 0.3), gated("taken", 0.99)));
-    expect(v3Alone.taken).toBe(false);
-  });
-
-  it("does not take when no version clears 65%", () => {
-    const result = determineConsensus(map(gated("skipped_score", 0.4), gated("skipped_score", 0.3), gated("skipped_score", 0.35)));
+  it("does not take when none of v1/v2/v3 clear 75%, even if all three are moderately high and v5 clears its own gate", () => {
+    const result = fn(map(gated("skipped_score", 0.74), gated("skipped_score", 0.7), gated("skipped_score", 0.65), gated("taken", 0.8)));
     expect(result.taken).toBe(false);
     expect(result.representativeVersion).toBeNull();
   });
 
-  it("counts a version toward the majority by raw probability, even if its own decision is skipped (v3's extra directional-conviction gate)", () => {
-    // v3 scores 70% (clears 65%) but its own decision is skipped_score (e.g.
-    // blocked by the directional-conviction margin check in gate.ts) -- it
-    // still counts toward the 2-of-3 majority here since v1 also clears.
-    const result = determineConsensus(map(gated("taken", 0.66), gated("skipped_score", 0.3), gated("skipped_score", 0.7)));
+  it("does not take when v1/v2/v3 all clear 75% but v5 is below its own 75% gate", () => {
+    const result = fn(map(gated("taken", 0.9), gated("taken", 0.85), gated("taken", 0.8), gated("skipped_score", 0.7)));
+    expect(result.taken).toBe(false);
+  });
+
+  it("does not take when a lone v1/v2/v3 version clears 75% but v5 is below its own gate", () => {
+    const result = fn(map(gated("taken", 0.9), gated("skipped_score", 0.6), gated("skipped_score", 0.6), gated("skipped_score", 0.7)));
+    expect(result.taken).toBe(false);
+  });
+
+  it("takes when v5 is exactly at its 75% gate threshold", () => {
+    const result = fn(map(gated("taken", 0.8), gated("taken", 0.8), gated("taken", 0.8), gated("taken", 0.75)));
     expect(result.taken).toBe(true);
-    // representativeVersion must fall back to v1 -- v3 isn't in takenVersions
-    // (its own decision is skipped_score) even though it counted toward taken.
+  });
+
+  it("counts a version toward mutual agreement by raw probability, even if its own decision is skipped (v3's extra directional-conviction gate)", () => {
+    // v3 scores 80% (clears the confirmation requirement) but its own
+    // decision is skipped_score (e.g. blocked by the directional-conviction
+    // margin check in gate.ts) -- it still counts toward mutual agreement
+    // here since the raw probability is what the rule checks, not decision.
+    // v1's own raw probability (60%) would NOT itself clear the bar, but its
+    // decision is "taken" -- it becomes the representative purely because
+    // it's the only one of the three with a "taken" decision.
+    const result = fn(map(gated("taken", 0.6), gated("skipped_score", 0.6), gated("skipped_score", 0.8), gated("taken", 0.8)));
+    expect(result.taken).toBe(true);
     expect(result.representativeVersion).toBe("v1");
   });
 
   it("prefers v3 as the representative version when it agrees, falling back to v2 then v1", () => {
-    const allTaken = determineConsensus(map(gated("taken", 0.7), gated("taken", 0.7), gated("taken", 0.7)));
+    const allTaken = fn(map(gated("taken", 0.8), gated("taken", 0.8), gated("taken", 0.8)));
     expect(allTaken.representativeVersion).toBe("v3");
 
-    const noV3 = determineConsensus(map(gated("taken", 0.7), gated("taken", 0.7), gated("skipped_score", 0.4)));
-    expect(noV3.taken).toBe(true);
-    expect(noV3.representativeVersion).toBe("v2");
+    const noV3 = fn(map(gated("taken", 0.8), gated("taken", 0.8), gated("taken", 0.8), gated("skipped_score", 0.6)));
+    expect(noV3.taken).toBe(false); // v5 gate not cleared -- confirms representativeVersion isn't reachable without it
   });
 
-  it("includes a readable per-version summary with the clearing count and average", () => {
-    const result = determineConsensus(map(gated("taken", 0.71), gated("taken", 0.65), gated("skipped_score", 0.4)));
-    expect(result.summary).toContain("2/3 versions");
+  it("includes a readable summary with the mutual-agreement thresholds, per-version percentages, and v5's own score", () => {
+    const result = fn(map(gated("taken", 0.8), gated("taken", 0.76), gated("taken", 0.77), gated("taken", 0.9)));
+    expect(result.summary).toContain("75%+");
     expect(result.summary).toContain("avg=");
-    expect(result.summary).toContain("v1=clears");
-    expect(result.summary).toContain("v2=clears");
-    expect(result.summary).toContain("v3=below");
-  });
-});
-
-// Standout >=70%, floor >=50% for the other two -- 2026-07-16 operator
-// request, made continuous-scan trades executable for the first time.
-describe("determineContinuousScanConsensus -- standout+floor rule (2026-07-16 operator request)", () => {
-  it("takes when one version clears 70% and the other two are each at least 50%", () => {
-    const result = determineContinuousScanConsensus(map(gated("taken", 0.77), gated("skipped_score", 0.55), gated("skipped_score", 0.5)));
-    expect(result.taken).toBe(true);
-  });
-
-  it("does not take when the standout clears 70% but another version is below 50%", () => {
-    const result = determineContinuousScanConsensus(map(gated("taken", 0.8), gated("skipped_score", 0.49), gated("skipped_score", 0.6)));
-    expect(result.taken).toBe(false);
-  });
-
-  it("does not take when all three are between 50% and 70%, with no standout", () => {
-    const result = determineContinuousScanConsensus(map(gated("skipped_score", 0.6), gated("skipped_score", 0.55), gated("skipped_score", 0.65)));
-    expect(result.taken).toBe(false);
-  });
-
-  it("takes when all three clear 70% (trivially satisfies the standout+floor rule)", () => {
-    const result = determineContinuousScanConsensus(map(gated("taken", 0.72), gated("taken", 0.75), gated("taken", 0.71)));
-    expect(result.taken).toBe(true);
-  });
-
-  it("falls back to the representative-order preference when the standout version's own decision is skipped_score", () => {
-    // v3 is the standout at 72% but its own directional-conviction margin
-    // check failed (decision stays skipped_score); v1 clears its own 65%
-    // threshold and is the only version actually "taken".
-    const result = determineContinuousScanConsensus(map(gated("taken", 0.66), gated("skipped_score", 0.55), gated("skipped_score", 0.72)));
-    expect(result.taken).toBe(true);
-    expect(result.representativeVersion).toBe("v1");
-  });
-
-  it("includes a readable summary with the standout and floor percentages", () => {
-    const result = determineContinuousScanConsensus(map(gated("taken", 0.77), gated("skipped_score", 0.55), gated("skipped_score", 0.5)));
-    expect(result.summary).toContain("standout 77%");
-    expect(result.summary).toContain("floor 50%");
-    expect(result.summary).toContain("avg=");
+    expect(result.summary).toContain("v1=");
+    expect(result.summary).toContain("v2=");
+    expect(result.summary).toContain("v3=");
+    expect(result.summary).toContain("v5=");
   });
 });

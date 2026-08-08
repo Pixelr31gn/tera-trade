@@ -4,7 +4,8 @@ import { requireApiKey } from "../../core/security.js";
 import { DEFAULT_INSTRUMENTS } from "../../marketData/instruments.js";
 import { classifySession } from "../../analytics/session.js";
 import { getTrendLevels } from "../../engine/trendLevelsCache.js";
-import { getAllLatestOrderFlowSnapshots } from "../../engine/liveOrderFlowCache.js";
+import { getAllLatestOrderFlowSnapshots, getOrderFlowHistory } from "../../engine/liveOrderFlowCache.js";
+import { getLatestRegimeSnapshot } from "../../engine/regimeSnapshotCache.js";
 import { getPpm } from "../../engine/ppmCache.js";
 import { getSupportResistanceLevels } from "../../engine/supportResistanceCache.js";
 
@@ -21,11 +22,11 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
 
     const out = await Promise.all(
       DEFAULT_INSTRUMENTS.map(async (spec) => {
-        const [lastBar, regimeRow, trendLevels] = await Promise.all([
+        const [lastBar, trendLevels] = await Promise.all([
           prisma.bar.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }),
-          prisma.regimeSnapshot.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }),
           getTrendLevels(spec.symbol),
         ]);
+        const regimeRow = getLatestRegimeSnapshot(spec.symbol);
 
         return {
           symbol: spec.symbol,
@@ -56,16 +57,12 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     return getAllLatestOrderFlowSnapshots();
   });
 
-  // Persisted order-flow history for a symbol -- one row per flush interval.
+  // In-memory order-flow history for a symbol -- one point per flush
+  // interval, bounded ring buffer (see liveOrderFlowCache.ts).
   app.get<{ Params: { symbol: string }; Querystring: { limit?: string } }>("/api/market/order-flow/:symbol/history", async (request) => {
     const { symbol } = request.params;
-    const limit = Math.min(Number(request.query.limit ?? 200), 2000);
-    const rows = await prisma.orderFlowSnapshot.findMany({
-      where: { symbol },
-      orderBy: { time: "desc" },
-      take: limit,
-    });
-    return rows.reverse();
+    const limit = Math.min(Number(request.query.limit ?? 200), 500);
+    return getOrderFlowHistory(symbol, limit);
   });
 
   // "Points per minute" -- up vs. down speed over a rolling 15-minute

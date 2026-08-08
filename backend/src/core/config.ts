@@ -131,6 +131,15 @@ const EnvSchema = z.object({
   // Defaults to true (dry-run) so real clicks require an explicit, separate opt-in
   // on top of TRADING_MODE=live + BROKER_KIND=browser_control + LIVE_TRADING_CONFIRMED.
   DRY_RUN_ORDERS: boolFromEnvDefault(true),
+
+  // --- Execution Decision Engine (2026-07-20) -- routes an approved signal
+  // through fair-value-map scoring and a resting limit order instead of an
+  // immediate market order. Defaults OFF: this is new, untested-live
+  // automation (real limit-order DOM automation, built and unit-tested the
+  // same night the market happened to be closed for maintenance) -- must be
+  // deliberately turned on, and only after a DRY_RUN_ORDERS=true smoke test,
+  // same posture as DRY_RUN_ORDERS itself.
+  EXECUTION_DECISION_ENGINE_ENABLED: boolFromEnvDefault(false),
 });
 
 export interface Settings {
@@ -182,6 +191,7 @@ export interface Settings {
   orderFlowEnabled: boolean;
   orderFlowFlushSeconds: number;
   dryRunOrders: boolean;
+  executionDecisionEngineEnabled: boolean;
 }
 
 let cached: Settings | undefined;
@@ -238,6 +248,7 @@ export function getSettings(): Settings {
     orderFlowEnabled: env.ORDER_FLOW_ENABLED,
     orderFlowFlushSeconds: env.ORDER_FLOW_FLUSH_SECONDS,
     dryRunOrders: env.DRY_RUN_ORDERS,
+    executionDecisionEngineEnabled: env.EXECUTION_DECISION_ENGINE_ENABLED,
   };
   return cached;
 }

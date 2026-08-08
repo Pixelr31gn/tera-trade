@@ -113,6 +113,15 @@ export async function tradesRoutes(app: FastifyInstance): Promise<void> {
         explanation,
         status: "open",
         brokerOrderId: result.brokerOrderId,
+        // Without this, the row falls back to the schema's "simulated"
+        // default even when this order just went out for real through the
+        // live broker -- manageOpenTrades branches on this field, so a real
+        // live position would silently get managed as if it were paper (the
+        // fake SimulatedBroker's closePosition is a no-op, so a "hit stop"
+        // reading would just mark this row closed in the DB without ever
+        // sending a real close command). 2026-07-21 incident: exactly this,
+        // confirmed live -- see trade #171.
+        brokerKind: await currentBrokerKind(),
       },
     });
 

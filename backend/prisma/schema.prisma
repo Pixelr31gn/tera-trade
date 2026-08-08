@@ -1,9 +1,11 @@
 // Tera Trade database schema (plain PostgreSQL -- e.g. Neon).
 //
 // No TimescaleDB extension here (not available on free hosted Postgres), so
-// bars_1m/regime_history/scores/equity_curve are plain indexed tables and
-// 5m/15m/1h/1d bar rollups are computed by scheduled application code
-// (src/marketData/rollup.ts) instead of TimescaleDB continuous aggregates.
+// bars_1m/scores/equity_curve are plain indexed tables. Regime snapshots and
+// order-flow data are intentionally NOT persisted here (see
+// engine/regimeSnapshotCache.ts / engine/liveOrderFlowCache.ts) -- both are
+// in-memory only, since scoring only ever reads the live in-memory reading,
+// never a DB row (2026-07-20 DB audit).
 
 generator client {
   provider = "prisma-client-js"
@@ -15,14 +17,14 @@ datasource db {
 }
 
 model Instrument {
-  id         Int      @id @default(autoincrement())
-  symbol     String   @unique
-  dataSymbol String   @map("data_symbol")
-  exchange   String   @default("CME")
-  contractId String?  @map("contract_id")
-  tickSize   Decimal  @map("tick_size") @db.Decimal(18, 8)
-  pointValue Decimal  @map("point_value") @db.Decimal(18, 8)
-  active     Boolean  @default(true)
+  id         Int     @id @default(autoincrement())
+  symbol     String  @unique
+  dataSymbol String  @map("data_symbol")
+  exchange   String  @default("CME")
+  contractId String? @map("contract_id")
+  tickSize   Decimal @map("tick_size") @db.Decimal(18, 8)
+  pointValue Decimal @map("point_value") @db.Decimal(18, 8)
+  active     Boolean @default(true)
 
   @@map("instruments")
 }
@@ -30,30 +32,15 @@ model Instrument {
 model Bar {
   time   DateTime
   symbol String
-  open   Decimal @db.Decimal(18, 8)
-  high   Decimal @db.Decimal(18, 8)
-  low    Decimal @db.Decimal(18, 8)
-  close  Decimal @db.Decimal(18, 8)
-  volume Decimal @default(0) @db.Decimal(20, 4)
+  open   Decimal  @db.Decimal(18, 8)
+  high   Decimal  @db.Decimal(18, 8)
+  low    Decimal  @db.Decimal(18, 8)
+  close  Decimal  @db.Decimal(18, 8)
+  volume Decimal  @default(0) @db.Decimal(20, 4)
 
   @@id([time, symbol])
   @@index([symbol, time])
   @@map("bars_1m")
-}
-
-model BarRollup {
-  bucket     DateTime
-  symbol     String
-  resolution String // "5m" | "15m" | "30m" | "1h" | "4h"
-  open       Decimal @db.Decimal(18, 8)
-  high       Decimal @db.Decimal(18, 8)
-  low        Decimal @db.Decimal(18, 8)
-  close      Decimal @db.Decimal(18, 8)
-  volume     Decimal @default(0) @db.Decimal(20, 4)
-
-  @@id([resolution, symbol, bucket])
-  @@index([resolution, symbol, bucket])
-  @@map("bars_rollup")
 }
 
 model DailyBar {
@@ -71,17 +58,16 @@ model DailyBar {
 }
 
 model Account {
-  id              Int       @id @default(autoincrement())
-  brokerAccountId String?   @map("broker_account_id")
-  name            String    @default("default")
-  startingBalance Decimal   @default(50000) @map("starting_balance") @db.Decimal(18, 2)
-  isActive        Boolean   @default(true) @map("is_active")
-  createdAt       DateTime  @default(now()) @map("created_at")
+  id              Int      @id @default(autoincrement())
+  brokerAccountId String?  @map("broker_account_id")
+  name            String   @default("default")
+  startingBalance Decimal  @default(50000) @map("starting_balance") @db.Decimal(18, 2)
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
 
   riskLimit    RiskLimit?
   trades       Trade[]
   orders       OrderRecord[]
-  positions    PositionRecord[]
   equityPoints EquityCurvePoint[]
 
   @@map("accounts")
@@ -123,32 +109,26 @@ model SystemState {
   /// comparable -- this only controls which one is allowed to place real orders.
   activeStrategyVersion String @default("v1") @map("active_strategy_version")
 
+  /// Live dashboard toggle for the Execution Decision Engine (see
+  /// docs/EXECUTION_DECISION_ENGINE.md) -- seeded from EXECUTION_DECISION_ENGINE_ENABLED
+  /// the first time this row is created (see execution/mode.ts's getSystemState), then
+  /// authoritative from here on, same "env sets the boot default, DB is live from then on"
+  /// pattern as `mode` above. Only takes effect when the broker kind is browser_control
+  /// (see engine/loop.ts's attemptExecution) regardless of this flag's value.
+  executionDecisionEngineEnabled Boolean @default(false) @map("execution_decision_engine_enabled")
+
   @@map("system_state")
 }
 
-model RegimeSnapshot {
-  time       DateTime
-  symbol     String
-  trendLabel String @map("trend_label")
-  volLabel   String @map("vol_label")
-  confidence Decimal @db.Decimal(5, 4)
-  features   Json
-
-  @@id([time, symbol])
-  @@index([symbol, time])
-  @@map("regime_history")
-}
-
 model NewsEvent {
-  id         Int      @id @default(autoincrement())
-  eventTime  DateTime @map("event_time")
-  country    String
-  name       String
-  impact     String
-  actual     String?
-  forecast   String?
-  previous   String?
-  fetchedAt  DateTime @default(now()) @map("fetched_at")
+  id        Int      @id @default(autoincrement())
+  eventTime DateTime @map("event_time")
+  country   String
+  name      String
+  impact    String
+  forecast  String?
+  previous  String?
+  fetchedAt DateTime @default(now()) @map("fetched_at")
 
   @@unique([eventTime, country, name])
   @@index([eventTime])
@@ -243,35 +223,56 @@ model Score {
 }
 
 model Trade {
-  id                  Int       @id @default(autoincrement())
-  accountId           Int       @map("account_id")
-  symbol              String
-  strategyId          String    @map("strategy_id")
-  side                String
-  quantity            Int
-  entryTime           DateTime  @map("entry_time")
-  entryPrice          Decimal   @map("entry_price") @db.Decimal(18, 8)
-  stopPrice           Decimal   @map("stop_price") @db.Decimal(18, 8)
-  takeProfitPrice     Decimal?  @map("take_profit_price") @db.Decimal(18, 8)
-  exitTime            DateTime? @map("exit_time")
-  exitPrice           Decimal?  @map("exit_price") @db.Decimal(18, 8)
-  exitReason          String?   @map("exit_reason")
-  pnl                 Decimal?  @db.Decimal(18, 2)
-  fees                Decimal   @default(0) @db.Decimal(18, 2)
-  mae                 Decimal?  @db.Decimal(18, 8)
-  mfe                 Decimal?  @db.Decimal(18, 8)
-  score               Decimal?  @db.Decimal(6, 5)
-  regimeTrendAtEntry  String?   @map("regime_trend_at_entry")
-  regimeVolAtEntry    String?   @map("regime_vol_at_entry")
-  explanation         String    @default("")
-  status              String    @default("open")
-  brokerOrderId       String?   @map("broker_order_id")
+  id                 Int       @id @default(autoincrement())
+  accountId          Int       @map("account_id")
+  symbol             String
+  strategyId         String    @map("strategy_id")
+  side               String
+  quantity           Int
+  entryTime          DateTime  @map("entry_time")
+  entryPrice         Decimal   @map("entry_price") @db.Decimal(18, 8)
+  stopPrice          Decimal   @map("stop_price") @db.Decimal(18, 8)
+  takeProfitPrice    Decimal?  @map("take_profit_price") @db.Decimal(18, 8)
+  exitTime           DateTime? @map("exit_time")
+  exitPrice          Decimal?  @map("exit_price") @db.Decimal(18, 8)
+  exitReason         String?   @map("exit_reason")
+  pnl                Decimal?  @db.Decimal(18, 2)
+  fees               Decimal   @default(0) @db.Decimal(18, 2)
+  mae                Decimal?  @db.Decimal(18, 8)
+  mfe                Decimal?  @db.Decimal(18, 8)
+  score              Decimal?  @db.Decimal(6, 5)
+  /// Execution Decision Engine only (null for market-order trades via execution/engine.ts) --
+  /// the winning entryQualityModel ladder score (0-105ish, see execution/entryQualityModel.ts)
+  /// at the moment the resting limit order filled. Data collection for the (deferred)
+  /// self-adjusting weight recalibration described in the EDE spec -- not yet consumed anywhere.
+  entryQualityScore  Decimal?  @db.Decimal(6, 2) @map("entry_quality_score")
+  /// Execution Decision Engine only -- seconds between the resting limit order being placed and
+  /// its confirmed fill (see execution/executionDecisionEngine.ts). Null for market-order trades,
+  /// where fill is effectively instantaneous and there's nothing meaningful to record.
+  timeToFillSeconds  Int?      @map("time_to_fill_seconds")
+  regimeTrendAtEntry String?   @map("regime_trend_at_entry")
+  regimeVolAtEntry   String?   @map("regime_vol_at_entry")
+  explanation        String    @default("")
+  status             String    @default("open")
+  brokerOrderId      String?   @map("broker_order_id")
   /// Which broker actually owns this position ("simulated" | "browser_control" | "projectx") -- recorded at entry so an
   /// open trade is always managed by the correct broker regardless of later system-mode switches (see engine/loop.ts's
   /// brokerForTrade). Defaults to "simulated" for pre-migration rows; safe since no trade was open when this was added.
-  brokerKind          String    @default("simulated") @map("broker_kind")
+  brokerKind         String    @default("simulated") @map("broker_kind")
+  /// v1.3: has a real broker-side Trailing Stop order been placed for this trade yet (see
+  /// engine/loop.ts's trailing-stop activation check -- once price reaches halfway to the
+  /// take-profit target, a real trailing-stop order replaces our own internal hard-stop-price
+  /// check as the trade's downside protection). False for every trade before v1.3 and for any
+  /// trade that hasn't reached the activation threshold yet.
+  trailingStopPlaced Boolean   @default(false) @map("trailing_stop_placed")
+  /// v1.3 operator override (Positions panel "let it ride" toggle) -- once true, the internal
+  /// take-profit check in engine/loop.ts's manageLiveOpenTrade no longer force-closes this trade
+  /// at its stored takeProfitPrice; only the real trailing-stop order (once placed) can close it.
+  /// Meant for exactly one case: the operator sees something the system doesn't and wants to let
+  /// a winner run past its original target.
+  letItRide          Boolean   @default(false) @map("let_it_ride")
 
-  account Account @relation(fields: [accountId], references: [id])
+  account Account       @relation(fields: [accountId], references: [id])
   orders  OrderRecord[]
   scores  Score[]
 
@@ -301,60 +302,20 @@ model OrderRecord {
   @@map("orders")
 }
 
-model PositionRecord {
-  id             Int      @id @default(autoincrement())
-  accountId      Int      @map("account_id")
-  symbol         String
-  side           String
-  quantity       Int
-  avgPrice       Decimal  @map("avg_price") @db.Decimal(18, 8)
-  unrealizedPnl  Decimal  @default(0) @map("unrealized_pnl") @db.Decimal(18, 2)
-  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
-
-  account Account @relation(fields: [accountId], references: [id])
-
-  @@unique([accountId, symbol])
-  @@map("positions")
-}
-
 model EquityCurvePoint {
-  time      DateTime
-  accountId Int     @map("account_id")
-  equity    Decimal @db.Decimal(18, 2)
-  balance   Decimal @db.Decimal(18, 2)
+  time       DateTime
+  accountId  Int      @map("account_id")
+  equity     Decimal  @db.Decimal(18, 2)
+  balance    Decimal  @db.Decimal(18, 2)
   /// Which broker this point reflects ("simulated" | "browser_control" | "projectx") -- paper and live share one
   /// account row, so without this, peak-equity/drawdown circuit breakers would mix a live account's real balance
   /// with a paper run's simulated one into the same curve. Part of the primary key so a live and paper point can
   /// both exist for the same instant.
-  brokerKind String  @default("simulated") @map("broker_kind")
+  brokerKind String   @default("simulated") @map("broker_kind")
 
   account Account @relation(fields: [accountId], references: [id])
 
   @@id([time, accountId, brokerKind])
   @@index([accountId, brokerKind, time])
   @@map("equity_curve")
-}
-
-// A rolling window of live order-flow, captured by listening to the
-// SignalR WebSocket traffic TopstepX's own web platform already receives
-// (RealTimeDom/RealTimeTradeLogWithSpeed/RealTimeTilt) -- not scraped DOM
-// text, which turned out to go stale when the ladder widget isn't actively
-// centered on price. See browserWatch/orderFlowListener.ts. Each row
-// summarizes one flush interval (best bid/ask size at flush time, buy vs.
-// sell aggressor trade volume accumulated during the window, and TopstepX's
-// own crowd long/short positioning bias where available).
-model OrderFlowSnapshot {
-  id            Int      @id @default(autoincrement())
-  time          DateTime
-  symbol        String
-  bestBidSize   Decimal? @map("best_bid_size") @db.Decimal(18, 4)
-  bestAskSize   Decimal? @map("best_ask_size") @db.Decimal(18, 4)
-  buyVolume     Decimal  @default(0) @map("buy_volume") @db.Decimal(18, 4)
-  sellVolume    Decimal  @default(0) @map("sell_volume") @db.Decimal(18, 4)
-  tradeCount    Int      @default(0) @map("trade_count")
-  tiltLongBias  Decimal? @map("tilt_long_bias") @db.Decimal(9, 5)
-  tiltShortBias Decimal? @map("tilt_short_bias") @db.Decimal(9, 5)
-
-  @@index([symbol, time])
-  @@map("order_flow_snapshots")
 }

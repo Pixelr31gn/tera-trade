@@ -66,3 +66,26 @@ export function computeInitialStop(
 
   return { stopPrice, stopDistancePoints: distance, basis, takeProfitPrice, trailTicks };
 }
+
+// v1.3: fixed trailing-stop distance and activation threshold for the real
+// (browser-controlled) broker -- a separate, simpler mechanism from the
+// chandelier ATR trail above (which stays simulated-broker-only). Hand-set
+// per operator request, not fitted/ATR-derived: activation is halfway from
+// entry to the take-profit target; once reached, a real broker-side
+// Trailing Stop order (see brokers/types.ts's placeTrailingStop) takes over
+// as the trade's downside protection, replacing the internal stop-price
+// check in engine/loop.ts's manageLiveOpenTrade.
+export const TRAILING_STOP_ACTIVATION_FRACTION = 0.5;
+export const TRAILING_STOP_DISTANCE_TICKS = 30;
+
+/** Has price reached the halfway point from entry to the take-profit target, in the trade's favor? */
+export function hasReachedTrailingStopActivation(
+  entryPrice: Decimal,
+  takeProfitPrice: Decimal,
+  side: "long" | "short",
+  high: Decimal,
+  low: Decimal
+): boolean {
+  const activationPrice = entryPrice.plus(takeProfitPrice.minus(entryPrice).times(TRAILING_STOP_ACTIVATION_FRACTION));
+  return side === "long" ? high.gte(activationPrice) : low.lte(activationPrice);
+}

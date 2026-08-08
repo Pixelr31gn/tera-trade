@@ -5,7 +5,8 @@ export interface SystemState {
   brokerKind: string;
   liveBrokerConnected: boolean;
   minScoreThreshold: number;
-  activeStrategyVersion: "v1" | "v2" | "v3" | "v4";
+  activeStrategyVersion: "v1" | "v2" | "v3" | "v4" | "v5";
+  executionDecisionEngineEnabled: boolean;
   updatedAt: string;
 }
 
@@ -34,6 +35,14 @@ export interface EquityPoint {
   balance: number;
 }
 
+export interface EquityAccountOption {
+  id: number;
+  name: string;
+  brokerAccountId: string | null;
+  isCurrentlyActive: boolean;
+  startingBalance: number;
+}
+
 export interface RecommendationScore {
   id: number;
   time: string;
@@ -44,11 +53,22 @@ export interface RecommendationScore {
   decision: string;
   explanation: string;
   tradeId: number | null;
-  strategyVersion: "v1" | "v2" | "v3" | "v4";
+  strategyVersion: "v1" | "v2" | "v3" | "v4" | "v5";
   entryPrice: number;
   stopPrice: number;
   takeProfitPrice: number;
   quantity: number;
+}
+
+export interface ExecutionOpportunity {
+  symbol: string;
+  side: string;
+  strategyId: string;
+  state: "waiting" | "building_entry" | "ready" | "resting_order" | "filled" | "cancelled";
+  bestEntryPrice: number | null;
+  bestEntryScore: number | null;
+  ageSeconds: number;
+  cancelReason: string | null;
 }
 
 export interface ActionableRecommendation {
@@ -60,7 +80,7 @@ export interface ActionableRecommendation {
   probability: number;
   explanation: string;
   actionability: "fresh" | "stale";
-  strategyVersion: "v1" | "v2" | "v3" | "v4";
+  strategyVersion: "v1" | "v2" | "v3" | "v4" | "v5";
   entryPrice: number;
   stopPrice: number;
   takeProfitPrice: number;
@@ -79,6 +99,8 @@ export interface Position {
   strategyId: string;
   score: number | null;
   explanation: string;
+  trailingStopPlaced: boolean;
+  letItRide: boolean;
 }
 
 export interface Trade {
@@ -157,7 +179,7 @@ export interface SessionPerformance {
   byPriceAction: Record<string, SessionLabelBreakdown>;
 }
 
-export type StrategyComparison = Record<"v1" | "v2" | "v3" | "v4", Record<string, SessionPerformance>>;
+export type StrategyComparison = Record<"v1" | "v2" | "v3" | "v4" | "v5", Record<string, SessionPerformance>>;
 
 export interface DivergenceBucket {
   n: number;

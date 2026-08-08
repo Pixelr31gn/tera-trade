@@ -5,6 +5,7 @@ import { getSettings } from "../core/config.js";
 import { accountsRoutes } from "./routes/accounts.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { backfillRoutes } from "./routes/backfill.js";
+import { executionRoutes } from "./routes/execution.js";
 import { marketRoutes } from "./routes/market.js";
 import { newsRoutes } from "./routes/news.js";
 import { performanceRoutes } from "./routes/performance.js";
@@ -19,7 +20,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   const settings = getSettings();
   const app = Fastify({ logger: { level: settings.logLevel } });
 
-  await app.register(cors, { origin: ["http://localhost:3000"] });
+  await app.register(cors, { origin: ["http://localhost:3000", "http://localhost:3001", "http://localhost:3002"] });
   await app.register(websocketPlugin);
 
   await app.register(systemRoutes);
@@ -33,6 +34,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(analyticsRoutes);
   await app.register(backfillRoutes);
   await app.register(marketRoutes);
+  await app.register(executionRoutes);
   await app.register(wsRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));

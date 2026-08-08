@@ -45,8 +45,25 @@ export interface RiskAssessment {
 // concrete. Hand-set (not fitted): 0.5 ATR is already the level-clustering
 // tolerance (see supportResistance.ts), so 1.0 ATR gives a little room
 // around a level's own footprint without allowing an entry chosen mid-air
-// far from any real pivot.
-const MAX_ENTRY_DISTANCE_ATR = 1.0;
+// far from any real pivot. (2026-07-20: loosened 25%, 1.0 -> 1.25, after
+// several strong-trend setups were getting rejected for running slightly
+// past this on continuous-scan signals. 2026-07-22: loosened again, 1.25 ->
+// 1.9, operator request, after a sustained strong-trend session blocked
+// essentially every continuous-scan signal on both ES and NQ -- entries were
+// running 6-9x ATR past the nearest level, well beyond what the 25% bump
+// covered. 2026-07-27: loosened again, 1.9 -> 3.0, operator request, same
+// pattern recurring -- entries still getting blocked at ~2.9x ATR during a
+// strong trend. 2026-07-28: removed entirely, operator request, then
+// reinstated the same day at the same 1.25x-3.0x band. 2026-07-29: tightened
+// back, 3.0 -> 1.95, operator request.)
+const MAX_ENTRY_DISTANCE_ATR = 1.95;
+
+// Floor for the same check, added alongside the 2026-07-27 ceiling bump --
+// entries sitting too close to the level itself are rejected too, not just
+// ones that have run too far past it. Together these carve out a
+// 0.25x-1.95x ATR "sweet spot" band instead of a single one-sided ceiling.
+// (2026-07-29: loosened 1.25 -> 0.25, operator request.)
+const MIN_ENTRY_DISTANCE_ATR = 0.25;
 
 export class RiskEngine {
   assessNewTrade(params: {
@@ -62,8 +79,10 @@ export class RiskEngine {
     tickSize: Decimal;
     newsStatus: NewsRiskStatus;
     bars: OhlcBar[];
+    /** Cross-version consensus average probability (0-1) -- see risk/tradePlan.ts's computeTradePlan. */
+    averageProbability: number;
   }): RiskAssessment {
-    const { side, entryPrice, atrValue, structureSwingPrice, signalKind, breakoutLevelPrice, accountState, limits, pointValue, tickSize, bars } = params;
+    const { side, entryPrice, atrValue, structureSwingPrice, signalKind, breakoutLevelPrice, accountState, limits, pointValue, tickSize, bars, averageProbability } = params;
 
     const breaker = checkCircuitBreakers(accountState, limits);
     if (!breaker.allowed) {
@@ -111,6 +130,13 @@ export class RiskEngine {
         tripKillSwitch: false, nearestSrLevel: nearest.level,
       };
     }
+    if (nearest.distanceInAtr < MIN_ENTRY_DISTANCE_ATR) {
+      return {
+        approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
+        reason: `entry is only ${nearest.distanceInAtr.toFixed(2)}x ATR from the nearest ${nearest.level.type} level (${nearest.level.price.toFixed(2)}, ${nearest.level.touches} touches) -- too close, needs to be at least ${MIN_ENTRY_DISTANCE_ATR}x ATR away`,
+        tripKillSwitch: false, nearestSrLevel: nearest.level,
+      };
+    }
 
     // Fixed-dollar risk overrides percentage-of-equity when configured, so
     // the risk budget stays constant regardless of intraday equity swings.
@@ -119,6 +145,18 @@ export class RiskEngine {
     const plan = computeTradePlan({
       side, entryPrice, atrValue, structureSwingPrice, tickSize, pointValue,
       riskAmount, profitDollars: limits.perTradeProfitDollars ?? null, maxPositionSize: limits.maxPositionSize,
+      averageProbability,
+      // 2:1 instead of stops.ts's 3:1 default -- 2026-07-29, operator request,
+      // effective the same day v5 became a required gate on every real
+      // execution (see engine/loop.ts's determineConsensus/
+      // determineContinuousScanConsensus). "For now" per the operator --
+      // v5's own backtested win rate (28.1% as of this change) was measured
+      // against the 3:1 target, which is an easier target to miss than 2:1;
+      // it does NOT directly carry over to what real 2:1 performance will be
+      // (breakeven moves from ~25% to ~33.3%), so re-validate once enough
+      // real/simulated-at-2:1 outcomes accumulate rather than assuming the
+      // same edge holds.
+      takeProfitRMultiple: new Decimal("2.0"),
     });
 
     return {

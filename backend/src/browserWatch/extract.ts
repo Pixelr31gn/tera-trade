@@ -26,6 +26,10 @@ export interface BrowserAccountSnapshot {
   balance: number | null;
   equity: number | null;
   pnl: number | null;
+  /** Display name of the currently-active TopstepX account (e.g. "50K DLL COMBINE"), not unique across combines of the same tier -- see brokerAccountId for the actual identity. */
+  accountName: string | null;
+  /** Unique real account identifier (e.g. "50KTC-V2-DLL-170199-51281387"), confirmed live 2026-07-21 -- this, not accountName, is what distinguishes one real TopstepX account from another. */
+  brokerAccountId: string | null;
 }
 
 // "bal:"/"up&l:" etc. are TopstepX's own compact HUD notation (confirmed
@@ -115,6 +119,37 @@ function stripToastNotifications(pageText: string): string {
   return result.join("\n");
 }
 
+export interface BrowserAccountIdentity {
+  name: string;
+  brokerAccountId: string;
+}
+
+// TopstepX renders the currently-active account (account switcher button,
+// and again inside each order-entry widget) as a single line shaped like
+// "<display name>|<account ID>", optionally followed by an eligibility
+// status in parens -- confirmed live from two real captures: an older one
+// with no status suffix ("$50K TRADING COMBINE|50KTC-V2-170199-40086833")
+// and a newer one with one (2026-07-21, "50K DLL COMBINE|50KTC-V2-DLL-
+// 170199-51281387 (Ineligible)") -- the status suffix's presence and even
+// the ID's own segment count aren't assumed stable. The display name alone
+// isn't unique (multiple combines can share a tier name like "50K DLL
+// COMBINE"); the ID is what actually distinguishes one real account from
+// another, which matters once an operator switches between several funded
+// accounts in the same browser -- without tracking this, every account's
+// equity history gets blended together under one internal account row
+// (2026-07-21 incident). This line appears multiple times on the page for
+// the one truly active account, so the first match is sufficient.
+const ACCOUNT_IDENTITY_PATTERN = /^(.+?)\|([A-Z0-9]+(?:-[A-Z0-9]+)+?)(?:\s*\([^)]*\))?$/i;
+
+export function extractActiveAccountIdentity(rawPageText: string): BrowserAccountIdentity | null {
+  const lines = stripToastNotifications(rawPageText).split("\n").map((l) => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    const match = line.match(ACCOUNT_IDENTITY_PATTERN);
+    if (match) return { name: match[1]!.trim(), brokerAccountId: match[2]!.trim() };
+  }
+  return null;
+}
+
 export function extractAccountSnapshot(rawPageText: string): BrowserAccountSnapshot {
   const pageText = stripToastNotifications(rawPageText);
   const balance = extractLabeledNumber(pageText, BALANCE_LABELS);
@@ -125,16 +160,29 @@ export function extractAccountSnapshot(rawPageText: string): BrowserAccountSnaps
   // liquidation" figure at all -- equity is balance plus whatever's still
   // open, so synthesize it when there's no explicit label for it.
   const equity = explicitEquity ?? (balance !== null && unrealizedPnl !== null ? balance + unrealizedPnl : balance);
+  const identity = extractActiveAccountIdentity(rawPageText);
 
-  return { balance, equity, pnl: unrealizedPnl };
+  return { balance, equity, pnl: unrealizedPnl, accountName: identity?.name ?? null, brokerAccountId: identity?.brokerAccountId ?? null };
 }
 
 // CME futures month codes: one letter per month (F=Jan ... Z=Dec).
 const FUTURES_MONTH_CODES = "FGHJKMNQUVXZ";
 
+// 2026-07-27 incident: this used to be a bare substring search
+// (`/-?[\d,]+\.\d{1,4}/`, no anchors), which matched a decimal-shaped
+// fragment *inside* a longer line, not just a standalone price line -- when
+// a closed-trade history table row (containing "MNQU26") sat above the real
+// quotes panel, one of its columns was a timestamp like
+// "2026-07-27 16:01:00.991", and the substring "00.991" matched the price
+// regex, feeding a garbage 0.991 into bars_1m as NQ's price for several
+// minutes straight. Every real price line seen on this page (quote tables,
+// watchlists) is a standalone line with nothing else on it, so requiring the
+// *entire* trimmed line to be just the number rejects any line that merely
+// contains a number somewhere inside other text (timestamps, labels, etc.)
+// without losing any legitimate match.
 function findNearbyPrice(lines: string[], startIndex: number): number | null {
   for (let j = startIndex; j < Math.min(startIndex + 3, lines.length); j++) {
-    const match = lines[j]!.match(/-?[\d,]+\.\d{1,4}/); // prices, not integers (avoids matching contract codes/quantities)
+    const match = lines[j]!.match(/^-?\$?[\d,]+\.\d{1,4}$/); // the whole line, not just a substring of it
     if (match) {
       const value = parseMoney(match[0]);
       if (value !== null) return value;
@@ -158,7 +206,11 @@ function findNearbyPrice(lines: string[], startIndex: number): number | null {
 export function extractPriceForSymbol(rawPageText: string, symbol: string, aliases: string[] = []): number | null {
   const lines = stripToastNotifications(rawPageText).split("\n").map((l) => l.trim()).filter(Boolean);
 
-  const contractCodePattern = new RegExp(`^${symbol}[${FUTURES_MONTH_CODES}]\\d{2}$`, "i");
+  // Optional leading "M" recognizes TopstepX's Micro contract codes (e.g.
+  // "MNQU26" for Micro NQ) as a genuine, anchored contract-code match instead
+  // of falling through to the much less reliable loose substring search
+  // below (see the 2026-07-27 incident note on findNearbyPrice).
+  const contractCodePattern = new RegExp(`^M?${symbol}[${FUTURES_MONTH_CODES}]\\d{2}$`, "i");
   for (let i = 0; i < lines.length; i++) {
     if (!contractCodePattern.test(lines[i]!)) continue;
     const price = findNearbyPrice(lines, i);
@@ -194,7 +246,11 @@ const ANY_CONTRACT_CODE_PATTERN = new RegExp(`^[A-Z]{1,3}[${FUTURES_MONTH_CODES}
  */
 export function extractVolumeForSymbol(rawPageText: string, symbol: string, aliases: string[] = []): number | null {
   const lines = stripToastNotifications(rawPageText).split("\n").map((l) => l.trim()).filter(Boolean);
-  const contractCodePattern = new RegExp(`^${symbol}[${FUTURES_MONTH_CODES}]\\d{2}$`, "i");
+  // Optional leading "M" recognizes TopstepX's Micro contract codes (e.g.
+  // "MNQU26" for Micro NQ) as a genuine, anchored contract-code match instead
+  // of falling through to the much less reliable loose substring search
+  // below (see the 2026-07-27 incident note on findNearbyPrice).
+  const contractCodePattern = new RegExp(`^M?${symbol}[${FUTURES_MONTH_CODES}]\\d{2}$`, "i");
 
   for (let i = 0; i < lines.length; i++) {
     if (!contractCodePattern.test(lines[i]!)) continue;
