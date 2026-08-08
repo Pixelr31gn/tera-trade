@@ -22,7 +22,11 @@ import { OrderSide } from "./types.js";
 const logger = childLogger("simulatedBroker");
 
 let orderIdCounter = 1;
-const DEFAULT_SLIPPAGE_TICKS = 1;
+// Exported for ReplayDecisionContext (src/replay/harness.ts) -- one tick of
+// slippage per side is this same simulated-broker assumption, not a
+// separately-invented number, so the two must share one constant rather than
+// risk drifting apart.
+export const DEFAULT_SLIPPAGE_TICKS = 1;
 
 interface SimBracket {
   accountId: string;

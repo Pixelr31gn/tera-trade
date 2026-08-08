@@ -3,6 +3,10 @@ import { scoreSetupV5 } from "../src/scoring/ruleScorerV5.js";
 import { evaluateSetup } from "../src/scoring/gate.js";
 import type { SetupFeatures } from "../src/scoring/features.js";
 
+// evaluateSetup requires an explicit `at` (see v3HistoricalAdjustment.ts) --
+// the v5 dispatch path never reads it, so any fixed timestamp works.
+const AT = new Date("2026-01-15T15:00:00Z");
+
 function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
   return {
     symbol: "ES",
@@ -109,15 +113,15 @@ describe("scoreSetupV5 -- factor bounds and shape", () => {
 
 describe("evaluateSetup -- v5 dispatch", () => {
   it("routes version 'v5' through scoreSetupV5 and labels it rule_v5", async () => {
-    const gated = await evaluateSetup(features({ side: "short", adx: 45, marketStructureLabel: "weak_uptrend", priceActionLabel: "normal" }), "v5");
+    const gated = await evaluateSetup(features({ side: "short", adx: 45, marketStructureLabel: "weak_uptrend", priceActionLabel: "normal" }), "v5", AT);
     expect(gated.modelUsed).toBe("rule_v5");
     expect(gated.v3Bucket).toBeNull();
     expect(gated.blockReason).toBeNull();
   });
 
   it("takes a strong v5 setup and skips a weak one, gated on the same threshold as other versions", async () => {
-    const strong = await evaluateSetup(features({ side: "short", adx: 45, marketStructureLabel: "weak_uptrend", priceActionLabel: "normal" }), "v5");
-    const weak = await evaluateSetup(features({ side: "long", adx: 45, marketStructureLabel: "weak_uptrend", priceActionLabel: "indecision_doji" }), "v5");
+    const strong = await evaluateSetup(features({ side: "short", adx: 45, marketStructureLabel: "weak_uptrend", priceActionLabel: "normal" }), "v5", AT);
+    const weak = await evaluateSetup(features({ side: "long", adx: 45, marketStructureLabel: "weak_uptrend", priceActionLabel: "indecision_doji" }), "v5", AT);
     expect(strong.probability).toBeGreaterThan(weak.probability);
   });
 });

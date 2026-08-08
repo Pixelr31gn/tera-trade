@@ -20,7 +20,133 @@ const nodeExe = path.join(baseDir, "node", "node.exe");
 const appDir = path.join(baseDir, "app");
 const backendEntry = path.join(appDir, "dist", "index.js");
 const outDir = path.join(baseDir, "out");
+const composeFile = path.join(baseDir, "docker-compose.yml");
+const envPath = path.join(appDir, ".env");
+const prismaCli = path.join(appDir, "node_modules", "prisma", "build", "index.js");
 const FRONTEND_PORT = process.env.FRONTEND_PORT ? Number(process.env.FRONTEND_PORT) : 3000;
+
+// Operator report, 2026-08-03: build-exe.ps1's original design documented
+// Docker Desktop as "a one-time, manual prerequisite" -- start it yourself,
+// then double-click tera-trade.exe. In practice that's an easy step to
+// forget (a reboot stops Docker Desktop; nothing about launching Tera Trade
+// itself reminds you it's not running), and the failure mode is an opaque
+// Postgres-connection crash from the backend with no obvious fix. Since this
+// exact recovery (start Docker Desktop if needed, wait for it, bring up
+// Postgres, apply any pending migrations) was already done by hand once and
+// worked cleanly, it belongs in the "every time" launcher itself instead of
+// staying a documented-but-unenforced prerequisite.
+function runToCompletion(command, args, opts) {
+  return new Promise((resolve) => {
+    const proc = spawn(command, args, { stdio: "inherit", ...opts });
+    proc.on("exit", (code) => resolve(code === 0));
+    proc.on("error", () => resolve(false));
+  });
+}
+
+function dockerInfoOk() {
+  return new Promise((resolve) => {
+    const proc = spawn("docker", ["info"], { stdio: "ignore" });
+    proc.on("exit", (code) => resolve(code === 0));
+    proc.on("error", () => resolve(false));
+  });
+}
+
+// Docker Desktop's GUI exe isn't reliably on PATH even when the `docker` CLI
+// is (the CLI lives under Docker Desktop's own resources\bin, which the
+// installer does add to PATH; the GUI launcher itself doesn't need to be,
+// and isn't, on most installs) -- check the two real install locations
+// instead of assuming. Per-user AppData path listed first: confirmed on the
+// machine this was developed on that Docker Desktop can be installed there
+// instead of Program Files.
+function findDockerDesktopExe() {
+  const candidates = [
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs", "DockerDesktop", "Docker Desktop.exe"),
+    process.env.ProgramFiles && path.join(process.env.ProgramFiles, "Docker", "Docker", "Docker Desktop.exe"),
+  ].filter(Boolean);
+  return candidates.find((p) => fs.existsSync(p)) ?? null;
+}
+
+async function ensureDockerRunning() {
+  if (await dockerInfoOk()) return true;
+
+  console.log("Docker isn't running yet -- starting Docker Desktop...");
+  const exePath = findDockerDesktopExe();
+  if (!exePath) {
+    console.error(
+      "Could not find Docker Desktop installed in either the usual per-user or Program Files location.\n" +
+        "Install it from https://www.docker.com/products/docker-desktop, start it once, then relaunch Tera Trade."
+    );
+    return false;
+  }
+  spawn(exePath, [], { detached: true, stdio: "ignore" }).unref();
+
+  // Docker Desktop's own WSL2/VM boot can genuinely take a minute or two
+  // cold (confirmed live) -- generous on purpose, same reasoning as
+  // openDashboard's CDP poll below.
+  console.log("Waiting for Docker Desktop to finish starting (this can take a couple of minutes on a cold start)...");
+  const deadline = Date.now() + 180_000;
+  while (Date.now() < deadline) {
+    if (await dockerInfoOk()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  console.error("Docker Desktop did not become ready within 3 minutes. Open it manually, wait for it to finish starting, then relaunch Tera Trade.");
+  return false;
+}
+
+function isPostgresHealthy() {
+  return new Promise((resolve) => {
+    const proc = spawn("docker", ["inspect", "--format={{.State.Health.Status}}", "teratrade-postgres"]);
+    let out = "";
+    proc.stdout.on("data", (chunk) => (out += chunk));
+    proc.on("exit", () => resolve(out.trim() === "healthy"));
+    proc.on("error", () => resolve(false));
+  });
+}
+
+async function waitForPostgresHealthy() {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    if (await isPostgresHealthy()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return false;
+}
+
+// Safe to run unconditionally on every launch, not just first-time setup --
+// `prisma migrate deploy` is a no-op when the schema is already current, and
+// this way a Tera Trade update that ships a new migration just works on the
+// next ordinary double-click instead of needing a separate manual step.
+async function ensurePostgresReady() {
+  // Checked BEFORE calling `docker compose up` at all, not just skipped when
+  // that command happens to no-op -- confirmed live (2026-08-03): if a
+  // "teratrade-postgres" container already exists (e.g. still running from
+  // an earlier launch, or started by a different checkout of this same
+  // compose file), `docker compose up` from a project that doesn't already
+  // consider itself that container's owner fails outright with a container
+  // name conflict instead of adopting it. Since the one thing that actually
+  // matters here is "is Postgres already reachable," check that directly
+  // first and only fall through to actually starting it if it isn't.
+  if (await isPostgresHealthy()) {
+    console.log("Local Postgres is already running and healthy.");
+  } else {
+    console.log("Starting local Postgres (if not already running)...");
+    if (!(await runToCompletion("docker", ["compose", "-f", composeFile, "--env-file", envPath, "up", "-d"], { cwd: baseDir }))) {
+      console.error("docker compose up failed -- see the error above.");
+      return false;
+    }
+    console.log("Waiting for Postgres to report healthy...");
+    if (!(await waitForPostgresHealthy())) {
+      console.error("Postgres didn't report healthy in time -- check 'docker compose logs' from this folder.");
+      return false;
+    }
+  }
+  console.log("Applying any pending database migrations...");
+  if (!(await runToCompletion(nodeExe, [prismaCli, "migrate", "deploy"], { cwd: appDir, env: process.env }))) {
+    console.error("Migration failed -- see the error above.");
+    return false;
+  }
+  return true;
+}
 
 // Tiny standalone .env reader (deliberately not shared with exe-setup.cjs --
 // same dependency-free, one-file-per-SEA-binary convention as everything
@@ -38,13 +164,6 @@ function readEnvValue(key, fallback) {
     return fallback;
   }
 }
-
-console.log("Starting Tera Trade backend...");
-const backend = spawn(nodeExe, [backendEntry], { stdio: "inherit", cwd: appDir, env: process.env });
-backend.on("error", (err) => {
-  console.error("Failed to launch the backend process:", err);
-  process.exit(1);
-});
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -154,25 +273,43 @@ async function openDashboard(url) {
   openInDefaultBrowser(url);
 }
 
-server.listen(FRONTEND_PORT, () => {
-  const url = `http://localhost:${FRONTEND_PORT}`;
-  console.log(`Tera Trade dashboard: ${url}`);
-  // Nice-to-have, not load-bearing: open the dashboard automatically so the
-  // whole "double-click and go" experience doesn't need a third manual step
-  // (typing the URL into a browser). Failure here is silently ignored --
-  // the app is fully usable either way.
-  openDashboard(url).catch(() => openInDefaultBrowser(url));
-});
+async function main() {
+  console.log("Checking local Postgres...");
+  if (!(await ensureDockerRunning()) || !(await ensurePostgresReady())) {
+    console.error("\nCannot continue without a working local Postgres. Fix the issue above, then relaunch Tera Trade.");
+    process.exitCode = 1;
+    return;
+  }
 
-function shutdown() {
-  backend.kill();
-  server.close();
-  process.exit(0);
+  console.log("Starting Tera Trade backend...");
+  const backend = spawn(nodeExe, [backendEntry], { stdio: "inherit", cwd: appDir, env: process.env });
+  backend.on("error", (err) => {
+    console.error("Failed to launch the backend process:", err);
+    process.exit(1);
+  });
+
+  function shutdown() {
+    backend.kill();
+    server.close();
+    process.exit(0);
+  }
+
+  backend.on("exit", (code) => {
+    server.close();
+    process.exit(code ?? 1);
+  });
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  server.listen(FRONTEND_PORT, () => {
+    const url = `http://localhost:${FRONTEND_PORT}`;
+    console.log(`Tera Trade dashboard: ${url}`);
+    // Nice-to-have, not load-bearing: open the dashboard automatically so the
+    // whole "double-click and go" experience doesn't need a third manual step
+    // (typing the URL into a browser). Failure here is silently ignored --
+    // the app is fully usable either way.
+    openDashboard(url).catch(() => openInDefaultBrowser(url));
+  });
 }
 
-backend.on("exit", (code) => {
-  server.close();
-  process.exit(code ?? 1);
-});
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+main();

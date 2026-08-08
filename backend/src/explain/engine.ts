@@ -11,7 +11,14 @@ import type { RiskAssessment } from "../risk/engine.js";
 import type { GatedScore } from "../scoring/gate.js";
 
 export function explainScore(symbol: string, side: string, gated: GatedScore, threshold: number): string {
-  const pct = `${Math.round(gated.probability * 100)}%`;
+  // One decimal place, not Math.round -- 2026-08-07: a real v6 score of
+  // 29.773% (rounds to "30%") displayed as if it had cleared the new 30%
+  // v6-solo execution gate (engine/loop.ts's V6_SOLO_EXECUTION_THRESHOLD)
+  // when it hadn't, reading as a bug ("this should've executed") when the
+  // gate was actually working correctly on the real, unrounded value. Whole-
+  // percent rounding is fine when nothing hinges on the exact boundary, but
+  // it no longer is here.
+  const pct = `${(gated.probability * 100).toFixed(1)}%`;
   // Sorting by |contribution| used to surface a setup's strongest-*supporting*
   // factors even when explaining a *skip* -- a skipped setup with a strong
   // ADX reading (say 15/20) but a weak/ranging structure reading (5/20)
@@ -22,7 +29,12 @@ export function explainScore(symbol: string, side: string, gated: GatedScore, th
   // shown always actually explain the decision instead of just being the
   // loudest numbers regardless of which way they point.
   const sorted = [...gated.factors].sort((a, b) => (gated.decision === "taken" ? b.contribution - a.contribution : a.contribution - b.contribution));
-  const topFactors = sorted.slice(0, 3);
+  // v6 is a fixed set of exactly 5 weighted criteria (see ruleScorerV6.ts),
+  // not a variable-length list of minor adjustments like v1/v2/v3/v5 --
+  // truncating to 3 silently drops 2 of them, and since a skipped setup
+  // often has several criteria all tied at 0 contribution, which 2 survive
+  // the cut is arbitrary (stable-sort insertion order). Show all 5 always.
+  const topFactors = gated.modelUsed === "rule_v6" ? sorted : sorted.slice(0, 3);
   const factorText = topFactors.map((f) => f.description).join("; ");
 
   if (gated.decision === "taken") {

@@ -45,7 +45,12 @@ async function loadBarsAfter(symbol: string, after: Date, limit: number): Promis
   return rows.map((r) => ({ time: r.time, open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close), volume: Number(r.volume) }));
 }
 
-async function computeFixedTargetEdge(symbol: string, session: TradingSession, side: "long" | "short"): Promise<FixedTargetEdgeStats> {
+// Exported for ReplayDecisionContext: replay must NOT go through
+// getFixedTargetEdge's cache below, which is keyed only by (symbol, session,
+// side) and TTLed against wall-clock time -- a later, cache-hit call for an
+// earlier historical `at` would silently return a different bar's result.
+// This is the uncached core; replay calls it directly every time.
+export async function computeFixedTargetEdge(symbol: string, session: TradingSession, side: "long" | "short", at: Date): Promise<FixedTargetEdgeStats> {
   // A symbol outside the static instrument list (e.g. a synthetic test
   // fixture) has no known tick size to compute a stop plan against --
   // report "no evidence yet" rather than crashing the whole engine loop.
@@ -56,7 +61,13 @@ async function computeFixedTargetEdge(symbol: string, session: TradingSession, s
     return summarizeFixedTargetOutcomes([]);
   }
 
-  const scores = await prisma.score.findMany({ where: { symbol, session, side }, orderBy: { time: "desc" }, take: MAX_SCORES_TO_EVALUATE });
+  // `time: { lt: at }` bounds this to scores from before the setup being
+  // evaluated right now -- live always calls with (effectively) the current
+  // time, so this is a no-op there; in replay, `at` is the historical bar
+  // being scored, and without the bound this would read outcomes from setups
+  // that (in real historical time) haven't happened yet. See
+  // .claude/rules/replay-harness.md.
+  const scores = await prisma.score.findMany({ where: { symbol, session, side, time: { lt: at } }, orderBy: { time: "desc" }, take: MAX_SCORES_TO_EVALUATE });
 
   // Still fundamentally one loadBarsAfter query per score (each needs a
   // different bar window), but run with bounded concurrency instead of one
@@ -88,12 +99,17 @@ async function computeFixedTargetEdge(symbol: string, session: TradingSession, s
   return summarizeFixedTargetOutcomes(labels);
 }
 
-export async function getFixedTargetEdge(symbol: string, session: TradingSession, side: "long" | "short"): Promise<FixedTargetEdgeStats> {
+// `at` is the caller's as-of time (see decisionCore.ts). Live and replay both
+// pass it explicitly now; live's own TTL cache below still keys purely off
+// (symbol, session, side) and ignores `at` for cache-hit purposes -- callers
+// only ever call this "now," so the cache's existing wall-clock TTL already
+// does the right thing there, unchanged by this parameter's addition.
+export async function getFixedTargetEdge(symbol: string, session: TradingSession, side: "long" | "short", at: Date): Promise<FixedTargetEdgeStats> {
   const key = `${symbol}:${session}:${side}`;
   const cached = cache.get(key);
   if (cached && Date.now() - cached.computedAt < CACHE_TTL_MS) return cached.stats;
 
-  const stats = await computeFixedTargetEdge(symbol, session, side);
+  const stats = await computeFixedTargetEdge(symbol, session, side, at);
   cache.set(key, { stats, computedAt: Date.now() });
   return stats;
 }

@@ -33,7 +33,15 @@ import { ppmDirectionSignal } from "../analytics/ppm.js";
 // v5 is a new, real-data-mined rule-based scorer (see ruleScorerV5.ts),
 // shadow-scored only (engine/loop.ts's STRATEGY_VERSIONS does not include
 // it) until the operator decides it's ready to vote on consensus.
-export type StrategyVersion = "v1" | "v2" | "v3" | "v4" | "v5";
+//
+// "v6" (2026-08-02, operator spec: "a version that incorporates v1 v2 v3 v5
+// with its own buy/sell setup rules") is a different shape again -- not an
+// independently mined pattern set like v5, an ENSEMBLE that combines v1/v2/
+// v3/v5's own probabilities with strategy/trendPullbackFib.ts's own rule
+// check as a confirmation bonus (see ruleScorerV6.ts). Also shadow-scored
+// only for now -- same promotion bar as v5, not skipped just because it's
+// newer.
+export type StrategyVersion = "v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7";
 
 // Weights are hand-set, documented priors -- not fit to data. Magnitudes
 // reflect how strongly each factor should move the pre-threshold

@@ -3,12 +3,15 @@ import { getSettings, TradingMode } from "../../core/config.js";
 import { requireApiKey } from "../../core/security.js";
 import {
   clearKillSwitch,
+  type ConfidenceTierInput,
   getSystemState,
   isLiveBrokerConnected,
   ModeChangeError,
   setActiveStrategyVersion,
+  setConfidenceTiers,
   setExecutionDecisionEngineEnabled,
   setMode,
+  setTakeProfitRMultiple,
 } from "../../execution/mode.js";
 import type { StrategyVersion } from "../../scoring/ruleScorer.js";
 
@@ -32,6 +35,12 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
       minScoreThreshold: settings.minScoreThreshold,
       activeStrategyVersion: state.activeStrategyVersion,
       executionDecisionEngineEnabled: state.executionDecisionEngineEnabled,
+      takeProfitRMultiple: state.takeProfitRMultiple,
+      confidenceTiers: [
+        { threshold: state.confidenceTier1Threshold, quantity: state.confidenceTier1Quantity },
+        { threshold: state.confidenceTier2Threshold, quantity: state.confidenceTier2Quantity },
+        { threshold: state.confidenceTier3Threshold, quantity: state.confidenceTier3Quantity },
+      ],
       updatedAt: state.updatedAt,
     };
   });
@@ -59,8 +68,9 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
   // than removed) since it's still informational/harmless, but changing it
   // no longer changes what actually trades.
   app.post<{ Body: { version: StrategyVersion } }>("/api/system/strategy-version", async (request, reply) => {
-    if (request.body.version !== "v1" && request.body.version !== "v2" && request.body.version !== "v3" && request.body.version !== "v4" && request.body.version !== "v5") {
-      return reply.code(400).send({ error: "version must be 'v1', 'v2', 'v3', 'v4', or 'v5'" });
+    const valid: StrategyVersion[] = ["v1", "v2", "v3", "v4", "v5", "v6"];
+    if (!valid.includes(request.body.version)) {
+      return reply.code(400).send({ error: `version must be one of ${valid.join(", ")}` });
     }
     const state = await setActiveStrategyVersion(request.body.version);
     return { activeStrategyVersion: state.activeStrategyVersion };
@@ -73,5 +83,38 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: { enabled: boolean } }>("/api/system/execution-decision-engine", async (request) => {
     const state = await setExecutionDecisionEngineEnabled(request.body.enabled);
     return { executionDecisionEngineEnabled: state.executionDecisionEngineEnabled };
+  });
+
+  // Shared by every strategy/scoring version -- see risk/stops.ts's
+  // computeInitialStop and SystemState.takeProfitRMultiple's schema comment.
+  app.post<{ Body: { value: number } }>("/api/system/take-profit-r-multiple", async (request, reply) => {
+    try {
+      const state = await setTakeProfitRMultiple(request.body.value);
+      return { takeProfitRMultiple: state.takeProfitRMultiple };
+    } catch (err) {
+      if (err instanceof ModeChangeError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
+  });
+
+  // Exactly 3 tiers -- see risk/sizing.ts's computeConfidenceTierQuantity.
+  app.post<{ Body: { tiers: ConfidenceTierInput[] } }>("/api/system/confidence-tiers", async (request, reply) => {
+    if (!Array.isArray(request.body.tiers) || request.body.tiers.length !== 3) {
+      return reply.code(400).send({ error: "tiers must be an array of exactly 3 { threshold, quantity } entries" });
+    }
+    try {
+      const [a, b, c] = request.body.tiers as [ConfidenceTierInput, ConfidenceTierInput, ConfidenceTierInput];
+      const state = await setConfidenceTiers([a, b, c]);
+      return {
+        confidenceTiers: [
+          { threshold: state.confidenceTier1Threshold, quantity: state.confidenceTier1Quantity },
+          { threshold: state.confidenceTier2Threshold, quantity: state.confidenceTier2Quantity },
+          { threshold: state.confidenceTier3Threshold, quantity: state.confidenceTier3Quantity },
+        ],
+      };
+    } catch (err) {
+      if (err instanceof ModeChangeError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
   });
 }

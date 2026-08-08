@@ -119,6 +119,12 @@ const EnvSchema = z.object({
   CHROME_EXECUTABLE_PATH: z.string().optional(),
   CHROME_DEBUG_USER_DATA_DIR: z.string().optional(),
   CHROME_DEBUG_START_URL: z.string().default("https://topstepx.com/"),
+  // Opened as a second tab in the same debug Chrome session once it's
+  // reachable, so the dashboard is always sitting right next to the
+  // TopstepX tab instead of requiring a separate manual browser window.
+  // Blank disables this (e.g. if you'd rather keep the debug profile
+  // TopstepX-only).
+  DASHBOARD_URL: z.string().default("http://localhost:3000"),
 
   // --- Order-flow listener (reads live bid/ask size + trade-aggressor flow
   // off the same TopstepX tab's WebSocket traffic, see
@@ -188,6 +194,7 @@ export interface Settings {
   chromeExecutablePath: string | undefined;
   chromeDebugUserDataDir: string | undefined;
   chromeDebugStartUrl: string;
+  dashboardUrl: string;
   orderFlowEnabled: boolean;
   orderFlowFlushSeconds: number;
   dryRunOrders: boolean;
@@ -245,6 +252,7 @@ export function getSettings(): Settings {
     chromeExecutablePath: env.CHROME_EXECUTABLE_PATH,
     chromeDebugUserDataDir: env.CHROME_DEBUG_USER_DATA_DIR,
     chromeDebugStartUrl: env.CHROME_DEBUG_START_URL,
+    dashboardUrl: env.DASHBOARD_URL,
     orderFlowEnabled: env.ORDER_FLOW_ENABLED,
     orderFlowFlushSeconds: env.ORDER_FLOW_FLUSH_SECONDS,
     dryRunOrders: env.DRY_RUN_ORDERS,

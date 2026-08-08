@@ -93,6 +93,7 @@ async function main(): Promise<void> {
         executablePath: settings.chromeExecutablePath,
         userDataDir: settings.chromeDebugUserDataDir,
         startUrl: settings.chromeDebugStartUrl,
+        dashboardUrl: settings.dashboardUrl,
       });
     }
   }

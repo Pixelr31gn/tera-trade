@@ -43,9 +43,16 @@ export function computeAdjustmentFromOutcomes(outcomeLabels: (string | null)[]):
   return { adjustmentPoints, sampleSize: outcomeLabels.length, winRate };
 }
 
-export async function computeHistoricalAdjustment(symbol: string, bucket: string): Promise<HistoricalAdjustment> {
+// `at` bounds the query to scores strictly before the setup being evaluated
+// right now -- live always calls this with (effectively) the current time,
+// so every existing row already satisfies `time < at` and the bound is a
+// no-op there. In replay, `at` is the historical bar being scored, and
+// without this bound the query would pull outcomes from setups that (in
+// real historical time) haven't happened yet relative to that bar -- a
+// classic look-ahead. See .claude/rules/replay-harness.md.
+export async function computeHistoricalAdjustment(symbol: string, bucket: string, at: Date): Promise<HistoricalAdjustment> {
   const rows = await prisma.score.findMany({
-    where: { strategyVersion: "v3", symbol, v3Bucket: bucket, outcomeLabel: { in: RESOLVED_OUTCOME_LABELS } },
+    where: { strategyVersion: "v3", symbol, v3Bucket: bucket, outcomeLabel: { in: RESOLVED_OUTCOME_LABELS }, time: { lt: at } },
     orderBy: { time: "desc" },
     take: MAX_SIMILAR_SAMPLES,
     select: { outcomeLabel: true },

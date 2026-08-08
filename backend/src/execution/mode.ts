@@ -7,10 +7,12 @@
  * a second, separate flag from `tradingMode` -- so nothing can
  * auto-escalate from paper to live by itself.
  */
+import { Decimal } from "decimal.js";
 import { prisma } from "../db/client.js";
 import { getSettings, TradingMode } from "../core/config.js";
 import type { StrategyVersion } from "../scoring/ruleScorer.js";
 import type { SystemState } from "@prisma/client";
+import type { ExecutionSettings } from "../replay/types.js";
 
 export class ModeChangeError extends Error {}
 
@@ -40,6 +42,23 @@ export async function getSystemState(): Promise<SystemState> {
     });
   }
   return state;
+}
+
+/**
+ * Builds the ExecutionSettings bag (replay/types.ts) risk/ layer functions
+ * take as a plain parameter -- risk/ stays DB-free per CLAUDE.md's purity
+ * rule, so every caller (LiveDecisionContext, the recommendation-preview
+ * endpoint) resolves this here rather than reading prisma.systemState
+ * directly themselves.
+ */
+export async function getExecutionSettings(): Promise<ExecutionSettings> {
+  const state = await getSystemState();
+  const tiers: [number, number][] = [
+    [Number(state.confidenceTier1Threshold.toString()), state.confidenceTier1Quantity],
+    [Number(state.confidenceTier2Threshold.toString()), state.confidenceTier2Quantity],
+    [Number(state.confidenceTier3Threshold.toString()), state.confidenceTier3Quantity],
+  ];
+  return { takeProfitRMultiple: new Decimal(state.takeProfitRMultiple.toString()), confidenceTiers: tiers };
 }
 
 export async function setMode(mode: TradingMode): Promise<SystemState> {
@@ -91,4 +110,38 @@ export async function setActiveStrategyVersion(version: StrategyVersion): Promis
 export async function setExecutionDecisionEngineEnabled(enabled: boolean): Promise<SystemState> {
   await getSystemState();
   return prisma.systemState.update({ where: { id: 1 }, data: { executionDecisionEngineEnabled: enabled } });
+}
+
+// Shared by every strategy/scoring version (risk/stops.ts's
+// computeInitialStop has no per-strategy or per-version branch) -- see
+// schema.prisma's SystemState.takeProfitRMultiple comment.
+export async function setTakeProfitRMultiple(multiple: number): Promise<SystemState> {
+  if (!(multiple > 0)) throw new ModeChangeError("takeProfitRMultiple must be a positive number");
+  await getSystemState();
+  return prisma.systemState.update({ where: { id: 1 }, data: { takeProfitRMultiple: multiple } });
+}
+
+export interface ConfidenceTierInput {
+  threshold: number;
+  quantity: number;
+}
+
+// Exactly 3 tiers, ascending by threshold -- matches risk/sizing.ts's
+// computeConfidenceTierQuantity, which walks them highest-first to find the
+// first one the consensus average clears.
+export async function setConfidenceTiers(tiers: [ConfidenceTierInput, ConfidenceTierInput, ConfidenceTierInput]): Promise<SystemState> {
+  const sorted = [...tiers].sort((a, b) => a.threshold - b.threshold);
+  for (const t of sorted) {
+    if (!(t.threshold > 0 && t.threshold < 1)) throw new ModeChangeError("each tier threshold must be between 0 and 1");
+    if (!Number.isInteger(t.quantity) || t.quantity < 1) throw new ModeChangeError("each tier quantity must be a positive integer");
+  }
+  await getSystemState();
+  return prisma.systemState.update({
+    where: { id: 1 },
+    data: {
+      confidenceTier1Threshold: sorted[0]!.threshold, confidenceTier1Quantity: sorted[0]!.quantity,
+      confidenceTier2Threshold: sorted[1]!.threshold, confidenceTier2Quantity: sorted[1]!.quantity,
+      confidenceTier3Threshold: sorted[2]!.threshold, confidenceTier3Quantity: sorted[2]!.quantity,
+    },
+  });
 }

@@ -7,6 +7,11 @@ function fakeGated(decision: "taken" | "skipped_score", probability = 0.7): Gate
   return { probability, decision, factors: [], modelUsed: "rule_v1", blockReason: null, v3Bucket: null };
 }
 
+// evaluateSetup requires an explicit `at` (see v3HistoricalAdjustment.ts's
+// look-ahead-bound comment) -- none of these tests exercise the v3 branch
+// that actually reads it, so any fixed timestamp is fine.
+const AT = new Date("2026-01-15T15:00:00Z");
+
 function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
   return {
     symbol: "ES",
@@ -103,26 +108,28 @@ describe("scoreSetup", () => {
 
 describe("evaluateSetup (gate)", () => {
   it("blocks low-probability setups", async () => {
-    const gated = await evaluateSetup(features({ trendLabel: "down", side: "long", newsRiskFlag: true, newsMinutesToEvent: 2, adx: 15 }));
+    const gated = await evaluateSetup(features({ trendLabel: "down", side: "long", newsRiskFlag: true, newsMinutesToEvent: 2, adx: 15 }), "v1", AT);
     expect(gated.decision).toBe("skipped_score");
   });
 
   it("allows high-probability setups", async () => {
-    const gated = await evaluateSetup(features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9 }));
+    const gated = await evaluateSetup(features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9 }), "v1", AT);
     expect(gated.decision).toBe("taken");
     expect(gated.probability).toBeGreaterThanOrEqual(0.65);
   });
 
   it("blocks a setup that fights a confident daily trend even when everything else looks good", async () => {
     const gated = await evaluateSetup(
-      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, dailyTrendLabel: "down", dailyTrendConfidence: 0.9 })
+      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, dailyTrendLabel: "down", dailyTrendConfidence: 0.9 }),
+      "v1", AT
     );
     expect(gated.decision).toBe("skipped_score");
   });
 
   it("no longer applies a fixed-target-points hard gate to longs -- a low historical 20pt win rate doesn't block an otherwise-qualifying long", async () => {
     const gated = await evaluateSetup(
-      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: 0.16, longTargetSampleSize: 339 })
+      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: 0.16, longTargetSampleSize: 339 }),
+      "v1", AT
     );
     expect(gated.decision).toBe("taken");
     expect(gated.blockReason).toBeNull();
@@ -130,22 +137,23 @@ describe("evaluateSetup (gate)", () => {
 
   it("no longer blocks a long just because there aren't enough historical fixed-target samples yet", async () => {
     const gated = await evaluateSetup(
-      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: null, longTargetSampleSize: 3 })
+      features({ trendLabel: "up", side: "long", momentum10: 0.03, adx: 40, slopeR2: 0.9, longTargetWinRate: null, longTargetSampleSize: 3 }),
+      "v1", AT
     );
     expect(gated.decision).toBe("taken");
     expect(gated.blockReason).toBeNull();
   });
 
   it("passes the strategy version through to the rule scorer", async () => {
-    const v1 = await evaluateSetup(features({ marketStructureLabel: "ranging" }), "v1");
-    const v2 = await evaluateSetup(features({ marketStructureLabel: "ranging" }), "v2");
+    const v1 = await evaluateSetup(features({ marketStructureLabel: "ranging" }), "v1", AT);
+    const v2 = await evaluateSetup(features({ marketStructureLabel: "ranging" }), "v2", AT);
     expect(v1.probability).not.toBe(v2.probability);
   });
 });
 
 describe("evaluateSetup (gate) - v3", () => {
   it("throws if v3Inputs (bars) aren't provided", async () => {
-    await expect(evaluateSetup(features({}), "v3")).rejects.toThrow(/v3Inputs is required/);
+    await expect(evaluateSetup(features({}), "v3", AT)).rejects.toThrow(/extra is required/);
   });
 
   // evaluateSetup's v3 path also calls computeHistoricalAdjustment, which

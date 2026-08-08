@@ -22,6 +22,13 @@ backend/dist-launcher/
 .env.*
 !.env.example
 
+# CLAUDE.md: "Never commit or modify .env, license keys, or anything under
+# src/core/license.ts" -- excluded here so this holds automatically rather
+# than relying on remembering it on every future commit.
+backend/src/core/license.ts
+backend/scripts/generateLicenseKey.ts
+backend/tests/license.test.ts
+
 # OS
 .DS_Store
 Thumbs.db
@@ -34,6 +41,9 @@ Thumbs.db
 backend/backend-dev.log
 frontend/frontend-dev.log
 frontend/prod-check.log
+backend-relaunch.log
+frontend-relaunch.log
+*.log
 
 # Stray Chrome user-data-dir profile artifacts that have ended up directly in
 # the repo root at some point (should live in the debug profile dir instead,

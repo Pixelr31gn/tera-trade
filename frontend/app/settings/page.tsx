@@ -60,6 +60,37 @@ export default function SettingsPage() {
     return Number.isFinite(n) ? n : null;
   }
 
+  async function saveTakeProfitRMultiple(formData: FormData) {
+    setSaving(true);
+    setError(null);
+    try {
+      const value = Number(formData.get("takeProfitRMultiple"));
+      await apiFetch("/api/system/take-profit-r-multiple", { method: "POST", body: JSON.stringify({ value }) });
+      mutateState();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save reward:risk");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveConfidenceTiers(formData: FormData) {
+    setSaving(true);
+    setError(null);
+    try {
+      const tiers = [1, 2, 3].map((n) => ({
+        threshold: Number(formData.get(`tier${n}Threshold`)) / 100,
+        quantity: Number(formData.get(`tier${n}Quantity`)),
+      }));
+      await apiFetch("/api/system/confidence-tiers", { method: "POST", body: JSON.stringify({ tiers }) });
+      mutateState();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save confidence tiers");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function saveRiskLimits(formData: FormData) {
     if (!account) return;
     setSaving(true);
@@ -95,7 +126,14 @@ export default function SettingsPage() {
       >
         <div className="space-y-3">
           {MODES.map((m) => {
-            const disabled = m.value === "live" && !systemState?.liveBrokerConnected;
+            // Deliberately always clickable (2026-08-02, operator request) --
+            // NOT a widened gate: execution/mode.ts's setMode still rejects
+            // the switch server-side with a clear error if no live broker is
+            // actually connected or LIVE_TRADING_CONFIRMED isn't set. This
+            // only changes whether the button is greyed out in advance;
+            // clicking it when the prerequisites aren't met surfaces the
+            // rejection as an error message instead of a disabled button.
+            const disabled = false;
             return (
               <button
                 key={m.value}
@@ -217,6 +255,81 @@ export default function SettingsPage() {
         ) : (
           <p className="text-sm text-gray-500">Loading account...</p>
         )}
+      </Panel>
+
+      <Panel title="Reward:Risk">
+        <p className="mb-4 text-sm text-gray-300">
+          The take-profit target is set at this multiple of the stop distance, for every strategy and
+          scoring version (v1/v2/v3/v5/v6+) -- there is no per-strategy or per-version override. Takes
+          effect immediately on the next signal, no restart needed.
+        </p>
+        <form action={saveTakeProfitRMultiple} className="flex items-end gap-3">
+          <label className="text-xs text-gray-400">
+            Reward:Risk multiple
+            <input
+              name="takeProfitRMultiple"
+              type="number"
+              step="0.1"
+              min="0.1"
+              defaultValue={systemState?.takeProfitRMultiple ?? 2.0}
+              className="mt-1 w-32 rounded border border-border bg-background px-2 py-1.5 text-sm text-white"
+            />
+          </label>
+          <button
+            type="submit"
+            disabled={saving}
+            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {saving ? "Saving..." : "Save"}
+          </button>
+        </form>
+      </Panel>
+
+      <Panel title="Confidence-Tier Position Sizing">
+        <p className="mb-4 text-sm text-gray-300">
+          Quantity placed is set directly by which of these three cross-version consensus average
+          tiers the setup clears, lowest tier first as the floor (never sized to zero once every other
+          gate has already approved the trade). Thresholds must be strictly ascending.
+        </p>
+        <form action={saveConfidenceTiers} className="space-y-3">
+          {[1, 2, 3].map((n) => {
+            const tier = systemState?.confidenceTiers?.[n - 1];
+            return (
+              <div key={n} className="flex items-end gap-3">
+                <label className="text-xs text-gray-400">
+                  Tier {n} threshold (%)
+                  <input
+                    name={`tier${n}Threshold`}
+                    type="number"
+                    step="1"
+                    min="1"
+                    max="99"
+                    defaultValue={tier ? Math.round(tier.threshold * 100) : [65, 75, 85][n - 1]}
+                    className="mt-1 w-28 rounded border border-border bg-background px-2 py-1.5 text-sm text-white"
+                  />
+                </label>
+                <label className="text-xs text-gray-400">
+                  Contracts
+                  <input
+                    name={`tier${n}Quantity`}
+                    type="number"
+                    step="1"
+                    min="1"
+                    defaultValue={tier?.quantity ?? n}
+                    className="mt-1 w-24 rounded border border-border bg-background px-2 py-1.5 text-sm text-white"
+                  />
+                </label>
+              </div>
+            );
+          })}
+          <button
+            type="submit"
+            disabled={saving}
+            className="w-fit rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {saving ? "Saving..." : "Save confidence tiers"}
+          </button>
+        </form>
       </Panel>
 
       <Panel title="Scoring Threshold">

@@ -17,6 +17,8 @@ import type { SetupFeatures } from "./features.js";
 import { scoreSetup, type FactorContribution, type StrategyVersion } from "./ruleScorer.js";
 import { computeBreakoutStrengthAdjustment, computeEmaProximityAdjustment, computeFibAdjustment, computeOrderFlowAdjustment, computePpmAdjustment, computeRiskRewardAdjustment, computeV3Bucket, scoreSetupV3Directional } from "./ruleScorerV3.js";
 import { scoreSetupV5 } from "./ruleScorerV5.js";
+import { scoreSetupV6 } from "./ruleScorerV6.js";
+import { scoreSetupV7 } from "./ruleScorerV7.js";
 import { computeHistoricalAdjustment } from "./v3HistoricalAdjustment.js";
 import { MLScorer } from "./training.js";
 
@@ -24,7 +26,7 @@ export interface GatedScore {
   probability: number;
   decision: "taken" | "skipped_score";
   factors: FactorContribution[];
-  modelUsed: "rule_v1" | "ml_v4" | "rule_v1_fallback" | "rule_v3" | "rule_v5";
+  modelUsed: "rule_v1" | "ml_v4" | "rule_v1_fallback" | "rule_v3" | "rule_v5" | "rule_v6" | "rule_v7";
   /** Set when a setup that otherwise cleared the probability threshold was blocked by a hard rule (v3's directional-conviction check below) -- lets explainScore report the real reason instead of a misleading "below threshold". */
   blockReason: string | null;
   /** Only set for v3 -- the categorical fingerprint this setup was scored under, persisted on the Score row so future setups can look up how similar-looking ones performed (see v3HistoricalAdjustment.ts). */
@@ -55,10 +57,30 @@ export function shouldOverrideToTaken(v1Gated: GatedScore | undefined, v2Gated: 
   return v1Gated?.decision === "taken" && v2Gated?.decision === "taken";
 }
 
+/**
+ * v3's own directional-conviction override (v1v2Override below) and v6's
+ * ensemble base both need OTHER versions' already-computed results -- this
+ * carries whichever ones the caller has on hand at that point. Field usage
+ * by version: v3 needs bars/v1Gated/v2Gated/signalKind; v6 needs
+ * bars/v1Gated/v2Gated/v3Gated/v5Gated. Was v3-only ("v3Inputs") until v6
+ * needed the same shape (2026-08-02) -- renamed rather than adding a second,
+ * near-identical parameter.
+ */
+export interface ScoringInputs {
+  bars: OhlcBar[];
+  v1Gated?: GatedScore;
+  v2Gated?: GatedScore;
+  v3Gated?: GatedScore;
+  v5Gated?: GatedScore;
+  signalKind?: "breakout" | "reversal";
+}
+
 export async function evaluateSetup(
   features: SetupFeatures,
   version: StrategyVersion = "v1",
-  v3Inputs?: { bars: OhlcBar[]; v1Gated?: GatedScore; v2Gated?: GatedScore; signalKind?: "breakout" | "reversal" }
+  /** As-of time for this setup's decision -- threaded to computeHistoricalAdjustment's time bound (see that file's comment). Always the bar/signal time, never wall-clock Date.now(), so replay can pass a historical bar time and get the same look-ahead protection live gets for free. */
+  at: Date,
+  extra?: ScoringInputs
 ): Promise<GatedScore> {
   const settings = getSettings();
 
@@ -66,13 +88,14 @@ export async function evaluateSetup(
     // v3 is a different scoring *mechanism* entirely (six independent
     // 0-100-point factors evaluated for both directions) -- it doesn't go
     // through the v4 ML-scorer branch below.
-    if (!v3Inputs) throw new Error("evaluateSetup: v3Inputs is required when version is 'v3'");
+    if (!extra) throw new Error("evaluateSetup: extra is required when version is 'v3'");
+    const v3Inputs = extra;
     const { readings, bullish, bearish } = scoreSetupV3Directional(v3Inputs.bars, features);
     const mySide = features.side === "long" ? bullish : bearish;
     const otherSide = features.side === "long" ? bearish : bullish;
     const bucket = computeV3Bucket(readings, features.side);
 
-    const historical = await computeHistoricalAdjustment(features.symbol, bucket);
+    const historical = await computeHistoricalAdjustment(features.symbol, bucket, at);
 
     // Breakout conviction adjustment -- only meaningful for breakout-kind
     // signals (see ruleScorerV3.ts's computeBreakoutStrengthAdjustment for
@@ -171,6 +194,35 @@ export async function evaluateSetup(
     const result = scoreSetupV5(features);
     const decision: "taken" | "skipped_score" = result.probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
     return { probability: result.probability, decision, factors: result.factors, modelUsed: "rule_v5", blockReason: null, v3Bucket: null };
+  }
+
+  if (version === "v6") {
+    // v6 is a complete, self-contained scorer as of 2026-08-03 (operator
+    // spec: five weighted criteria on the trend-pullback-fib setup) -- it no
+    // longer averages v1/v2/v3/v5 internally, so unlike the version this
+    // replaced, it doesn't need their GatedScores as input. It only needs
+    // the raw bars (see ruleScorerV6.ts's header for the full breakdown).
+    // The outer v6-mandatory consensus rule (engine/loop.ts) still requires
+    // v1/v2/v3/v5's OWN results to exist in gatedByVersion, but that's a
+    // separate map this function's caller manages, not something evaluateSetup
+    // itself needs to see.
+    if (!extra?.bars) {
+      throw new Error("evaluateSetup: extra.bars is required when version is 'v6'");
+    }
+    const result = scoreSetupV6(features, extra.bars);
+    const decision: "taken" | "skipped_score" = result.probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
+    return { probability: result.probability, decision, factors: result.factors, modelUsed: "rule_v6", blockReason: null, v3Bucket: null };
+  }
+
+  if (version === "v7") {
+    // v7 (2026-08-07) is a plain weighted-points scorer built from the
+    // `add-scoring-version` skill's Step -1 pattern-mining methodology --
+    // same shape as v5 (no v3Inputs, no directional-conviction margin, no
+    // historical-similarity lookup). See ruleScorerV7.ts's header for the
+    // three mined factors and the real win-rate numbers behind them.
+    const result = scoreSetupV7(features);
+    const decision: "taken" | "skipped_score" = result.probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
+    return { probability: result.probability, decision, factors: result.factors, modelUsed: "rule_v7", blockReason: null, v3Bucket: null };
   }
 
   // v4 is the independently-trained ML model (see scoring/training.ts) --

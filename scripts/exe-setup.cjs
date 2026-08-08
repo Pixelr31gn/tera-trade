@@ -6,7 +6,7 @@
 // uses Node builtins (child_process, fs, path, crypto, readline) -- nothing
 // SEA can't handle, since this doesn't touch Prisma/Playwright itself, only
 // spawns `docker` and the bundled Prisma CLI as separate real processes.
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -40,6 +40,18 @@ function setEnvValue(lines, key, value) {
   return lines;
 }
 
+// TEMPORARY (2026-08-01, operator request): embedded here instead of
+// prompted for, until a real per-installation subscription check (the
+// operator's stated plan: auto-stop the app after 30 days) replaces this.
+// Remove this constant and restore the prompt-only flow below once that
+// exists -- CLAUDE.md's own rule is "never commit or modify .env, license
+// keys, or anything under src/core/license.ts" specifically to prevent this
+// shape of change; the operator explicitly overrode it for this build only,
+// aware that shipping this key baked into a rebuilt exe means anyone who
+// gets a copy of that exe gets this license with no check at all.
+const DEFAULT_LICENSE_KEY =
+  "eyJsaWNlbnNlZFRvIjoiRWxpamFoIFdlYmIiLCJpc3N1ZWRBdCI6IjIwMjYtMDctMjBUMTg6NTQ6MzguNTk3WiIsImV4cGlyZXNBdCI6bnVsbH0.9ugC44tXSUTMksa3lsvg9enAjS-DvzsE-9JqAIDb53U";
+
 // One shared interface for the whole script, not one per question -- creating
 // and closing a fresh readline.Interface per prompt() call (confirmed live,
 // 2026-07-29) can silently drop the next question's already-buffered answer:
@@ -56,6 +68,50 @@ function prompt(question) {
 
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// See scripts/exe-launcher.cjs's matching functions for the full "why" --
+// same fix applied here for consistency, 2026-08-03, so first-time setup
+// doesn't hit a harder-to-recover-from wall than the everyday launcher does
+// if Docker Desktop just isn't running yet.
+function findDockerDesktopExe() {
+  const candidates = [
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs", "DockerDesktop", "Docker Desktop.exe"),
+    process.env.ProgramFiles && path.join(process.env.ProgramFiles, "Docker", "Docker", "Docker Desktop.exe"),
+  ].filter(Boolean);
+  return candidates.find((p) => fs.existsSync(p)) ?? null;
+}
+
+function dockerInfoOk() {
+  return spawnSync("docker", ["info"], { stdio: "ignore" }).status === 0;
+}
+
+function isPostgresHealthy() {
+  const check = spawnSync("docker", ["inspect", "--format={{.State.Health.Status}}", "teratrade-postgres"]);
+  return !!(check.stdout && check.stdout.toString().trim() === "healthy");
+}
+
+function ensureDockerRunning() {
+  if (dockerInfoOk()) return true;
+
+  console.log("Docker isn't running yet -- starting Docker Desktop...");
+  const exePath = findDockerDesktopExe();
+  if (!exePath) {
+    console.error(
+      "\nCould not find Docker Desktop installed in either the usual per-user or Program Files location.\n" +
+        "Install it from https://www.docker.com/products/docker-desktop, start it once, then re-run this setup."
+    );
+    return false;
+  }
+  spawn(exePath, [], { detached: true, stdio: "ignore" }).unref();
+
+  console.log("Waiting for Docker Desktop to finish starting (this can take a couple of minutes on a cold start)...");
+  for (let i = 0; i < 90; i++) {
+    if (dockerInfoOk()) return true;
+    sleep(2000);
+  }
+  console.error("\nDocker Desktop did not become ready within 3 minutes. Open it manually, wait for it to finish starting, then re-run this setup.");
+  return false;
 }
 
 async function main() {
@@ -86,27 +142,20 @@ async function main() {
   lines = setEnvValue(lines, "DATABASE_URL", `postgresql://teratrade:${pgPassword}@localhost:5432/teratrade?schema=public`);
 
   if (!getEnvValue(lines, "LICENSE_KEY")) {
-    console.log("\nYou need a license key -- whoever gave you this package should have sent you one.");
-    // Only ONE prompt, deliberately -- a second sequential rl.question() call
-    // on the same readline interface never resolves when this script is
-    // running as a SEA-compiled exe with piped/non-interactive stdin
-    // (confirmed live, 2026-07-29: reproduced 100% of the time under SEA,
-    // 0% under a plain `node` process running the identical script -- a real
-    // Node SEA limitation, not a bug in this script's own logic). Asking for
-    // "licensed-to" separately used to hit this exact wall. Sidestepped
-    // entirely by only ever prompting once: licensedTo is decoded straight
-    // out of the key's own payload instead (see core/license.ts's
-    // issueLicenseKey -- the payload is plain base64url JSON, not encrypted,
-    // so this is just reversing that same encoding, not new information).
-    const licenseKey = await prompt("License key: ");
+    // See DEFAULT_LICENSE_KEY's comment above -- temporarily skips the
+    // prompt entirely instead of asking, until real subscription enforcement
+    // exists. The original prompt-based flow (kept here in history, not
+    // deleted, for when this is reverted):
+    //   const licenseKey = await prompt("License key: ");
+    const licenseKey = DEFAULT_LICENSE_KEY;
     lines = setEnvValue(lines, "LICENSE_KEY", licenseKey);
     try {
       const payloadB64 = licenseKey.split(".")[0];
       const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
       lines = setEnvValue(lines, "LICENSED_TO", payload.licensedTo);
-      console.log(`License recognized for: ${payload.licensedTo}`);
+      console.log(`License recognized for: ${payload.licensedTo} (embedded default license key -- see exe-setup.cjs's DEFAULT_LICENSE_KEY comment)`);
     } catch {
-      console.error("\nThat doesn't look like a valid license key (couldn't read who it's licensed to) -- double-check it and re-run this setup.");
+      console.error("\nEmbedded default license key is malformed -- this is a packaging bug, not something re-running setup will fix.");
       process.exitCode = 1;
       return;
     }
@@ -115,28 +164,42 @@ async function main() {
 
   fs.writeFileSync(envPath, lines.join("\n"));
 
-  console.log("\nStarting local Postgres in Docker...");
-  let result = spawnSync("docker", ["compose", "-f", composeFile, "--env-file", envPath, "up", "-d"], { stdio: "inherit" });
-  if (result.status !== 0) {
-    console.error("\ndocker compose up failed -- is Docker Desktop installed and running? Install it from https://www.docker.com/products/docker-desktop, start it, then re-run this setup.");
+  if (!ensureDockerRunning()) {
     process.exitCode = 1;
     return;
   }
 
-  console.log("Waiting for Postgres to become healthy...");
-  let healthy = false;
-  for (let i = 0; i < 30; i++) {
-    const check = spawnSync("docker", ["inspect", "--format={{.State.Health.Status}}", "teratrade-postgres"]);
-    if (check.stdout && check.stdout.toString().trim() === "healthy") {
-      healthy = true;
-      break;
+  // Checked before calling `docker compose up` at all -- if a
+  // "teratrade-postgres" container already exists (e.g. this setup is being
+  // re-run, or a container from elsewhere is already up), a fresh `compose
+  // up` from a project that doesn't already own that container name fails
+  // outright with a name conflict instead of adopting it (confirmed live,
+  // 2026-08-03 -- see exe-launcher.cjs's matching comment).
+  let healthy = isPostgresHealthy();
+  if (healthy) {
+    console.log("\nLocal Postgres is already running and healthy.");
+  } else {
+    console.log("\nStarting local Postgres in Docker...");
+    let result = spawnSync("docker", ["compose", "-f", composeFile, "--env-file", envPath, "up", "-d"], { stdio: "inherit" });
+    if (result.status !== 0) {
+      console.error("\ndocker compose up failed -- see the error above.");
+      process.exitCode = 1;
+      return;
     }
-    sleep(2000);
-  }
-  if (!healthy) {
-    console.error("\nPostgres didn't report healthy in time -- check 'docker compose logs' from this folder.");
-    process.exitCode = 1;
-    return;
+
+    console.log("Waiting for Postgres to become healthy...");
+    for (let i = 0; i < 30; i++) {
+      if (isPostgresHealthy()) {
+        healthy = true;
+        break;
+      }
+      sleep(2000);
+    }
+    if (!healthy) {
+      console.error("\nPostgres didn't report healthy in time -- check 'docker compose logs' from this folder.");
+      process.exitCode = 1;
+      return;
+    }
   }
   console.log("Postgres is up.");
 

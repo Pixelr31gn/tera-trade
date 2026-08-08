@@ -78,6 +78,20 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/analytics/version-divergence", async () => {
     return cached("version-divergence", () => computeVersionDivergence());
   });
+
+  // Strategies (breakout/mean-reversion/trend-following/trend-pullback-fib)
+  // aren't scoring versions -- they don't have a comparable win-rate/avg-R
+  // read the way v1-v5 do, since they're the signal SOURCE v1-v5 grade, not
+  // a grader themselves. This answers the more basic "is it alive" question
+  // instead: how many times has this strategyId actually fired a signal, and
+  // when was the last one. Deliberately uncached (unlike the three endpoints
+  // above) -- this is meant to answer "is it alive right now," and a 24h-old
+  // answer to that question defeats the point.
+  app.get<{ Querystring: { strategyId: string } }>("/api/analytics/strategy-status", async (request, reply) => {
+    const { strategyId } = request.query;
+    if (!strategyId) return reply.code(400).send({ error: "strategyId is required" });
+    return computeStrategyStatus(strategyId);
+  });
 }
 
 const OUTCOME_POSITIVE = new Set(["executed_win", "missed_win"]);
@@ -99,7 +113,7 @@ async function computeVersionDivergence() {
   // v2 stopped receiving new scores 2026-07-14 but stays in this comparison
   // -- its historical rows are still there and still worth being able to
   // recall/compare against, per the reason it's kept in the DB at all.
-  const versions = ["v1", "v2", "v3", "v4", "v5"] as const;
+  const versions = ["v1", "v2", "v3", "v4", "v5", "v6", "v7"] as const;
   const rows = await prisma.score.findMany({
     where: { strategyVersion: { in: [...versions] }, time: { gte: analyticsLookbackSince() } },
     select: { time: true, symbol: true, strategyId: true, strategyVersion: true, decision: true, outcomeLabel: true },
@@ -244,7 +258,7 @@ function summarizeSessionScores(session: TradingSession, rows: SessionScoreRow[]
 const ALL_SESSIONS: TradingSession[] = [TradingSession.NEW_YORK, TradingSession.LONDON, TradingSession.ASIAN];
 
 /** One query for every session (optionally scoped to one strategy version), grouped in memory -- see summarizeSessionScores's comment for why this replaces N per-session round trips. */
-async function computeSessionPerformanceForAllSessions(strategyVersion?: "v1" | "v2" | "v3" | "v4" | "v5"): Promise<Record<TradingSession, ReturnType<typeof summarizeSessionScores>>> {
+async function computeSessionPerformanceForAllSessions(strategyVersion?: "v1" | "v2" | "v3" | "v4" | "v5" | "v6"): Promise<Record<TradingSession, ReturnType<typeof summarizeSessionScores>>> {
   const rows = await prisma.score.findMany({
     where: { time: { gte: analyticsLookbackSince() }, ...(strategyVersion ? { strategyVersion } : {}) },
     select: { session: true, outcomeLabel: true, outcomeRMultiple: true, marketStructureLabel: true, liquidityLabel: true, priceActionLabel: true },
@@ -262,9 +276,46 @@ async function computeSessionPerformanceForAllSessions(strategyVersion?: "v1" | 
   return results;
 }
 
+/**
+ * One Score row exists per (signal, scoring version) -- a single fired
+ * signal produces 4 rows (v1/v2/v3/v5), all sharing the same (time, symbol).
+ * Grouping by that pair before counting is what turns "row count" into
+ * "actual signal count" -- without it this would overcount fires by ~4x.
+ */
+async function computeStrategyStatus(strategyId: string): Promise<{
+  strategyId: string;
+  fireCount: number;
+  lastFiredAt: string | null;
+  takenCount: number;
+}> {
+  const rows = await prisma.score.findMany({
+    where: { strategyId },
+    select: { time: true, symbol: true, decision: true },
+    orderBy: { time: "desc" },
+  });
+
+  const bySignal = new Map<string, { time: Date; taken: boolean }>();
+  for (const row of rows) {
+    const key = `${row.time.toISOString()}|${row.symbol}`;
+    const existing = bySignal.get(key);
+    // "taken" if ANY version's row for this signal reached that decision --
+    // matches how determineConsensus itself treats a signal (any qualifying
+    // version is enough), not literal row-level unanimity.
+    bySignal.set(key, { time: row.time, taken: existing?.taken || row.decision === "taken" });
+  }
+
+  const signals = [...bySignal.values()];
+  return {
+    strategyId,
+    fireCount: signals.length,
+    lastFiredAt: signals.length > 0 ? signals.reduce((latest, s) => (s.time > latest ? s.time : latest), signals[0]!.time).toISOString() : null,
+    takenCount: signals.filter((s) => s.taken).length,
+  };
+}
+
 /** One query covering every (version, session) combination, grouped in memory -- replaces what was 9 separate round trips. */
-async function computeStrategyComparison(): Promise<Record<"v1" | "v2" | "v3" | "v4" | "v5", Record<TradingSession, ReturnType<typeof summarizeSessionScores>>>> {
-  const versions = ["v1", "v2", "v3", "v4", "v5"] as const;
+async function computeStrategyComparison(): Promise<Record<"v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7", Record<TradingSession, ReturnType<typeof summarizeSessionScores>>>> {
+  const versions = ["v1", "v2", "v3", "v4", "v5", "v6", "v7"] as const;
   const rows = await prisma.score.findMany({
     where: { time: { gte: analyticsLookbackSince() }, strategyVersion: { in: [...versions] } },
     select: { session: true, strategyVersion: true, outcomeLabel: true, outcomeRMultiple: true, marketStructureLabel: true, liquidityLabel: true, priceActionLabel: true },
@@ -278,7 +329,7 @@ async function computeStrategyComparison(): Promise<Record<"v1" | "v2" | "v3" | 
     byVersionSession.set(key, list);
   }
 
-  const results = {} as Record<"v1" | "v2" | "v3" | "v4" | "v5", Record<TradingSession, ReturnType<typeof summarizeSessionScores>>>;
+  const results = {} as Record<"v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7", Record<TradingSession, ReturnType<typeof summarizeSessionScores>>>;
   for (const version of versions) {
     results[version] = {} as Record<TradingSession, ReturnType<typeof summarizeSessionScores>>;
     for (const session of ALL_SESSIONS) {

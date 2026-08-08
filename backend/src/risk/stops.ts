@@ -17,6 +17,21 @@ export interface StopPlan {
   trailTicks: number;
 }
 
+// Hard point-based caps (2026-08-06, operator request): the tightest
+// possible risk profile regardless of instrument or the ATR/structure
+// distance computed below -- no stop wider than 5 points, no target further
+// than 10 points, ever. Deliberately a flat number, not ATR-scaled, unlike
+// every other distance in this file (see the takeProfitRMultiple comment
+// below and docs/BUILD_HISTORY.md's v1.2 "Risk:reward floor" entry for why
+// per-instrument ATR scaling exists at all -- ES's real ATR-based stop runs
+// ~4pt but NQ's runs ~25pt). Operator's explicit, informed call after being
+// told this flattens NQ/CL/GC down to the same 5pt/10pt ceiling ES already
+// runs close to -- a real behavior change for those instruments, likely
+// more stop-outs from ordinary noise there. Applied last, after both the
+// structure/ATR stop and the R-multiple target are computed.
+export const MAX_STOP_DISTANCE_POINTS = new Decimal("5");
+export const MAX_TAKE_PROFIT_DISTANCE_POINTS = new Decimal("10");
+
 export function computeInitialStop(
   entryPrice: Decimal,
   side: "long" | "short",
@@ -58,7 +73,15 @@ export function computeInitialStop(
     basis = "atr";
   }
 
-  const takeProfitDistance = distance.times(takeProfitRMultiple);
+  if (distance.gt(MAX_STOP_DISTANCE_POINTS)) {
+    distance = MAX_STOP_DISTANCE_POINTS;
+    stopPrice = side === "long" ? entryPrice.minus(distance) : entryPrice.plus(distance);
+  }
+
+  let takeProfitDistance = distance.times(takeProfitRMultiple);
+  if (takeProfitDistance.gt(MAX_TAKE_PROFIT_DISTANCE_POINTS)) {
+    takeProfitDistance = MAX_TAKE_PROFIT_DISTANCE_POINTS;
+  }
   const takeProfitPrice = side === "long" ? entryPrice.plus(takeProfitDistance) : entryPrice.minus(takeProfitDistance);
 
   const trailDistance = atrValue.times(chandelierAtrMultiplier);

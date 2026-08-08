@@ -18,7 +18,9 @@ function gated(decision: "taken" | "skipped_score", probability = 0.7): GatedSco
 describe("explainScore", () => {
   it("mentions probability and threshold when taken", () => {
     const text = explainScore("ES", "long", gated("taken", 0.72), 0.65);
-    expect(text).toContain("72%");
+    // One decimal place, not whole-percent rounding -- see explainScore's
+    // 2026-08-07 comment.
+    expect(text).toContain("72.0%");
     expect(text).toContain("65%");
     expect(text).toContain("LONG ES");
   });
@@ -73,6 +75,29 @@ describe("explainScore", () => {
     expect(text).toContain("RSI_WEAK");
     expect(text).toContain("EMA_NEUTRAL");
     expect(text).not.toContain("ADX_STRONG");
+  });
+
+  it("shows all 5 of v6's factors, not just the top 3 -- v6 is a fixed set of weighted criteria, not a variable-length list of minor adjustments", () => {
+    const g: GatedScore = {
+      probability: 0,
+      decision: "skipped_score",
+      modelUsed: "rule_v6",
+      blockReason: null,
+      v3Bucket: null,
+      factors: [
+        { name: "correctionLegBars", contribution: 0, description: "CORRECTION_BARS" },
+        { name: "rising20EmaProximity", contribution: 0, description: "EMA_PROXIMITY" },
+        { name: "fibRetracement", contribution: 0, description: "FIB_RETRACEMENT" },
+        { name: "reversalBarQuality", contribution: 0, description: "REVERSAL_BAR" },
+        { name: "marketSpeed", contribution: 0, description: "MARKET_SPEED" },
+      ],
+    };
+    const text = explainScore("ES", "short", g, 0.65);
+    expect(text).toContain("CORRECTION_BARS");
+    expect(text).toContain("EMA_PROXIMITY");
+    expect(text).toContain("FIB_RETRACEMENT");
+    expect(text).toContain("REVERSAL_BAR");
+    expect(text).toContain("MARKET_SPEED");
   });
 });
 

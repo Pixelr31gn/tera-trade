@@ -72,20 +72,31 @@ export function computePositionSize(
  * a deliberate tradeoff the operator chose explicitly over keeping the
  * dollar budget as a hard ceiling.
  */
-const CONFIDENCE_TIERS: [minAverageProbability: number, quantity: number][] = [
-  [0.82, 3],
-  [0.71, 2],
+/** Default shape only -- callers should pass the operator's current SystemState tiers (see execution/mode.ts's setConfidenceTiers); this is just the fallback when none is supplied. */
+export const DEFAULT_CONFIDENCE_TIERS: [minAverageProbability: number, quantity: number][] = [
+  [0.85, 3],
+  [0.75, 2],
   [0.65, 1],
 ];
 
-export function computeConfidenceTierQuantity(averageProbability: number, maxPositionSize: number): number {
+// Operator-adjustable at runtime (2026-08-02, see execution/mode.ts's
+// setConfidenceTiers) -- was a hardcoded module constant (65/71/82%) until
+// then. Kept as a plain parameter, not a DB read, so this stays a pure
+// function per CLAUDE.md's rule for risk/ -- callers resolve the current
+// tiers from SystemState/DecisionContext and pass them in.
+export function computeConfidenceTierQuantity(
+  averageProbability: number,
+  maxPositionSize: number,
+  tiers: [minAverageProbability: number, quantity: number][] = DEFAULT_CONFIDENCE_TIERS,
+): number {
   // Consensus requires at least 2/3 versions to individually clear the score
   // threshold to reach execution at all (see engine/loop.ts's
-  // determineConsensus) -- the *average* can still land below 65% in that
-  // case (e.g. two versions just over 65% and a third near 0%). A setup
-  // that already cleared every other gate is never sized to zero for
+  // determineConsensus) -- the *average* can still land below the lowest
+  // tier in that case (e.g. two versions just over 65% and a third near 0%).
+  // A setup that already cleared every other gate is never sized to zero for
   // landing in that gap -- same "never below 1" floor as the dollar-based
   // sizing above, just re-anchored to confidence tiers instead of dollars.
-  const tierQuantity = CONFIDENCE_TIERS.find(([min]) => averageProbability >= min)?.[1] ?? 1;
+  const sortedDescending = [...tiers].sort((a, b) => b[0] - a[0]);
+  const tierQuantity = sortedDescending.find(([min]) => averageProbability >= min)?.[1] ?? 1;
   return Math.min(tierQuantity, maxPositionSize);
 }

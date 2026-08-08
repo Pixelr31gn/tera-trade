@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { determineConsensus, determineContinuousScanConsensus } from "../src/engine/loop.js";
+import { determineConsensus, determineContinuousScanConsensus, isSrProximityGateSuspended } from "../src/engine/loop.js";
 import type { GatedScore } from "../src/scoring/gate.js";
 import type { StrategyVersion } from "../src/scoring/ruleScorer.js";
 
@@ -7,94 +7,111 @@ function gated(decision: "taken" | "skipped_score", probability: number): GatedS
   return { probability, decision, factors: [], modelUsed: "rule_v1", blockReason: null, v3Bucket: null };
 }
 
-function map(v1: GatedScore, v2: GatedScore, v3: GatedScore, v5: GatedScore = gated("taken", 0.8)): Map<StrategyVersion, GatedScore> {
+function map(v1: GatedScore, v2: GatedScore, v3: GatedScore, v5: GatedScore, v6: GatedScore): Map<StrategyVersion, GatedScore> {
   return new Map([
     ["v1", v1],
     ["v2", v2],
     ["v3", v3],
     ["v5", v5],
+    ["v6", v6],
   ]);
 }
 
-// Mutual-agreement rule (2026-07-29, operator request, revised twice the same
-// day): went from a looser "top 2 of 3 clear 75%, weakest just needs 56%"
-// shape, to a stricter "all three of v1/v2/v3 unanimously, plus v5 also
-// clears 75%" shape -- confirmed live that stricter version was far too
-// strict (each version individually only clears 75%+ ~7-12% of the time;
-// requiring all four simultaneously produced zero actionable recommendations
-// and zero trades over several hours). Landed here: v5 -- otherwise
-// shadow-only, see engine/loop.ts's SHADOW_ONLY_VERSIONS -- must
-// independently clear its own 75% gate, AND at least ONE (not all three) of
-// v1/v2/v3 must also clear the same bar. v5 doesn't "vote" the way v1/v2/v3
-// do (no representative-explanation slot, excluded from the averaged
-// probability) -- it's a hard AND-gate alongside whichever single v1/v2/v3
-// version confirms. Both determineConsensus and determineContinuousScanConsensus
-// share this exact rule.
+// v6-solo gate (2026-08-06, operator request, superseding the v6-mandatory
+// gate below; threshold lowered 30% -> 29.55% on 2026-08-07): v6 alone
+// clearing the threshold is sufficient to execute -- no confirmation from
+// v1/v2/v3/v5 required at all. See engine/loop.ts's
+// V6_SOLO_EXECUTION_THRESHOLD comment for the tradeoffs the operator was
+// told about (v6 had zero live trades behind it, both 30% and 29.55% are
+// below a coin flip) before making these calls. Both determineConsensus and
+// determineContinuousScanConsensus share it.
 describe.each([
   ["determineConsensus", determineConsensus],
   ["determineContinuousScanConsensus", determineContinuousScanConsensus],
-] as const)("%s -- mutual-agreement rule (2026-07-29 operator request, revised to a single v1/v2/v3 confirmation)", (_name, fn) => {
-  it("takes when all three of v1/v2/v3 clear 75% and v5 also clears 75%", () => {
-    const result = fn(map(gated("taken", 0.8), gated("taken", 0.76), gated("taken", 0.77), gated("taken", 0.75)));
+] as const)("%s -- v6-solo gate (2026-08-07, 29.55% threshold)", (_name, fn) => {
+  it("takes when v6 clears 29.55% alone, with everything else disagreeing", () => {
+    const result = fn(map(gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("taken", 0.35)));
+    expect(result.taken).toBe(true);
+    expect(result.representativeVersion).toBe("v6");
+  });
+
+  it("takes when a version is exactly at the 29.55% threshold", () => {
+    const result = fn(map(gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("taken", 0.2955)));
     expect(result.taken).toBe(true);
   });
 
-  it("takes when only ONE of v1/v2/v3 clears 75%, as long as v5 also clears its own gate", () => {
-    const v1Alone = fn(map(gated("taken", 0.8), gated("skipped_score", 0.6), gated("skipped_score", 0.6), gated("taken", 0.8)));
-    expect(v1Alone.taken).toBe(true);
-    const v3Alone = fn(map(gated("skipped_score", 0.6), gated("skipped_score", 0.6), gated("taken", 0.8), gated("taken", 0.8)));
-    expect(v3Alone.taken).toBe(true);
+  // Regression guard for the real 2026-08-07 case that prompted the 30% ->
+  // 29.55% change: a real NQ long scored v6=0.29773, displayed as "30%"
+  // under the old whole-percent rounding, and didn't execute under the old
+  // 30% threshold -- read as a bug when the gate was actually working
+  // correctly. Confirms it clears the new, lower threshold.
+  it("takes for the real 0.29773 NQ-long value that prompted lowering the threshold", () => {
+    const result = fn(map(gated("taken", 0.71), gated("skipped_score", 0.41), gated("skipped_score", 0.75), gated("skipped_score", 0.22), gated("skipped_score", 0.29773)));
+    expect(result.taken).toBe(true);
   });
 
-  it("does not take when none of v1/v2/v3 clear 75%, even if all three are moderately high and v5 clears its own gate", () => {
-    const result = fn(map(gated("skipped_score", 0.74), gated("skipped_score", 0.7), gated("skipped_score", 0.65), gated("taken", 0.8)));
+  it("does not take when v1 clears 65% (even strongly) but both v3 and v6 stay below their solo thresholds", () => {
+    const result = fn(map(gated("taken", 0.9), gated("skipped_score", 0.3), gated("skipped_score", 0.2), gated("skipped_score", 0.3), gated("skipped_score", 0.2)));
     expect(result.taken).toBe(false);
     expect(result.representativeVersion).toBeNull();
   });
 
-  it("does not take when v1/v2/v3 all clear 75% but v5 is below its own 75% gate", () => {
-    const result = fn(map(gated("taken", 0.9), gated("taken", 0.85), gated("taken", 0.8), gated("skipped_score", 0.7)));
-    expect(result.taken).toBe(false);
+  it("falls back through v3, v2, v1, then v5 as representative when v6's own decision isn't taken", () => {
+    const v6NotOwnDecision = fn(map(gated("taken", 0.8), gated("taken", 0.8), gated("taken", 0.8), gated("skipped_score", 0.4), gated("skipped_score", 0.35)));
+    // v6's probability (35%) clears the solo gate, so taken is true, but v6's
+    // OWN decision reads skipped_score (blocked by its own internal checks) --
+    // representative falls back to v3.
+    expect(v6NotOwnDecision.taken).toBe(true);
+    expect(v6NotOwnDecision.representativeVersion).toBe("v3");
+  });
+});
+
+// v3-solo gate (2026-08-07, operator request, additive alongside v6-solo,
+// not a replacement): v3 alone clearing 29.5% is ALSO enough to execute on
+// its own -- taken = v6>=29.55% OR v3>=29.5%. Operator was told v3 typically
+// scores 25-75% on these signals, so this was expected to noticeably
+// increase execution frequency beyond what v6-solo alone produced. See
+// engine/loop.ts's V3_SOLO_EXECUTION_THRESHOLD comment.
+describe.each([
+  ["determineConsensus", determineConsensus],
+  ["determineContinuousScanConsensus", determineContinuousScanConsensus],
+] as const)("%s -- v3-solo gate (2026-08-07, 29.5% threshold)", (_name, fn) => {
+  it("takes when v3 clears 29.5% alone, with v6 and everything else below their own bars", () => {
+    const result = fn(map(gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("taken", 0.4), gated("skipped_score", 0.1), gated("skipped_score", 0.2)));
+    expect(result.taken).toBe(true);
+    expect(result.representativeVersion).toBe("v3");
   });
 
-  it("does not take when a lone v1/v2/v3 version clears 75% but v5 is below its own gate", () => {
-    const result = fn(map(gated("taken", 0.9), gated("skipped_score", 0.6), gated("skipped_score", 0.6), gated("skipped_score", 0.7)));
-    expect(result.taken).toBe(false);
-  });
-
-  it("takes when v5 is exactly at its 75% gate threshold", () => {
-    const result = fn(map(gated("taken", 0.8), gated("taken", 0.8), gated("taken", 0.8), gated("taken", 0.75)));
+  it("takes when v3 is exactly at the 29.5% threshold", () => {
+    const result = fn(map(gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("taken", 0.295), gated("skipped_score", 0.1), gated("skipped_score", 0.2)));
     expect(result.taken).toBe(true);
   });
 
-  it("counts a version toward mutual agreement by raw probability, even if its own decision is skipped (v3's extra directional-conviction gate)", () => {
-    // v3 scores 80% (clears the confirmation requirement) but its own
-    // decision is skipped_score (e.g. blocked by the directional-conviction
-    // margin check in gate.ts) -- it still counts toward mutual agreement
-    // here since the raw probability is what the rule checks, not decision.
-    // v1's own raw probability (60%) would NOT itself clear the bar, but its
-    // decision is "taken" -- it becomes the representative purely because
-    // it's the only one of the three with a "taken" decision.
-    const result = fn(map(gated("taken", 0.6), gated("skipped_score", 0.6), gated("skipped_score", 0.8), gated("taken", 0.8)));
-    expect(result.taken).toBe(true);
-    expect(result.representativeVersion).toBe("v1");
+  it("does not take when v3 stays just below 29.5% and v6 also stays below its own bar", () => {
+    const result = fn(map(gated("taken", 0.9), gated("skipped_score", 0.3), gated("skipped_score", 0.294), gated("skipped_score", 0.3), gated("skipped_score", 0.2)));
+    expect(result.taken).toBe(false);
   });
 
-  it("prefers v3 as the representative version when it agrees, falling back to v2 then v1", () => {
-    const allTaken = fn(map(gated("taken", 0.8), gated("taken", 0.8), gated("taken", 0.8)));
-    expect(allTaken.representativeVersion).toBe("v3");
+  it("includes a readable summary with both thresholds and per-version percentages", () => {
+    const result = fn(map(gated("taken", 0.8), gated("skipped_score", 0.4), gated("skipped_score", 0.4), gated("skipped_score", 0.4), gated("taken", 0.7)));
+    expect(result.summary).toContain("v3-or-v6-solo gate");
+    expect(result.summary).toContain("29.5%+");
+    expect(result.summary).toContain("29.55%+");
+    expect(result.summary).toContain("v3=40.0%");
+    expect(result.summary).toContain("v6=70.0%");
+    expect(result.summary).toContain("avg v1/v2/v3=");
+  });
+});
 
-    const noV3 = fn(map(gated("taken", 0.8), gated("taken", 0.8), gated("taken", 0.8), gated("skipped_score", 0.6)));
-    expect(noV3.taken).toBe(false); // v5 gate not cleared -- confirms representativeVersion isn't reachable without it
+// S/R proximity gate temporary suspension (2026-08-06, operator request,
+// 24h-boxed) -- see engine/loop.ts's SR_PROXIMITY_GATE_SUSPENDED_UNTIL
+// comment for the ES/NQ incident that prompted this.
+describe("isSrProximityGateSuspended", () => {
+  it("is suspended for a time before the expiry", () => {
+    expect(isSrProximityGateSuspended(new Date("2026-08-07T12:00:00Z"))).toBe(true);
   });
 
-  it("includes a readable summary with the mutual-agreement thresholds, per-version percentages, and v5's own score", () => {
-    const result = fn(map(gated("taken", 0.8), gated("taken", 0.76), gated("taken", 0.77), gated("taken", 0.9)));
-    expect(result.summary).toContain("75%+");
-    expect(result.summary).toContain("avg=");
-    expect(result.summary).toContain("v1=");
-    expect(result.summary).toContain("v2=");
-    expect(result.summary).toContain("v3=");
-    expect(result.summary).toContain("v5=");
+  it("is no longer suspended once the expiry has passed", () => {
+    expect(isSrProximityGateSuspended(new Date("2026-08-09T00:00:00Z"))).toBe(false);
   });
 });

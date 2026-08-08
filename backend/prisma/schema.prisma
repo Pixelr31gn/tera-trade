@@ -117,6 +117,32 @@ model SystemState {
   /// (see engine/loop.ts's attemptExecution) regardless of this flag's value.
   executionDecisionEngineEnabled Boolean @default(false) @map("execution_decision_engine_enabled")
 
+  /// Reward:risk multiple applied to every signal's take-profit target (see
+  /// risk/stops.ts's computeInitialStop) -- shared across all strategies and
+  /// scoring versions (v1/v2/v3/v5/v6+), since target computation has never
+  /// branched by strategyId or version. Default 2.0, NOT stops.ts's own 3.0
+  /// fallback -- 2.0 was risk/engine.ts's hardcoded real-execution value
+  /// since 2026-07-29 (see assessNewTrade's comment on why), and this column
+  /// replaces that hardcoding, so the seeded default must match what was
+  /// actually trading, not the generic pure-function fallback (2026-08-02,
+  /// made operator-adjustable at runtime, no restart, same "env sets the
+  /// boot default, DB is live from then on" pattern as activeStrategyVersion
+  /// above).
+  takeProfitRMultiple Decimal @default(2.0) @map("take_profit_r_multiple")
+
+  /// Confidence-tier position sizing (see risk/sizing.ts's
+  /// computeConfidenceTierQuantity) -- quantity placed is set directly by
+  /// which of these three probability tiers the cross-version consensus
+  /// average clears, lowest tier first as the floor. Defaults match the
+  /// values operator-requested 2026-08-02 (65/75/85%); previously hardcoded
+  /// at 65/71/82%.
+  confidenceTier1Threshold Decimal @default(0.65) @map("confidence_tier_1_threshold")
+  confidenceTier1Quantity  Int     @default(1) @map("confidence_tier_1_quantity")
+  confidenceTier2Threshold Decimal @default(0.75) @map("confidence_tier_2_threshold")
+  confidenceTier2Quantity  Int     @default(2) @map("confidence_tier_2_quantity")
+  confidenceTier3Threshold Decimal @default(0.85) @map("confidence_tier_3_threshold")
+  confidenceTier3Quantity  Int     @default(3) @map("confidence_tier_3_quantity")
+
   @@map("system_state")
 }
 

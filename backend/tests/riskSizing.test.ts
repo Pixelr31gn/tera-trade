@@ -38,19 +38,31 @@ describe("computePositionSize", () => {
 });
 
 describe("computeConfidenceTierQuantity", () => {
+  // Default tiers moved 65/71/82% -> 65/75/85% (2026-08-02, operator
+  // request) -- now operator-adjustable at runtime (see execution/mode.ts's
+  // setConfidenceTiers); these tests exercise the DEFAULT_CONFIDENCE_TIERS
+  // fallback specifically (no tiers arg passed), the real system always
+  // passes the current SystemState tiers explicitly.
   it("sizes to 1 contract at the 65% floor", () => {
     expect(computeConfidenceTierQuantity(0.65, 10)).toBe(1);
     expect(computeConfidenceTierQuantity(0.70, 10)).toBe(1);
   });
 
-  it("sizes to 2 contracts at the 71% tier", () => {
-    expect(computeConfidenceTierQuantity(0.71, 10)).toBe(2);
-    expect(computeConfidenceTierQuantity(0.81, 10)).toBe(2);
+  it("sizes to 2 contracts at the 75% tier", () => {
+    expect(computeConfidenceTierQuantity(0.75, 10)).toBe(2);
+    expect(computeConfidenceTierQuantity(0.84, 10)).toBe(2);
   });
 
-  it("sizes to 3 contracts at the 82% tier", () => {
-    expect(computeConfidenceTierQuantity(0.82, 10)).toBe(3);
+  it("sizes to 3 contracts at the 85% tier", () => {
+    expect(computeConfidenceTierQuantity(0.85, 10)).toBe(3);
     expect(computeConfidenceTierQuantity(0.99, 10)).toBe(3);
+  });
+
+  it("accepts a custom tiers array, overriding the default", () => {
+    const customTiers: [number, number][] = [[0.6, 1], [0.7, 2], [0.9, 5]];
+    expect(computeConfidenceTierQuantity(0.65, 10, customTiers)).toBe(1);
+    expect(computeConfidenceTierQuantity(0.75, 10, customTiers)).toBe(2);
+    expect(computeConfidenceTierQuantity(0.95, 10, customTiers)).toBe(5);
   });
 
   it("never sizes below 1 contract even when average probability is below 65%", () => {

@@ -17,11 +17,22 @@ import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { childLogger } from "../core/logger.js";
+import { connectToChrome } from "./cdpClient.js";
 
 const logger = childLogger("chromeLauncher");
 
 const READY_POLL_INTERVAL_MS = 500;
 const READY_TIMEOUT_MS = 20_000;
+
+// The frontend (`npm run dev` in frontend/) is a separate process that
+// start.ps1 launches ~3s after the backend and that takes many more seconds
+// to finish its first Next.js compile -- so the dashboard is essentially
+// never actually reachable yet at the point ensureDebugChromeRunning runs
+// during a normal cold start. Polling for it here (rather than giving up on
+// the first failed request) is what makes "always open a dashboard tab"
+// true in practice instead of only on a lucky-timing restart.
+const DASHBOARD_READY_POLL_INTERVAL_MS = 1000;
+const DASHBOARD_READY_TIMEOUT_MS = 60_000;
 
 async function isCdpResponding(cdpUrl: string): Promise<boolean> {
   try {
@@ -61,6 +72,60 @@ function extractPort(cdpUrl: string): number {
   return Number(new URL(cdpUrl).port) || 9222;
 }
 
+async function waitForDashboardReachable(dashboardUrl: string): Promise<boolean> {
+  const deadline = Date.now() + DASHBOARD_READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(dashboardUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) return true;
+    } catch {
+      // Frontend dev server isn't up yet -- keep polling until the deadline.
+    }
+    await new Promise((resolve) => setTimeout(resolve, DASHBOARD_READY_POLL_INTERVAL_MS));
+  }
+  return false;
+}
+
+/**
+ * Opens the dashboard as a second tab in the same debug Chrome session, next
+ * to the TopstepX tab, once the frontend dev server is actually reachable.
+ * Reuses cdpClient's cached connectOverCDP connection rather than opening an
+ * independent one -- see cdpClient.ts's 2026-07-21 comment on why a second
+ * simultaneous connectOverCDP call is a real, previously-hit hang risk.
+ * Checks existing tabs first so a tsx watch hot-reload (this whole function
+ * runs again on every one) doesn't pile up duplicate dashboard tabs. Never
+ * throws, same posture as the rest of this module -- worst case, the user
+ * opens the dashboard tab themselves, same as every version before this one.
+ */
+async function ensureDashboardTabOpen(cdpUrl: string, dashboardUrl: string): Promise<void> {
+  const reachable = await waitForDashboardReachable(dashboardUrl);
+  if (!reachable) {
+    logger.warn({ dashboardUrl }, "dashboard_not_reachable_skipping_tab");
+    return;
+  }
+  try {
+    const browser = await connectToChrome(cdpUrl);
+    const origin = new URL(dashboardUrl).origin;
+    for (const context of browser.contexts()) {
+      for (const page of context.pages()) {
+        if (page.url().startsWith(origin)) {
+          logger.info({ dashboardUrl }, "dashboard_tab_already_open");
+          return;
+        }
+      }
+    }
+    const context = browser.contexts()[0] ?? (await browser.newContext());
+    const page = await context.newPage();
+    await page.goto(dashboardUrl);
+    logger.info({ dashboardUrl }, "opened_dashboard_tab");
+  } catch (err) {
+    logger.warn({ dashboardUrl, err: err instanceof Error ? err.message : String(err) }, "dashboard_tab_open_failed");
+  }
+}
+
 /**
  * Ensures a debug-mode Chrome is running and its CDP port is responding.
  * No-op if one already is. Never throws -- a failure here just means
@@ -73,7 +138,17 @@ export async function ensureDebugChromeRunning(opts: {
   executablePath: string | undefined;
   userDataDir: string | undefined;
   startUrl: string;
+  dashboardUrl?: string;
 }): Promise<void> {
+  // Fire-and-forget: waits up to a minute for the frontend dev server, which
+  // must not hold up broker.connect() and the rest of main()'s startup
+  // sequence below. Never rejects (see ensureDashboardTabOpen's own
+  // try/catch), but .catch() is cheap insurance against turning this into an
+  // unhandled rejection if that ever changes.
+  if (opts.dashboardUrl) {
+    void ensureDashboardTabOpen(opts.cdpUrl, opts.dashboardUrl).catch(() => {});
+  }
+
   if (await isCdpResponding(opts.cdpUrl)) {
     logger.info({ cdpUrl: opts.cdpUrl }, "debug_chrome_already_running");
     return;

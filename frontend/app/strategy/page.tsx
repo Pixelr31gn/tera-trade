@@ -10,7 +10,7 @@ import { useConfirm } from "@/components/ConfirmDialog";
 
 const SESSION_LABELS: Record<string, string> = { new_york: "New York", london: "London", asian: "Asian" };
 const SESSION_ORDER = ["new_york", "london", "asian"];
-const VERSIONS = ["v1", "v2", "v3", "v5"] as const;
+const VERSIONS = ["v1", "v2", "v3", "v5", "v6", "v7"] as const;
 type Version = (typeof VERSIONS)[number];
 
 const VERSION_DESCRIPTIONS: Record<Version, string> = {
@@ -18,6 +18,11 @@ const VERSION_DESCRIPTIONS: Record<Version, string> = {
   v2: "v1 + marketStructureEdge and liquidityEdge, added from real session-performance data.",
   v3: "0-100 confidence score: EMA50 trend (20), ADX strength (20), ATR volatility (15), volume vs 20-bar avg (15), RSI momentum (10), price structure (20) -- scored for both directions, requires conviction margin, adjusted by recent similar-setup performance, risk/reward shape, Fibonacci direction, and points-per-minute.",
   v5: "Built from mining real outcome data rather than intuition (2026-07-21): ADX-regime asymmetry (very strong trend favors shorts, hurts longs), weak-trend fade (fading a weak trend beat following it), and price-action normalcy (dramatic-looking candles underperformed normal ones). Shadow-scored only -- not yet a consensus voter (see engine/loop.ts's SHADOW_ONLY_VERSIONS).",
+  // Description corrected 2026-08-07 -- was describing the pre-2026-08-03
+  // design (an ensemble averaging v1/v2/v3/v5's logits). v6 has been a
+  // complete, self-contained scorer since then -- see ruleScorerV6.ts.
+  v6: "A complete, self-contained scorer for the trend-pullback-fib setup (2026-08-03, operator spec), not an ensemble: five weighted criteria on that one pattern (correction-leg length, retrace to a rising 20-EMA, 40-60% Fibonacci retracement, reversal-bar quality, market speed in the setup's favor). Since 2026-08-07, its own probability alone (>=29.55%) is enough to execute a trade -- see engine/loop.ts's V6_SOLO_EXECUTION_THRESHOLD.",
+  v7: "Built from mining real outcome data (2026-08-07, ~160k scored setups): a 20-MA distance mean-reversion asymmetry (shorts favored moderately above the MA, longs only far below it), a confirmed ADX>=40 short-favoring regime effect, and a short-term-momentum \"grind\" pattern (mild favorable momentum beats strong; mild unfavorable momentum is the single worst bucket found). Shadow-scored only -- zero live trades behind it yet, same promotion bar as v5/v6 at their own introduction (see engine/loop.ts's SHADOW_ONLY_VERSIONS).",
 };
 
 function pct(x: number | null): string {
@@ -53,16 +58,15 @@ export default function StrategyComparisonPage() {
     <div className="space-y-6">
       <Panel title="Strategy Version">
         <p className="mb-4 text-sm text-gray-400">
-          v1, v2, and v3 shadow-score every single signal in parallel -- same bars, same market conditions -- so the numbers
-          below are a true apples-to-apples comparison, not different time periods. (v4, an experimental ML model, was tried
-          and removed 2026-07-15 -- see the Recommendation Feed&apos;s version filter for its historical rows.) Execution
-          doesn&apos;t depend on a single
-          &quot;active&quot; version below -- both paper and live take a trade whenever at least{" "}
-          <strong>2 of the 3 versions independently clear the 65% score threshold</strong> (2026-07-16, a straight
-          majority vote on the raw score) -- replacing an earlier average-based rule that let one strongly-disagreeing
-          version veto a setup two others liked. The toggle below is informational only and does not change what
-          actually trades. v5 (2026-07-21) also shadow-scores every signal and shows up in the comparison below, but is
-          deliberately excluded from the consensus vote above until its real performance here earns it a promotion.
+          v1, v2, v3, and v5 shadow-score every single signal in parallel -- same bars, same market conditions -- so the
+          numbers below are a true apples-to-apples comparison, not different time periods. (v4, an experimental ML model,
+          was tried and removed 2026-07-15 -- see the Recommendation Feed&apos;s version filter for its historical rows.)
+          Execution doesn&apos;t depend on a single &quot;active&quot; version below -- the toggle is informational only.
+          As of 2026-08-02, both paper and live take a trade only when{" "}
+          <strong>v6 independently clears 65% AND at least one of v1/v2/v3/v5 also clears 65%</strong> -- v6 (an ensemble of
+          the other four plus its own setup-rule bonus, not an independently mined model like v5) is now the mandatory
+          anchor, the same role v5 held in the rule before it. v6&apos;s own weight is unvalidated -- zero resolved live
+          trades exist behind it yet.
         </p>
         {error && <p className="mb-3 text-sm text-bad">{error}</p>}
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">

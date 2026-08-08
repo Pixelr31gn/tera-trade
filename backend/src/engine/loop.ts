@@ -24,10 +24,10 @@ import { getOpeningRangeStats } from "./openingRangeCache.js";
 import { explainKillSwitch, explainRiskRejection, explainScore, explainTradeExit } from "../explain/engine.js";
 import { executeIfApproved } from "../execution/engine.js";
 import { evaluateExecutionOpportunity, pollRestingOpportunities } from "../execution/executionDecisionEngine.js";
-import { getSystemState, tripKillSwitch } from "../execution/mode.js";
+import { getExecutionSettings, getSystemState, tripKillSwitch } from "../execution/mode.js";
 import type { EmaTrend } from "../analytics/emaTrend.js";
 import { getInstrument, type InstrumentSpec } from "../marketData/instruments.js";
-import { getNewsRiskStatus, type NewsRiskStatus } from "../news/risk.js";
+import { getNewsRiskStatus } from "../news/risk.js";
 import { classifyRegime } from "../regime/classifier.js";
 import type { RegimeResult } from "../regime/classifier.js";
 import { atr as computeAtr, type OhlcBar } from "../regime/indicators.js";
@@ -36,6 +36,7 @@ import {
   hasReachedTrailingStopActivation,
   RiskEngine,
   TRAILING_STOP_DISTANCE_TICKS,
+  type RiskAssessment,
   type RiskLimitsConfig,
 } from "../risk/index.js";
 import { buildSetupFeatures, type SetupFeatures } from "../scoring/features.js";
@@ -45,6 +46,29 @@ import { ALL_STRATEGIES } from "../strategy/index.js";
 import type { Signal } from "../strategy/types.js";
 import { ACTIVE_INSTRUMENTS } from "../marketData/instruments.js";
 import type { Account, Trade } from "@prisma/client";
+import { decideOnBar } from "../replay/decisionCore.js";
+import { LiveDecisionContext } from "../replay/liveDecisionContext.js";
+
+// S/R proximity gate temporary suspension (2026-08-06, operator request,
+// 24h-boxed): the v6-solo execution gate (see V6_SOLO_EXECUTION_THRESHOLD
+// below) started clearing signals at 30% that were then immediately vetoed
+// by risk/engine.ts's MAX_ENTRY_DISTANCE_ATR/MIN_ENTRY_DISTANCE_ATR band
+// (concrete example: an ES short at v6=30% approved by consensus, then
+// rejected for sitting 2.43x ATR from the nearest resistance level, needing
+// 1.95x) -- the same tension documented at length in that file's own
+// comment history. Rather than pick a new permanent band with no evidence
+// behind it, the operator asked to suspend the distance check entirely for
+// 24 hours to see what it actually costs/gains, and revisit with real data.
+// The S/R *validation* requirement (a real 2+-touch level must still exist
+// nearby) is untouched -- only the distance-from-it band is suspended. This
+// lives here (wall-clock/DB-coupled), not in risk/engine.ts, which stays
+// pure per CLAUDE.md -- assessNewTrade only ever receives the already-
+// computed boolean.
+const SR_PROXIMITY_GATE_SUSPENDED_UNTIL = Date.parse("2026-08-08T04:35:00Z");
+
+export function isSrProximityGateSuspended(at: Date): boolean {
+  return at.getTime() < SR_PROXIMITY_GATE_SUSPENDED_UNTIL;
+}
 
 // v1, v2, v3 -- all rule-based/deterministic -- are the active voters,
 // shadow-scored on every signal so their performance stays directly
@@ -64,7 +88,16 @@ const STRATEGY_VERSIONS: StrategyVersion[] = ["v1", "v2", "v3"];
 // STRATEGY_VERSIONS -- shadow-only until the operator decides a version here
 // is ready to actually vote. v5 (2026-07-21, see ruleScorerV5.ts) starts
 // here; move a version to STRATEGY_VERSIONS instead once it's promoted.
-const SHADOW_ONLY_VERSIONS: StrategyVersion[] = ["v5"];
+// v6 (2026-08-02, see ruleScorerV6.ts) joins the same way -- order matters
+// here: it must come after v5, since v6's ensemble needs v5's own result
+// (see scoreAllVersions below and gate.ts's evaluateSetup 'v6' branch).
+// v7 (2026-08-07, see scoring/ruleScorerV7.ts) joins the same way -- pattern-
+// mined from real resolved outcomes, zero live trades behind its own weight
+// yet, shadow-only until it earns promotion on a real track record. Unlike
+// v6, it needs no other version's results (plain features in, points out --
+// see gate.ts's "v7" branch), so ordering relative to v5/v6 here doesn't
+// matter.
+const SHADOW_ONLY_VERSIONS: StrategyVersion[] = ["v5", "v6", "v7"];
 
 // Both paper AND live take a trade when at least 2 of the 3 versions'
 // probabilities individually clear the score threshold (65%, see
@@ -103,6 +136,22 @@ interface ConsensusDecision {
 // confirms. Applied identically to both real-strategy signals
 // (determineConsensus) and continuous-scan signals
 // (determineContinuousScanConsensus).
+//
+// SUSPENDED, not deleted (2026-08-02, operator request): checked live
+// against this deployment's actual scoring history before touching this --
+// 0 of the last 124 fully-scored decision points passed this rule, 8 of
+// those had v1 or v2 independently at 80%+ vetoed solely by v5 sitting in
+// the 30-50% range. The honest fix is a real v6 scorer built the way v5
+// itself was: mined from resolved trade outcomes, not hand-picked (see
+// ruleScorerV5.ts and BUILD_HISTORY.md's v1.2 entry -- that took ~36k+
+// resolved scores). This deployment currently has 1,684 total scores and
+// ZERO resolved executed_win/executed_loss outcomes -- nowhere near enough
+// to mine responsibly yet. Operator's explicit, informed call: trade
+// strictness for trade volume now, evidence-free, as a stopgap, rather than
+// stay at zero trades while outcome data accumulates. hasMutualAgreement/
+// mutualAgreementSummary are left here, unused, specifically so reverting
+// is a one-line swap back once a real v6 scorer -- or fresh evidence this
+// rule should stay -- exists.
 const MUTUAL_AGREEMENT_HIGH_THRESHOLD = 0.75;
 const V5_EXECUTION_GATE_THRESHOLD = 0.75;
 
@@ -116,43 +165,158 @@ function mutualAgreementSummary(gatedByVersion: Map<StrategyVersion, GatedScore>
   return `${agreeCount}/3 at ${Math.round(MUTUAL_AGREEMENT_HIGH_THRESHOLD * 100)}%+ (at least 1 needed), v5 gate needs ${Math.round(V5_EXECUTION_GATE_THRESHOLD * 100)}%+ (avg=${Math.round(averageProbability * 100)}%): ${STRATEGY_VERSIONS.map((v) => `${v}=${Math.round(gatedByVersion.get(v)!.probability * 100)}%`).join(", ")}, v5=${Math.round(v5Probability * 100)}%`;
 }
 
+// Any-single-version gate (2026-08-02, operator request): any ONE of
+// v1/v2/v3/v5 independently clearing 65% is enough, including v5 acting
+// entirely alone. Originally introduced scoped to trend_pullback_fib_buy
+// only (that strategy's own narrow 15m rally/correction/fib pattern was
+// already the primary filter, so this only needed one scorer not to
+// actively disagree) -- widened the same day to every strategy and to
+// determineContinuousScanConsensus, as the stopgap replacement for the
+// mutual-agreement rule above.
+//
+// SUPERSEDED the same day, not deleted: once ruleScorerV6.ts existed (an
+// ensemble of v1/v2/v3/v5 plus its own setup-rule bonus), the operator asked
+// for v6 to anchor the gate the way v5 anchored the original mutual-
+// agreement rule -- see hasV6MandatoryAgreement below, which calls
+// hasAnySingleVersionAgreement as its "at least one other version" leg
+// rather than duplicating it. Kept as a real, called function (not dead
+// code) for exactly that reuse.
+const LOOSE_GATE_THRESHOLD = 0.65;
+const ALL_FOUR_VERSIONS: StrategyVersion[] = ["v1", "v2", "v3", "v5"];
+
+function hasAnySingleVersionAgreement(gatedByVersion: Map<StrategyVersion, GatedScore>): boolean {
+  return ALL_FOUR_VERSIONS.some((v) => gatedByVersion.get(v)!.probability >= LOOSE_GATE_THRESHOLD);
+}
+
+// v6-mandatory gate (2026-08-02, operator request, same day as ruleScorerV6.ts
+// itself): v6 must independently clear 65% AND at least one of v1/v2/v3/v5
+// must also clear 65% -- v6 can no longer execute alone, and neither can any
+// of v1/v2/v3/v5 without v6's agreement. Structurally the same shape as the
+// original mutual-agreement rule (a mandatory anchor version + one
+// independent confirmation), just with v6 -- built the same day, zero
+// resolved live trades behind its own weight yet (see ruleScorerV6.ts's
+// OWN_PATTERN_CONFIRMATION_BONUS_LOGIT comment) -- taking the anchor role v5
+// held there. This is a materially different, NOT simply "the same gate with
+// an extra check": v6's own probability is v1/v2/v3/v5 averaged by logit, so
+// a single strong outlier (e.g. v1 at 90%, everything else weak) that would
+// have passed the any-single-version gate above can now fail here if v6's
+// blended read doesn't also clear 65%. Live with DRY_RUN_ORDERS=false at the
+// time this was made the rule -- operator's explicit, informed call.
+const V6_MANDATORY_THRESHOLD = 0.65;
+const V6_MANDATORY_REPRESENTATIVE_ORDER: StrategyVersion[] = ["v6", "v3", "v2", "v1", "v5"];
+
+function hasV6MandatoryAgreement(gatedByVersion: Map<StrategyVersion, GatedScore>): boolean {
+  const v6Probability = gatedByVersion.get("v6")!.probability;
+  if (v6Probability < V6_MANDATORY_THRESHOLD) return false;
+  return hasAnySingleVersionAgreement(gatedByVersion);
+}
+
+function v6MandatorySummary(gatedByVersion: Map<StrategyVersion, GatedScore>, averageProbability: number): string {
+  const v6Probability = gatedByVersion.get("v6")!.probability;
+  const agreeing = ALL_FOUR_VERSIONS.filter((v) => gatedByVersion.get(v)!.probability >= LOOSE_GATE_THRESHOLD);
+  return (
+    `v6-mandatory gate: v6 needs ${Math.round(V6_MANDATORY_THRESHOLD * 100)}%+ (v6=${Math.round(v6Probability * 100)}%), ` +
+    `AND at least 1 of v1/v2/v3/v5 at ${Math.round(LOOSE_GATE_THRESHOLD * 100)}%+ ` +
+    `(avg=${Math.round(averageProbability * 100)}%): ${ALL_FOUR_VERSIONS.map((v) => `${v}=${Math.round(gatedByVersion.get(v)!.probability * 100)}%`).join(", ")}` +
+    (agreeing.length > 0 ? `, agreeing: ${agreeing.join(", ")}` : "")
+  );
+}
+
+// v6-solo gate (2026-08-06, operator request): v6 alone clearing the
+// threshold is enough to execute -- no confirmation from v1/v2/v3/v5
+// required at all. Replaces the v6-mandatory-plus-one-confirmation rule
+// above the same way that rule replaced hasMutualAgreement -- SUPERSEDED,
+// not deleted, so the prior rule is a one-line swap back
+// (`hasV6MandatoryAgreement` / `v6MandatorySummary`) if this doesn't hold
+// up. Operator's explicit, informed call after being told: v6 had zero
+// resolved live trades behind its own weight at the time of this change
+// (see the v6-mandatory-gate comment above), the original 30% is below a
+// coin flip, and this removes the only other-model-confirmation requirement
+// the previous two consensus rules both kept in some form. No evidence
+// backed 30% specifically -- watch this deployment's actual win rate once
+// real trades accumulate under it.
+// 2026-08-07: lowered 30% -> 29.55%, operator request, after a real NQ long
+// scored v6=29.773% -- displayed as "30%" everywhere (whole-percent
+// rounding, since fixed, see explain/engine.ts's explainScore comment) and
+// read as a bug ("this should've executed") when the gate was actually
+// working correctly against the unrounded value. No backtested evidence
+// behind 29.55% either -- same caveat as the original 30% above.
+const V6_SOLO_EXECUTION_THRESHOLD = 0.2955;
+
+function hasV6SoloAgreement(gatedByVersion: Map<StrategyVersion, GatedScore>): boolean {
+  return gatedByVersion.get("v6")!.probability >= V6_SOLO_EXECUTION_THRESHOLD;
+}
+
+function v6SoloSummary(gatedByVersion: Map<StrategyVersion, GatedScore>, averageProbability: number): string {
+  const v6Probability = gatedByVersion.get("v6")!.probability;
+  // One decimal place, not Math.round -- see explain/engine.ts's explainScore
+  // comment (2026-08-07) for why whole-percent rounding is no longer safe
+  // once a threshold itself (29.55%) isn't a round number either.
+  return (
+    `v6-solo gate: v6 needs ${(V6_SOLO_EXECUTION_THRESHOLD * 100).toFixed(2)}%+ alone, no other version required ` +
+    `(v6=${(v6Probability * 100).toFixed(1)}%, avg v1/v2/v3=${(averageProbability * 100).toFixed(1)}%): ` +
+    `${ALL_FOUR_VERSIONS.map((v) => `${v}=${(gatedByVersion.get(v)!.probability * 100).toFixed(1)}%`).join(", ")}`
+  );
+}
+
+// v3-solo gate (2026-08-07, operator request, additive alongside v6-solo
+// above, not a replacement): v3 alone clearing 29.5% is now ALSO enough to
+// execute on its own -- taken is true if EITHER v6>=29.55% OR v3>=29.5%,
+// with no confirmation from any other version required either way.
+// Operator's explicit, informed call after being told v3 typically scores in
+// the 25-75% range on these signals (see the live log), so this was
+// expected to noticeably increase execution frequency, not just backstop
+// v6. No backtested evidence behind 29.5% -- same caveat as
+// V6_SOLO_EXECUTION_THRESHOLD above; watch this deployment's actual results.
+const V3_SOLO_EXECUTION_THRESHOLD = 0.295;
+
+function hasV3SoloAgreement(gatedByVersion: Map<StrategyVersion, GatedScore>): boolean {
+  return gatedByVersion.get("v3")!.probability >= V3_SOLO_EXECUTION_THRESHOLD;
+}
+
+function v3OrV6SoloSummary(gatedByVersion: Map<StrategyVersion, GatedScore>, averageProbability: number): string {
+  const v3Probability = gatedByVersion.get("v3")!.probability;
+  const v6Probability = gatedByVersion.get("v6")!.probability;
+  return (
+    `v3-or-v6-solo gate: v3 needs ${(V3_SOLO_EXECUTION_THRESHOLD * 100).toFixed(1)}%+ alone OR v6 needs ` +
+    `${(V6_SOLO_EXECUTION_THRESHOLD * 100).toFixed(2)}%+ alone, no other version required either way ` +
+    `(v3=${(v3Probability * 100).toFixed(1)}%, v6=${(v6Probability * 100).toFixed(1)}%, avg v1/v2/v3=${(averageProbability * 100).toFixed(1)}%): ` +
+    `${ALL_FOUR_VERSIONS.map((v) => `${v}=${(gatedByVersion.get(v)!.probability * 100).toFixed(1)}%`).join(", ")}`
+  );
+}
+
 export function determineConsensus(gatedByVersion: Map<StrategyVersion, GatedScore>): ConsensusDecision {
   const probabilities = STRATEGY_VERSIONS.map((v) => gatedByVersion.get(v)!.probability);
   const averageProbability = probabilities.reduce((a, b) => a + b, 0) / probabilities.length;
-  const taken = hasMutualAgreement(probabilities, gatedByVersion.get("v5")!.probability);
+
+  const taken = hasV6SoloAgreement(gatedByVersion) || hasV3SoloAgreement(gatedByVersion);
 
   // Prefer a version that itself agrees ("taken") for the most meaningful
-  // representative explanation, falling back to CONSENSUS_REPRESENTATIVE_ORDER[0]
-  // if none of the three's own decision happens to read "taken" (possible
+  // representative explanation, falling back to the order's first entry if
+  // none of the candidates' own decision happens to read "taken" (possible
   // since a version's own gate decision can be blocked by its own additional
   // checks -- e.g. v3's directional-conviction margin -- even when its raw
-  // probability contributed to mutual agreement here).
-  const takenVersions = STRATEGY_VERSIONS.filter((v) => gatedByVersion.get(v)!.decision === "taken");
-  const representativeVersion = taken ? (CONSENSUS_REPRESENTATIVE_ORDER.find((v) => takenVersions.includes(v)) ?? CONSENSUS_REPRESENTATIVE_ORDER[0]!) : null;
+  // probability contributed to agreement here). v6 leads the order now: it's
+  // the mandatory anchor, and its own explanation already cites the other
+  // four, making it the most representative single explanation of why this
+  // trade actually happened.
+  const takenVersions = V6_MANDATORY_REPRESENTATIVE_ORDER.filter((v) => gatedByVersion.get(v)!.decision === "taken");
+  const representativeVersion = taken ? (V6_MANDATORY_REPRESENTATIVE_ORDER.find((v) => takenVersions.includes(v)) ?? V6_MANDATORY_REPRESENTATIVE_ORDER[0]!) : null;
 
-  const summary = mutualAgreementSummary(gatedByVersion, averageProbability);
+  const summary = v3OrV6SoloSummary(gatedByVersion, averageProbability);
 
   return { taken, representativeVersion, averageProbability, summary };
 }
 
 // Continuous-scan setups (see scanSymbolContinuously) have no detected chart
 // pattern behind them -- unlike a real strategy signal, they're a bar-level
-// directional read taken unconditionally on a timer. Uses the same shared
-// mutual-agreement rule as determineConsensus above (see its comment) --
-// previously continuous-scan had its own separate, looser standout+floor
-// shape, but the operator asked for one unified rule across both signal types.
+// directional read taken unconditionally on a timer. Shares the exact same
+// rule as determineConsensus above (2026-07-14: unified across both signal
+// types under mutual-agreement; 2026-08-02: both moved together first to the
+// any-single-version gate, then to the v6-mandatory gate -- see those rules'
+// comments).
 export function determineContinuousScanConsensus(gatedByVersion: Map<StrategyVersion, GatedScore>): ConsensusDecision {
-  const probabilities = STRATEGY_VERSIONS.map((v) => gatedByVersion.get(v)!.probability);
-  const averageProbability = probabilities.reduce((a, b) => a + b, 0) / probabilities.length;
-  const taken = hasMutualAgreement(probabilities, gatedByVersion.get("v5")!.probability);
-
-  // Same representative-selection shape as determineConsensus above.
-  const takenVersions = STRATEGY_VERSIONS.filter((v) => gatedByVersion.get(v)!.decision === "taken");
-  const representativeVersion = taken ? (CONSENSUS_REPRESENTATIVE_ORDER.find((v) => takenVersions.includes(v)) ?? CONSENSUS_REPRESENTATIVE_ORDER[0]!) : null;
-
-  const summary = mutualAgreementSummary(gatedByVersion, averageProbability);
-
-  return { taken, representativeVersion, averageProbability, summary };
+  return determineConsensus(gatedByVersion);
 }
 
 const logger = childLogger("engineLoop");
@@ -653,21 +817,52 @@ export class TradingEngine {
     riskRewardRatio: number | null;
   }): Promise<{ gatedByVersion: Map<StrategyVersion, GatedScore>; scoreIdByVersion: Map<StrategyVersion, number> }> {
     const { features, bars, symbol, side, strategyId, structureSwingPriceAtSignal, signalKind, breakoutLevelPrice, barTime, closePrice, atrValue, riskRewardRatio } = params;
-    const settings = getSettings();
     const gatedByVersion = new Map<StrategyVersion, GatedScore>();
-    const scoreIdByVersion = new Map<StrategyVersion, number>();
     for (const version of [...STRATEGY_VERSIONS, ...SHADOW_ONLY_VERSIONS]) {
-      // v3 runs last (see STRATEGY_VERSIONS order), so v1/v2's results are
-      // already in gatedByVersion by the time it's v3's turn -- passed
-      // through so v3 can hard-override to "taken" when both v1 and v2
-      // already agreed (see gate.ts's v1v2Override).
-      const gated = await evaluateSetup(
-        features,
-        version,
-        version === "v3" ? { bars, v1Gated: gatedByVersion.get("v1"), v2Gated: gatedByVersion.get("v2"), signalKind } : undefined
-      );
-      const explanation = explainScore(symbol, side, gated, settings.minScoreThreshold);
+      // v3 runs after v1/v2 (see STRATEGY_VERSIONS order) so it can
+      // hard-override to "taken" when both already agreed (gate.ts's
+      // v1v2Override). v6 (a complete, self-contained scorer as of
+      // 2026-08-03 -- see ruleScorerV6.ts) only needs bars, not the other
+      // four's results, but still runs last per SHADOW_ONLY_VERSIONS' order.
+      let extra: Parameters<typeof evaluateSetup>[3];
+      if (version === "v3") extra = { bars, v1Gated: gatedByVersion.get("v1"), v2Gated: gatedByVersion.get("v2"), signalKind };
+      else if (version === "v6") extra = { bars };
+      const gated = await evaluateSetup(features, version, barTime, extra);
       gatedByVersion.set(version, gated);
+    }
+    const scoreIdByVersion = await this.persistScores({
+      gatedByVersion, features, symbol, side, strategyId, structureSwingPriceAtSignal,
+      signalKind, breakoutLevelPrice, barTime, closePrice, atrValue, riskRewardRatio,
+    });
+    return { gatedByVersion, scoreIdByVersion };
+  }
+
+  // Extracted from scoreAllVersions above so the real-signal path
+  // (evaluateNewSignals) can persist Score rows for a gatedByVersion map
+  // that decideOnBar already produced, without asking evaluateSetup to run
+  // a second time. scanSymbolContinuously still goes through
+  // scoreAllVersions, which now just computes gatedByVersion and delegates
+  // here -- same DB writes, same events, same order, nothing about its
+  // behavior changes.
+  private async persistScores(params: {
+    gatedByVersion: Map<StrategyVersion, GatedScore>;
+    features: SetupFeatures;
+    symbol: string;
+    side: "long" | "short";
+    strategyId: string;
+    structureSwingPriceAtSignal: Decimal | null;
+    signalKind: "breakout" | "reversal" | undefined;
+    breakoutLevelPrice: Decimal | null | undefined;
+    barTime: Date;
+    closePrice: Decimal;
+    atrValue: Decimal;
+    riskRewardRatio: number | null;
+  }): Promise<Map<StrategyVersion, number>> {
+    const { gatedByVersion, features, symbol, side, strategyId, structureSwingPriceAtSignal, signalKind, breakoutLevelPrice, barTime, closePrice, atrValue, riskRewardRatio } = params;
+    const settings = getSettings();
+    const scoreIdByVersion = new Map<StrategyVersion, number>();
+    for (const [version, gated] of gatedByVersion) {
+      const explanation = explainScore(symbol, side, gated, settings.minScoreThreshold);
 
       const scoreRow = await prisma.score.create({
         data: {
@@ -693,7 +888,25 @@ export class TradingEngine {
       scoreIdByVersion.set(version, scoreRow.id);
       await this.emit({ type: "score", symbol, side, strategyVersion: version, probability: gated.probability, decision: gated.decision, explanation });
     }
-    return { gatedByVersion, scoreIdByVersion };
+    return scoreIdByVersion;
+  }
+
+  // Shared by scanSymbolContinuously and evaluateNewSignals -- previously
+  // built inline inside attemptExecution, moved up to the callers since
+  // attemptExecution no longer computes its own RiskAssessment (see below).
+  private async loadRiskLimits(accountId: number): Promise<RiskLimitsConfig> {
+    const riskLimitsRow = await prisma.riskLimit.findUniqueOrThrow({ where: { accountId } });
+    return {
+      perTradeRiskPct: new Decimal(riskLimitsRow.perTradeRiskPct.toString()),
+      maxDailyLossPct: new Decimal(riskLimitsRow.maxDailyLossPct.toString()),
+      maxTrailingDrawdownPct: new Decimal(riskLimitsRow.maxTrailingDrawdownPct.toString()),
+      maxConsecutiveLosses: riskLimitsRow.maxConsecutiveLosses,
+      maxDailyTrades: riskLimitsRow.maxDailyTrades,
+      maxPositionSize: riskLimitsRow.maxPositionSize,
+      perTradeRiskDollars: riskLimitsRow.perTradeRiskDollars ? new Decimal(riskLimitsRow.perTradeRiskDollars.toString()) : null,
+      perTradeProfitDollars: riskLimitsRow.perTradeProfitDollars ? new Decimal(riskLimitsRow.perTradeProfitDollars.toString()) : null,
+      maxDailyLossDollars: riskLimitsRow.maxDailyLossDollars ? new Decimal(riskLimitsRow.maxDailyLossDollars.toString()) : null,
+    };
   }
 
   // Shared consensus -> risk -> execution pipeline. Returns "consensus_not_reached"
@@ -702,8 +915,19 @@ export class TradingEngine {
   // halts everything, and a risk-approved setup is the one and only position
   // this symbol gets this bar/tick regardless of whether the broker itself
   // filled it (assessment.approved already means it should have).
+  //
+  // `assessment` is now supplied by the caller instead of computed in here --
+  // evaluateNewSignals gets it for free from decideOnBar (see
+  // src/replay/decisionCore.ts), which runs the exact same
+  // RiskEngine.assessNewTrade this function used to call itself.
+  // scanSymbolContinuously computes its own (see its call site) since it
+  // never goes through decideOnBar -- that path is intentionally untouched
+  // by the replay-harness work (see .claude/rules/replay-harness.md's seam
+  // map, which never mentions continuous scan). null means consensus wasn't
+  // reached, so there was nothing to assess.
   private async attemptExecution(params: {
     consensus: ConsensusDecision;
+    assessment: RiskAssessment | null;
     gatedByVersion: Map<StrategyVersion, GatedScore>;
     scoreIdByVersion: Map<StrategyVersion, number>;
     account: Account;
@@ -718,14 +942,13 @@ export class TradingEngine {
     atrValue: Decimal;
     instrument: InstrumentSpec;
     regime: RegimeResult;
-    newsStatus: NewsRiskStatus;
     bars: OhlcBar[];
     barTime: Date;
     emaTrend: EmaTrend;
   }): Promise<{ outcome: "consensus_not_reached" | "risk_rejected" | "kill_switch" | "executed"; executed: boolean }> {
-    const { consensus, gatedByVersion, scoreIdByVersion, account, mode, symbol, side, strategyId, structureSwingPrice, signalKind, breakoutLevelPrice, closePrice, atrValue, instrument, regime, newsStatus, bars, barTime, emaTrend } = params;
+    const { consensus, assessment, gatedByVersion, scoreIdByVersion, account, mode, symbol, side, strategyId, structureSwingPrice, signalKind, breakoutLevelPrice, closePrice, atrValue, instrument, regime, bars, barTime, emaTrend } = params;
 
-    if (!consensus.taken || !consensus.representativeVersion) {
+    if (!consensus.taken || !consensus.representativeVersion || !assessment) {
       // Was worth persistently logging -- at least one version said "taken"
       // here, or this wouldn't be worth a log line at all, but consensus
       // wasn't reached. Previously this was only visible over the live
@@ -742,30 +965,6 @@ export class TradingEngine {
     logger.info({ symbol, side, strategyId, mode, summary: consensus.summary }, "consensus_reached");
 
     const settings = getSettings();
-    const riskLimitsRow = await prisma.riskLimit.findUniqueOrThrow({ where: { accountId: account.id } });
-    const limits: RiskLimitsConfig = {
-      perTradeRiskPct: new Decimal(riskLimitsRow.perTradeRiskPct.toString()),
-      maxDailyLossPct: new Decimal(riskLimitsRow.maxDailyLossPct.toString()),
-      maxTrailingDrawdownPct: new Decimal(riskLimitsRow.maxTrailingDrawdownPct.toString()),
-      maxConsecutiveLosses: riskLimitsRow.maxConsecutiveLosses,
-      maxDailyTrades: riskLimitsRow.maxDailyTrades,
-      maxPositionSize: riskLimitsRow.maxPositionSize,
-      perTradeRiskDollars: riskLimitsRow.perTradeRiskDollars ? new Decimal(riskLimitsRow.perTradeRiskDollars.toString()) : null,
-      perTradeProfitDollars: riskLimitsRow.perTradeProfitDollars ? new Decimal(riskLimitsRow.perTradeProfitDollars.toString()) : null,
-      maxDailyLossDollars: riskLimitsRow.maxDailyLossDollars ? new Decimal(riskLimitsRow.maxDailyLossDollars.toString()) : null,
-    };
-
-    const equity = await computeAccountEquity(account, new Map([[symbol, closePrice]]));
-    const accountState = await computeAccountRiskState(account, equity);
-
-    const assessment = this.riskEngine.assessNewTrade({
-      side, entryPrice: closePrice, atrValue,
-      structureSwingPrice,
-      signalKind, breakoutLevelPrice,
-      accountState, limits,
-      pointValue: instrument.pointValue, tickSize: instrument.tickSize, newsStatus, bars,
-      averageProbability: consensus.averageProbability,
-    });
 
     if (assessment.tripKillSwitch) {
       await tripKillSwitch(assessment.reason);
@@ -822,8 +1021,10 @@ export class TradingEngine {
 
     // executeIfApproved only ever reads signal.symbol/side/strategyId --
     // structureSwingPrice on this object is unused there (it already fed the
-    // stop-plan computation via RiskEngine.assessNewTrade above), so a
-    // placeholder satisfies the Signal type without affecting anything.
+    // stop-plan computation via RiskEngine.assessNewTrade, wherever the
+    // caller ran it -- decideOnBar for the real-signal path, this function's
+    // caller directly for continuous scan), so a placeholder satisfies the
+    // Signal type without affecting anything.
     const signalForExecution: Signal = {
       strategyId, symbol, side,
       structureSwingPrice: structureSwingPrice ?? closePrice,
@@ -839,6 +1040,12 @@ export class TradingEngine {
     return { outcome: "executed", executed: result.executed };
   }
 
+  // decideOnBar (src/replay/decisionCore.ts) now owns everything from
+  // "generate a signal" through "run RiskEngine.assessNewTrade" -- the exact
+  // same code replay calls. This function's job has shrunk to: the
+  // side-effects decideOnBar deliberately does NOT do (regime snapshot,
+  // Score persistence, logging, kill-switch tripping, and actually placing
+  // the order), applied to whatever decideOnBar decided.
   private async evaluateNewSignals(account: Account, mode: TradingMode, symbol: string, barTime: Date, closePrice: Decimal): Promise<void> {
     const bars: OhlcBar[] = await loadRecentBars(symbol, 300);
     if (bars.length < MIN_BARS_FOR_REGIME) return;
@@ -854,67 +1061,46 @@ export class TradingEngine {
     const hasOpen = await prisma.trade.findFirst({ where: { accountId: account.id, symbol, status: "open" }, select: { id: true } });
     if (hasOpen) return; // excursion tracking for this open position already happened in manageOpenTrades
 
-    const newsStatus = await getNewsRiskStatus(barTime);
-    const openingRangeStats = await getOpeningRangeStats(symbol);
-    const [dailyTrend, dailyEma20Trend] = await Promise.all([getDailyTrend(symbol), getDailyEma20Trend(symbol)]);
-    const session = classifySession(barTime);
+    // decideOnBar needs account state and risk limits resolved up front and
+    // handed in synchronously (DecisionContext.accountState/riskLimits are
+    // sync by design -- see replay/types.ts), unlike the old code which
+    // fetched these inside attemptExecution, once per candidate strategy. No
+    // trade closes mid-loop within a single bar's evaluation, so computing
+    // this once per bar instead of once per candidate is a no-op change to
+    // the result, not an approximation.
+    const equity = await computeAccountEquity(account, new Map([[symbol, closePrice]]));
+    const accountState = await computeAccountRiskState(account, equity);
+    const riskLimits = await this.loadRiskLimits(account.id);
+    const executionSettings = await getExecutionSettings();
+    const dailyEma20Trend = await getDailyEma20Trend(symbol); // still needed below for attemptExecution's EDE call
 
-    for (const strategy of ALL_STRATEGIES) {
-      const signal = strategy.generateSignal(symbol, bars);
-      if (!signal) continue;
+    const ctx = new LiveDecisionContext({ accountId: account.id, accountState, riskLimits, executionSettings });
+    const barDecisions = await decideOnBar({ ctx, symbol, barTime, closePrice });
 
-      // Direction-specific: a long setup cares about the historical odds the
-      // *high* gets broken later; a short setup cares about the *low*.
-      const openingRangeBreakoutProbability =
-        signal.side === "long" ? openingRangeStats.probHighBroken : openingRangeStats.probLowBroken;
+    for (const decision of barDecisions) {
+      if (!decision.signal) continue; // "no strategy fired" sentinel -- nothing to persist or execute
 
-      // Only long setups are gated on this (see scoring/gate.ts) -- skip the
-      // extra query entirely for shorts rather than computing an unused stat.
-      const longTargetEdge = signal.side === "long" ? await getFixedTargetEdge(symbol, session, "long") : null;
-
-      // ATR/instrument/stop-plan are version-independent (same underlying
-      // market data) and computed once for *every* signal, taken or skipped --
-      // a skipped setup still needs a hypothetical entry/stop/ATR on record so
-      // the outcome evaluator can retrospectively simulate what would have
-      // happened (see engine/outcomeEvaluator.ts). Computed before
-      // buildSetupFeatures (not after, as before) so riskRewardRatio can be
-      // fed into scoring as a real certainty factor, not just recorded
-      // alongside it.
-      const instrument = getInstrument(symbol);
-      const atrSeries = computeAtr(bars).filter((v) => !Number.isNaN(v));
-      if (atrSeries.length === 0) continue;
-      const atrValue = new Decimal(atrSeries[atrSeries.length - 1]!);
-      const hypotheticalStopPlan = computeInitialStop(closePrice, signal.side, atrValue, signal.structureSwingPrice, { tickSize: instrument.tickSize });
-      const riskRewardRatio = hypotheticalStopPlan.stopDistancePoints.gt(0)
-        ? hypotheticalStopPlan.takeProfitPrice.minus(closePrice).abs().dividedBy(hypotheticalStopPlan.stopDistancePoints).toNumber()
-        : null;
-
-      const features = buildSetupFeatures(
-        bars, symbol, signal.side, regime, barTime, newsStatus.inRiskWindow, newsStatus.minutesToEvent,
-        null, openingRangeBreakoutProbability, openingRangeStats.sessionsAnalyzed,
-        dailyTrend.trendLabel, dailyTrend.confidence,
-        longTargetEdge?.winRate ?? null, longTargetEdge?.sampleSize ?? 0,
-        riskRewardRatio, getLatestOrderFlowSnapshot(symbol), dailyEma20Trend
-      );
-
-      // Shadow-score every signal under all three strategy versions in
-      // parallel -- same features, same bar, same market conditions -- so
-      // their hypothetical performance stays directly comparable.
-      const { gatedByVersion, scoreIdByVersion } = await this.scoreAllVersions({
-        features, bars, symbol, side: signal.side, strategyId: signal.strategyId,
-        structureSwingPriceAtSignal: signal.structureSwingPrice, signalKind: signal.signalKind,
-        breakoutLevelPrice: signal.breakoutLevelPrice, barTime, closePrice, atrValue, riskRewardRatio,
+      const scoreIdByVersion = await this.persistScores({
+        gatedByVersion: decision.gatedByVersion, features: decision.features!, symbol,
+        side: decision.signal.side, strategyId: decision.signal.strategyId,
+        structureSwingPriceAtSignal: decision.signal.structureSwingPrice,
+        signalKind: decision.signal.signalKind, breakoutLevelPrice: decision.signal.breakoutLevelPrice,
+        barTime, closePrice, atrValue: decision.atrValue!, riskRewardRatio: decision.riskRewardRatio,
       });
 
-      // Both paper and live require the majority-vote consensus above (a
-      // deliberate change: 2026-07-14 introduced cross-version agreement at
-      // all, 2026-07-16 replaced an average-based rule with this one so a
-      // single strongly-disagreeing version can't veto two others' agreement).
-      const consensus = determineConsensus(gatedByVersion);
+      // Both paper and live require the majority-vote consensus decideOnBar
+      // already computed (a deliberate change: 2026-07-14 introduced
+      // cross-version agreement at all, 2026-07-16 replaced an average-based
+      // rule with this one so a single strongly-disagreeing version can't
+      // veto two others' agreement).
       const result = await this.attemptExecution({
-        consensus, gatedByVersion, scoreIdByVersion, account, mode, symbol, side: signal.side, strategyId: signal.strategyId,
-        structureSwingPrice: signal.structureSwingPrice, signalKind: signal.signalKind, breakoutLevelPrice: signal.breakoutLevelPrice ?? null,
-        closePrice, atrValue, instrument, regime, newsStatus, bars, barTime, emaTrend: dailyEma20Trend,
+        consensus: decision.consensus, assessment: decision.plan,
+        gatedByVersion: decision.gatedByVersion, scoreIdByVersion, account, mode, symbol,
+        side: decision.signal.side, strategyId: decision.signal.strategyId,
+        structureSwingPrice: decision.signal.structureSwingPrice, signalKind: decision.signal.signalKind,
+        breakoutLevelPrice: decision.signal.breakoutLevelPrice,
+        closePrice, atrValue: decision.atrValue!, instrument: getInstrument(symbol), regime, bars, barTime,
+        emaTrend: dailyEma20Trend,
       });
       if (result.outcome === "consensus_not_reached" || result.outcome === "risk_rejected") continue;
       return; // one new position per symbol per bar (kill_switch or executed both stop here)
@@ -1013,6 +1199,7 @@ export class TradingEngine {
     const atrSeries = computeAtr(bars).filter((v) => !Number.isNaN(v));
     if (atrSeries.length === 0) return;
     const atrValue = new Decimal(atrSeries[atrSeries.length - 1]!);
+    const executionSettings = await getExecutionSettings();
 
     // Long and short are independent hypothetical reads over the same bars
     // -- scored concurrently (each writes its own Score rows, one per
@@ -1022,9 +1209,9 @@ export class TradingEngine {
     const sideResults = await Promise.all(
       (["long", "short"] as const).map(async (side) => {
         const openingRangeBreakoutProbability = side === "long" ? openingRangeStats.probHighBroken : openingRangeStats.probLowBroken;
-        const longTargetEdge = side === "long" ? await getFixedTargetEdge(symbol, session, "long") : null;
+        const longTargetEdge = side === "long" ? await getFixedTargetEdge(symbol, session, "long", barTime) : null;
 
-        const hypotheticalStopPlan = computeInitialStop(closePrice, side, atrValue, null, { tickSize: instrument.tickSize });
+        const hypotheticalStopPlan = computeInitialStop(closePrice, side, atrValue, null, { tickSize: instrument.tickSize, takeProfitRMultiple: executionSettings.takeProfitRMultiple });
         const riskRewardRatio = hypotheticalStopPlan.stopDistancePoints.gt(0)
           ? hypotheticalStopPlan.takeProfitPrice.minus(closePrice).abs().dividedBy(hypotheticalStopPlan.stopDistancePoints).toNumber()
           : null;
@@ -1069,10 +1256,33 @@ export class TradingEngine {
       // both null -- the stop plan falls back to pure ATR, same as this
       // path's hypothetical preview always has.
       const consensus = determineContinuousScanConsensus(gatedByVersion);
+
+      // attemptExecution no longer computes its own RiskAssessment (the
+      // real-signal path gets one for free from decideOnBar) -- this path
+      // doesn't go through decideOnBar, so it still builds one itself,
+      // exactly like attemptExecution used to inline, gated the same way:
+      // only when consensus was actually reached.
+      let assessment: RiskAssessment | null = null;
+      if (consensus.taken) {
+        const equity = await computeAccountEquity(account, new Map([[symbol, closePrice]]));
+        const accountState = await computeAccountRiskState(account, equity);
+        const limits = await this.loadRiskLimits(account.id);
+        assessment = this.riskEngine.assessNewTrade({
+          side, entryPrice: closePrice, atrValue,
+          structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
+          accountState, limits,
+          pointValue: instrument.pointValue, tickSize: instrument.tickSize, newsStatus, bars,
+          averageProbability: consensus.averageProbability,
+          takeProfitRMultiple: executionSettings.takeProfitRMultiple,
+          confidenceTiers: executionSettings.confidenceTiers,
+          srProximityGateSuspended: isSrProximityGateSuspended(barTime),
+        });
+      }
+
       const result = await this.attemptExecution({
-        consensus, gatedByVersion, scoreIdByVersion, account, mode, symbol, side, strategyId,
+        consensus, assessment, gatedByVersion, scoreIdByVersion, account, mode, symbol, side, strategyId,
         structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
-        closePrice, atrValue, instrument, regime, newsStatus, bars, barTime, emaTrend: dailyEma20Trend,
+        closePrice, atrValue, instrument, regime, bars, barTime, emaTrend: dailyEma20Trend,
       });
       if (result.outcome === "kill_switch") return;
     }
