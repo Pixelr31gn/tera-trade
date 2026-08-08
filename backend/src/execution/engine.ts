@@ -25,6 +25,23 @@ export interface ExecutionResult {
   reason: string;
 }
 
+// Limit-only entries (2026-08-07, operator request: "as fast as possible,
+// only enter using limit orders"): every entry now rests at the signal's own
+// reference price instead of chasing the market -- no slippage past the
+// price the setup was actually scored at. If it hasn't filled within this
+// window, cancel it and skip the trade entirely (operator's explicit call --
+// no fallback to a market order) rather than wait indefinitely or chase a
+// worse price. Same 750ms poll cadence as browserControlBroker.ts's
+// FILL_CONFIRMATION_DELAY_MS for consistency; fewer retries (4 vs that
+// file's 4) since "as fast as possible" was the explicit ask and a limit
+// order that hasn't filled in ~3s on a fast-moving continuous-scan signal is
+// unlikely to without the market coming back to it. SimulatedBroker never
+// returns "pending" (it fills immediately regardless of orderType -- see
+// simulatedBroker.ts's placeOrder), so this polling path only ever runs
+// live; paper mode is unaffected.
+const LIMIT_FILL_CONFIRMATION_RETRIES = 4;
+const LIMIT_FILL_CONFIRMATION_DELAY_MS = 750;
+
 export async function executeIfApproved(
   broker: BrokerClient,
   brokerKind: BrokerKind,
@@ -71,7 +88,8 @@ export async function executeIfApproved(
     accountId: brokerAccountId,
     symbol: signal.symbol,
     side,
-    orderType: OrderType.MARKET,
+    orderType: OrderType.LIMIT,
+    limitPrice: entryPrice,
     quantity: assessment.quantity,
     stopLossPrice: assessment.stopPrice ?? undefined,
     takeProfitPrice: assessment.takeProfitPrice ?? undefined,
@@ -79,10 +97,39 @@ export async function executeIfApproved(
     customTag: `${signal.strategyId}:${entryTime.toISOString()}`,
     referencePrice: entryPrice,
   };
-  const result = await broker.placeOrder(orderRequest);
+  let result = await broker.placeOrder(orderRequest);
   if (result.status === "rejected") {
     logger.warn({ symbol: signal.symbol, error: result.error }, "order_rejected");
     return { executed: false, tradeId: null, reason: `broker rejected the order: ${result.error}` };
+  }
+
+  // A limit order rests on the book (status "pending") instead of filling
+  // immediately -- poll for a real fill via isPositionFlat becoming false
+  // (same confirmation signal browserControlBroker.ts's own market-order
+  // path already trusts), and cancel + skip the trade if it doesn't fill in
+  // time. SimulatedBroker always returns "filled" directly, so this block
+  // never runs in paper mode.
+  if (result.status === "pending") {
+    let filled = false;
+    for (let attempt = 0; attempt < LIMIT_FILL_CONFIRMATION_RETRIES; attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, LIMIT_FILL_CONFIRMATION_DELAY_MS));
+      const isFlat = await broker.isPositionFlat?.(signal.symbol).catch(() => null);
+      if (isFlat === false) {
+        filled = true;
+        break;
+      }
+    }
+    if (!filled) {
+      const cancelResult = await broker.cancelRestingOrder?.(signal.symbol).catch(() => null);
+      logger.info({ symbol: signal.symbol, side: signal.side, limitPrice: entryPrice.toString(), cancelled: cancelResult?.status ?? "unavailable" }, "limit_order_expired_unfilled");
+      return { executed: false, tradeId: null, reason: `limit order at ${entryPrice.toString()} did not fill within ${((LIMIT_FILL_CONFIRMATION_RETRIES - 1) * LIMIT_FILL_CONFIRMATION_DELAY_MS) / 1000}s -- cancelled, trade skipped` };
+    }
+    // Confirmed filled -- record it as such so the Trade/OrderRecord rows
+    // below reflect a real fill, not a still-resting order. The limit price
+    // itself is the recorded entry price (no real fill-price readback exists
+    // anywhere in this codebase's broker layer -- see placeOrder's own
+    // referencePrice convention for market fills).
+    result = { ...result, status: "filled", filledPrice: entryPrice, filledAt: new Date() };
   }
 
   const fillPrice = result.filledPrice ?? entryPrice;
@@ -113,7 +160,7 @@ export async function executeIfApproved(
       brokerOrderId: result.brokerOrderId,
       accountId,
       symbol: signal.symbol,
-      orderType: "market",
+      orderType: "limit",
       side: signal.side,
       quantity: assessment.quantity,
       price: fillPrice.toString(),

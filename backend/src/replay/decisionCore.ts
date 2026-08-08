@@ -39,7 +39,7 @@ const MIN_BARS_FOR_REGIME = 120; // keep in sync with engine/loop.ts:160
  * Import them here rather than reimplementing — a second copy of the
  * consensus rule is how the harness and live silently drift apart.
  */
-import { determineConsensus } from "../engine/loop.js";
+import { determineConsensus, isSrProximityGateSuspended } from "../engine/loop.js";
 
 const ALL_SCORED_VERSIONS: StrategyVersion[] = ["v1", "v2", "v3", "v5"];
 
@@ -169,6 +169,11 @@ export async function decideOnBar(params: {
     // Shadow-only, same as v5.
     gatedByVersion.set("v6", await evaluateSetup(features, "v6", barTime, { bars }));
 
+    // v7 (2026-08-07, ruleScorerV7.ts) -- plain features in, points out, same
+    // shape as v5. Shadow-only, same as v5/v6.
+    const v7Gated = await evaluateSetup(features, "v7", barTime);
+    gatedByVersion.set("v7", v7Gated);
+
     const consensus = determineConsensus(gatedByVersion);
 
     let plan: BarDecision["plan"] = null;
@@ -191,6 +196,7 @@ export async function decideOnBar(params: {
         confidenceTiers: executionSettings.confidenceTiers,
         explicitStopPrice: signal.explicitStopPrice,
         explicitTakeProfitPrice: signal.explicitTakeProfitPrice,
+        srProximityGateSuspended: isSrProximityGateSuspended(barTime),
       });
 
       plan = { ...assessment, entryPrice: closePrice };

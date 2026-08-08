@@ -18,7 +18,9 @@ function gated(decision: "taken" | "skipped_score", probability = 0.7): GatedSco
 describe("explainScore", () => {
   it("mentions probability and threshold when taken", () => {
     const text = explainScore("ES", "long", gated("taken", 0.72), 0.65);
-    expect(text).toContain("72%");
+    // One decimal place, not whole-percent rounding -- see explainScore's
+    // 2026-08-07 comment.
+    expect(text).toContain("72.0%");
     expect(text).toContain("65%");
     expect(text).toContain("LONG ES");
   });

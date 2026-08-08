@@ -49,6 +49,27 @@ import type { Account, Trade } from "@prisma/client";
 import { decideOnBar } from "../replay/decisionCore.js";
 import { LiveDecisionContext } from "../replay/liveDecisionContext.js";
 
+// S/R proximity gate temporary suspension (2026-08-06, operator request,
+// 24h-boxed): the v6-solo execution gate (see V6_SOLO_EXECUTION_THRESHOLD
+// below) started clearing signals at 30% that were then immediately vetoed
+// by risk/engine.ts's MAX_ENTRY_DISTANCE_ATR/MIN_ENTRY_DISTANCE_ATR band
+// (concrete example: an ES short at v6=30% approved by consensus, then
+// rejected for sitting 2.43x ATR from the nearest resistance level, needing
+// 1.95x) -- the same tension documented at length in that file's own
+// comment history. Rather than pick a new permanent band with no evidence
+// behind it, the operator asked to suspend the distance check entirely for
+// 24 hours to see what it actually costs/gains, and revisit with real data.
+// The S/R *validation* requirement (a real 2+-touch level must still exist
+// nearby) is untouched -- only the distance-from-it band is suspended. This
+// lives here (wall-clock/DB-coupled), not in risk/engine.ts, which stays
+// pure per CLAUDE.md -- assessNewTrade only ever receives the already-
+// computed boolean.
+const SR_PROXIMITY_GATE_SUSPENDED_UNTIL = Date.parse("2026-08-08T04:35:00Z");
+
+export function isSrProximityGateSuspended(at: Date): boolean {
+  return at.getTime() < SR_PROXIMITY_GATE_SUSPENDED_UNTIL;
+}
+
 // v1, v2, v3 -- all rule-based/deterministic -- are the active voters,
 // shadow-scored on every signal so their performance stays directly
 // comparable. v4 (an independently ML-trained model, see scoring/
@@ -70,7 +91,13 @@ const STRATEGY_VERSIONS: StrategyVersion[] = ["v1", "v2", "v3"];
 // v6 (2026-08-02, see ruleScorerV6.ts) joins the same way -- order matters
 // here: it must come after v5, since v6's ensemble needs v5's own result
 // (see scoreAllVersions below and gate.ts's evaluateSetup 'v6' branch).
-const SHADOW_ONLY_VERSIONS: StrategyVersion[] = ["v5", "v6"];
+// v7 (2026-08-07, see scoring/ruleScorerV7.ts) joins the same way -- pattern-
+// mined from real resolved outcomes, zero live trades behind its own weight
+// yet, shadow-only until it earns promotion on a real track record. Unlike
+// v6, it needs no other version's results (plain features in, points out --
+// see gate.ts's "v7" branch), so ordering relative to v5/v6 here doesn't
+// matter.
+const SHADOW_ONLY_VERSIONS: StrategyVersion[] = ["v5", "v6", "v7"];
 
 // Both paper AND live take a trade when at least 2 of the 3 versions'
 // probabilities individually clear the score threshold (65%, see
@@ -193,11 +220,74 @@ function v6MandatorySummary(gatedByVersion: Map<StrategyVersion, GatedScore>, av
   );
 }
 
+// v6-solo gate (2026-08-06, operator request): v6 alone clearing the
+// threshold is enough to execute -- no confirmation from v1/v2/v3/v5
+// required at all. Replaces the v6-mandatory-plus-one-confirmation rule
+// above the same way that rule replaced hasMutualAgreement -- SUPERSEDED,
+// not deleted, so the prior rule is a one-line swap back
+// (`hasV6MandatoryAgreement` / `v6MandatorySummary`) if this doesn't hold
+// up. Operator's explicit, informed call after being told: v6 had zero
+// resolved live trades behind its own weight at the time of this change
+// (see the v6-mandatory-gate comment above), the original 30% is below a
+// coin flip, and this removes the only other-model-confirmation requirement
+// the previous two consensus rules both kept in some form. No evidence
+// backed 30% specifically -- watch this deployment's actual win rate once
+// real trades accumulate under it.
+// 2026-08-07: lowered 30% -> 29.55%, operator request, after a real NQ long
+// scored v6=29.773% -- displayed as "30%" everywhere (whole-percent
+// rounding, since fixed, see explain/engine.ts's explainScore comment) and
+// read as a bug ("this should've executed") when the gate was actually
+// working correctly against the unrounded value. No backtested evidence
+// behind 29.55% either -- same caveat as the original 30% above.
+const V6_SOLO_EXECUTION_THRESHOLD = 0.2955;
+
+function hasV6SoloAgreement(gatedByVersion: Map<StrategyVersion, GatedScore>): boolean {
+  return gatedByVersion.get("v6")!.probability >= V6_SOLO_EXECUTION_THRESHOLD;
+}
+
+function v6SoloSummary(gatedByVersion: Map<StrategyVersion, GatedScore>, averageProbability: number): string {
+  const v6Probability = gatedByVersion.get("v6")!.probability;
+  // One decimal place, not Math.round -- see explain/engine.ts's explainScore
+  // comment (2026-08-07) for why whole-percent rounding is no longer safe
+  // once a threshold itself (29.55%) isn't a round number either.
+  return (
+    `v6-solo gate: v6 needs ${(V6_SOLO_EXECUTION_THRESHOLD * 100).toFixed(2)}%+ alone, no other version required ` +
+    `(v6=${(v6Probability * 100).toFixed(1)}%, avg v1/v2/v3=${(averageProbability * 100).toFixed(1)}%): ` +
+    `${ALL_FOUR_VERSIONS.map((v) => `${v}=${(gatedByVersion.get(v)!.probability * 100).toFixed(1)}%`).join(", ")}`
+  );
+}
+
+// v3-solo gate (2026-08-07, operator request, additive alongside v6-solo
+// above, not a replacement): v3 alone clearing 29.5% is now ALSO enough to
+// execute on its own -- taken is true if EITHER v6>=29.55% OR v3>=29.5%,
+// with no confirmation from any other version required either way.
+// Operator's explicit, informed call after being told v3 typically scores in
+// the 25-75% range on these signals (see the live log), so this was
+// expected to noticeably increase execution frequency, not just backstop
+// v6. No backtested evidence behind 29.5% -- same caveat as
+// V6_SOLO_EXECUTION_THRESHOLD above; watch this deployment's actual results.
+const V3_SOLO_EXECUTION_THRESHOLD = 0.295;
+
+function hasV3SoloAgreement(gatedByVersion: Map<StrategyVersion, GatedScore>): boolean {
+  return gatedByVersion.get("v3")!.probability >= V3_SOLO_EXECUTION_THRESHOLD;
+}
+
+function v3OrV6SoloSummary(gatedByVersion: Map<StrategyVersion, GatedScore>, averageProbability: number): string {
+  const v3Probability = gatedByVersion.get("v3")!.probability;
+  const v6Probability = gatedByVersion.get("v6")!.probability;
+  return (
+    `v3-or-v6-solo gate: v3 needs ${(V3_SOLO_EXECUTION_THRESHOLD * 100).toFixed(1)}%+ alone OR v6 needs ` +
+    `${(V6_SOLO_EXECUTION_THRESHOLD * 100).toFixed(2)}%+ alone, no other version required either way ` +
+    `(v3=${(v3Probability * 100).toFixed(1)}%, v6=${(v6Probability * 100).toFixed(1)}%, avg v1/v2/v3=${(averageProbability * 100).toFixed(1)}%): ` +
+    `${ALL_FOUR_VERSIONS.map((v) => `${v}=${(gatedByVersion.get(v)!.probability * 100).toFixed(1)}%`).join(", ")}`
+  );
+}
+
 export function determineConsensus(gatedByVersion: Map<StrategyVersion, GatedScore>): ConsensusDecision {
   const probabilities = STRATEGY_VERSIONS.map((v) => gatedByVersion.get(v)!.probability);
   const averageProbability = probabilities.reduce((a, b) => a + b, 0) / probabilities.length;
 
-  const taken = hasV6MandatoryAgreement(gatedByVersion);
+  const taken = hasV6SoloAgreement(gatedByVersion) || hasV3SoloAgreement(gatedByVersion);
 
   // Prefer a version that itself agrees ("taken") for the most meaningful
   // representative explanation, falling back to the order's first entry if
@@ -211,7 +301,7 @@ export function determineConsensus(gatedByVersion: Map<StrategyVersion, GatedSco
   const takenVersions = V6_MANDATORY_REPRESENTATIVE_ORDER.filter((v) => gatedByVersion.get(v)!.decision === "taken");
   const representativeVersion = taken ? (V6_MANDATORY_REPRESENTATIVE_ORDER.find((v) => takenVersions.includes(v)) ?? V6_MANDATORY_REPRESENTATIVE_ORDER[0]!) : null;
 
-  const summary = v6MandatorySummary(gatedByVersion, averageProbability);
+  const summary = v3OrV6SoloSummary(gatedByVersion, averageProbability);
 
   return { taken, representativeVersion, averageProbability, summary };
 }
@@ -1183,6 +1273,7 @@ export class TradingEngine {
           averageProbability: consensus.averageProbability,
           takeProfitRMultiple: executionSettings.takeProfitRMultiple,
           confidenceTiers: executionSettings.confidenceTiers,
+          srProximityGateSuspended: isSrProximityGateSuspended(barTime),
         });
       }
 

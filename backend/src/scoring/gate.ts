@@ -18,6 +18,7 @@ import { scoreSetup, type FactorContribution, type StrategyVersion } from "./rul
 import { computeBreakoutStrengthAdjustment, computeEmaProximityAdjustment, computeFibAdjustment, computeOrderFlowAdjustment, computePpmAdjustment, computeRiskRewardAdjustment, computeV3Bucket, scoreSetupV3Directional } from "./ruleScorerV3.js";
 import { scoreSetupV5 } from "./ruleScorerV5.js";
 import { scoreSetupV6 } from "./ruleScorerV6.js";
+import { scoreSetupV7 } from "./ruleScorerV7.js";
 import { computeHistoricalAdjustment } from "./v3HistoricalAdjustment.js";
 import { MLScorer } from "./training.js";
 
@@ -25,7 +26,7 @@ export interface GatedScore {
   probability: number;
   decision: "taken" | "skipped_score";
   factors: FactorContribution[];
-  modelUsed: "rule_v1" | "ml_v4" | "rule_v1_fallback" | "rule_v3" | "rule_v5" | "rule_v6";
+  modelUsed: "rule_v1" | "ml_v4" | "rule_v1_fallback" | "rule_v3" | "rule_v5" | "rule_v6" | "rule_v7";
   /** Set when a setup that otherwise cleared the probability threshold was blocked by a hard rule (v3's directional-conviction check below) -- lets explainScore report the real reason instead of a misleading "below threshold". */
   blockReason: string | null;
   /** Only set for v3 -- the categorical fingerprint this setup was scored under, persisted on the Score row so future setups can look up how similar-looking ones performed (see v3HistoricalAdjustment.ts). */
@@ -211,6 +212,17 @@ export async function evaluateSetup(
     const result = scoreSetupV6(features, extra.bars);
     const decision: "taken" | "skipped_score" = result.probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
     return { probability: result.probability, decision, factors: result.factors, modelUsed: "rule_v6", blockReason: null, v3Bucket: null };
+  }
+
+  if (version === "v7") {
+    // v7 (2026-08-07) is a plain weighted-points scorer built from the
+    // `add-scoring-version` skill's Step -1 pattern-mining methodology --
+    // same shape as v5 (no v3Inputs, no directional-conviction margin, no
+    // historical-similarity lookup). See ruleScorerV7.ts's header for the
+    // three mined factors and the real win-rate numbers behind them.
+    const result = scoreSetupV7(features);
+    const decision: "taken" | "skipped_score" = result.probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
+    return { probability: result.probability, decision, factors: result.factors, modelUsed: "rule_v7", blockReason: null, v3Bucket: null };
   }
 
   // v4 is the independently-trained ML model (see scoring/training.ts) --

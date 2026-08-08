@@ -7,7 +7,7 @@
  */
 import { Decimal } from "decimal.js";
 import { computeConfidenceTierQuantity, computePositionSize } from "./sizing.js";
-import { computeInitialStop } from "./stops.js";
+import { computeInitialStop, MAX_STOP_DISTANCE_POINTS, MAX_TAKE_PROFIT_DISTANCE_POINTS } from "./stops.js";
 
 export interface TradePlan {
   stopPrice: Decimal;
@@ -61,9 +61,33 @@ export function computeTradePlan(params: {
   const { side, entryPrice, atrValue, structureSwingPrice, tickSize, pointValue, riskAmount, profitDollars, maxPositionSize, averageProbability, takeProfitRMultiple, confidenceTiers, explicitStopPrice, explicitTakeProfitPrice } = params;
 
   const stopPlan = computeInitialStop(entryPrice, side, atrValue, structureSwingPrice, { tickSize, takeProfitRMultiple });
-  const initialStopPrice = explicitStopPrice ?? stopPlan.stopPrice;
-  const initialStopDistancePoints = explicitStopPrice ? entryPrice.minus(explicitStopPrice).abs() : stopPlan.stopDistancePoints;
-  const initialTakeProfitPrice = explicitTakeProfitPrice ?? stopPlan.takeProfitPrice;
+  const rawStopPrice = explicitStopPrice ?? stopPlan.stopPrice;
+  const rawStopDistancePoints = explicitStopPrice ? entryPrice.minus(explicitStopPrice).abs() : stopPlan.stopDistancePoints;
+  const rawTakeProfitPrice = explicitTakeProfitPrice ?? stopPlan.takeProfitPrice;
+
+  // 2026-08-06 (operator request): the 5pt max-stop / 10pt max-target caps
+  // apply to every trade this function plans, including a strategy's own
+  // explicit stop/target (e.g. strategy/trendPullbackFib.ts's "stop at the
+  // 5m 20 EMA") -- computeInitialStop already caps its own structure/ATR
+  // output, but that's bypassed entirely once explicitStopPrice/
+  // explicitTakeProfitPrice are set, so the same ceiling is re-applied here
+  // as the single choke point both the real execution path
+  // (risk/engine.ts's assessNewTrade) and the dashboard preview path
+  // (api/routes/scores.ts) share.
+  const initialStopDistancePoints = Decimal.min(rawStopDistancePoints, MAX_STOP_DISTANCE_POINTS);
+  const initialStopPrice = initialStopDistancePoints.equals(rawStopDistancePoints)
+    ? rawStopPrice
+    : side === "long"
+      ? entryPrice.minus(initialStopDistancePoints)
+      : entryPrice.plus(initialStopDistancePoints);
+
+  const rawTakeProfitDistancePoints = rawTakeProfitPrice.minus(entryPrice).abs();
+  const initialTakeProfitDistancePoints = Decimal.min(rawTakeProfitDistancePoints, MAX_TAKE_PROFIT_DISTANCE_POINTS);
+  const initialTakeProfitPrice = initialTakeProfitDistancePoints.equals(rawTakeProfitDistancePoints)
+    ? rawTakeProfitPrice
+    : side === "long"
+      ? entryPrice.plus(initialTakeProfitDistancePoints)
+      : entryPrice.minus(initialTakeProfitDistancePoints);
 
   // Dollar-based sizing is still computed -- its `reason` documents what the
   // $ budget alone would have sized to, for comparison against the
@@ -98,9 +122,20 @@ export function computeTradePlan(params: {
     const minRiskDollars = profitDollars.dividedBy(MIN_RISK_REWARD_DENOMINATOR);
     if (actualRiskDollars.lt(minRiskDollars)) {
       const minStopDistance = minRiskDollars.dividedBy(pointValue.times(sizing.quantity));
-      stopDistancePoints = minStopDistance;
-      stopPrice = side === "long" ? entryPrice.minus(minStopDistance) : entryPrice.plus(minStopDistance);
-      sizingReason = `${sizingReason}; stop widened to ${minStopDistance.toFixed(4)} pts to keep risk at/above 1/${MIN_RISK_REWARD_DENOMINATOR} of the $${profitDollars.toFixed(2)} target (was $${actualRiskDollars.toFixed(2)}, floor is $${minRiskDollars.toFixed(2)})`;
+      // 2026-08-06: the widening floor above must never push the stop past
+      // the hard MAX_STOP_DISTANCE_POINTS ceiling (stops.ts) -- that ceiling
+      // is meant to be an absolute maximum regardless of which code path
+      // computed the distance, not just the default structure/ATR one.
+      // Dormant in practice today (no active account has a fixed-dollar
+      // profitDollars configured, see docs/BUILD_HISTORY.md's v1.2 "Fixing
+      // the win rate" entry), but this only matters if one ever is again.
+      if (minStopDistance.lte(MAX_STOP_DISTANCE_POINTS)) {
+        stopDistancePoints = minStopDistance;
+        stopPrice = side === "long" ? entryPrice.minus(minStopDistance) : entryPrice.plus(minStopDistance);
+        sizingReason = `${sizingReason}; stop widened to ${minStopDistance.toFixed(4)} pts to keep risk at/above 1/${MIN_RISK_REWARD_DENOMINATOR} of the $${profitDollars.toFixed(2)} target (was $${actualRiskDollars.toFixed(2)}, floor is $${minRiskDollars.toFixed(2)})`;
+      } else {
+        sizingReason = `${sizingReason}; risk:reward floor not met but stop left at ${stopDistancePoints.toFixed(4)} pts -- widening to ${minStopDistance.toFixed(4)} pts would exceed the ${MAX_STOP_DISTANCE_POINTS.toString()}pt max-stop cap`;
+      }
     }
   }
 

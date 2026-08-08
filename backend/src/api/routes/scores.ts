@@ -7,7 +7,7 @@ import { computeTradePlan, RiskEngine, type RiskLimitsConfig } from "../../risk/
 import { DEFAULT_INSTRUMENTS, getInstrument } from "../../marketData/instruments.js";
 import { computeAccountEquity, computeAccountRiskState } from "../../engine/accounting.js";
 import { ensureDefaultAccount } from "../../engine/bootstrap.js";
-import { CONTINUOUS_SCAN_STRATEGY_IDS, determineConsensus } from "../../engine/loop.js";
+import { CONTINUOUS_SCAN_STRATEGY_IDS, determineConsensus, isSrProximityGateSuspended } from "../../engine/loop.js";
 import { getExecutionSettings } from "../../execution/mode.js";
 import type { GatedScore } from "../../scoring/gate.js";
 import type { StrategyVersion } from "../../scoring/ruleScorer.js";
@@ -73,6 +73,7 @@ async function wouldPassRiskEngine(score: Score, riskLimitsRow: RiskLimit, execu
     averageProbability: score.probability.toNumber(),
     takeProfitRMultiple: executionSettings.takeProfitRMultiple,
     confidenceTiers: executionSettings.confidenceTiers,
+    srProximityGateSuspended: isSrProximityGateSuspended(score.time),
   });
   return assessment.approved;
 }

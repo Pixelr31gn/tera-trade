@@ -268,6 +268,47 @@ describe("RiskEngine.assessNewTrade -- support/resistance proximity gate", () =>
     expect(assessment.approved).toBe(true);
     expect(assessment.nearestSrLevel?.type).toBe("resistance");
   });
+
+  // 2026-08-06 (operator request, 24h-boxed): srProximityGateSuspended skips
+  // both the ceiling and floor above -- see risk/engine.ts's comment on that
+  // param and engine/loop.ts's isSrProximityGateSuspended for the expiry.
+  it("approves a long past the 1.95x ATR ceiling when srProximityGateSuspended is true", () => {
+    const engine = new RiskEngine();
+    const assessment = engine.assessNewTrade({
+      side: "long", entryPrice: new Decimal(20000), atrValue: new Decimal(6.667), structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
+      accountState: accountState(), limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
+      bars: barsWithPivotLowNear(19950), // 7.5x ATR -- normally rejected, see the ceiling test above
+      srProximityGateSuspended: true,
+    });
+    expect(assessment.approved).toBe(true);
+  });
+
+  it("approves a long under the 0.25x ATR floor when srProximityGateSuspended is true", () => {
+    const engine = new RiskEngine();
+    const assessment = engine.assessNewTrade({
+      side: "long", entryPrice: new Decimal(20000), atrValue: new Decimal(6.667), structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
+      accountState: accountState(), limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
+      bars: barsWithPivotLowNear(19999), // 0.15x ATR -- normally rejected, see the floor test above
+      srProximityGateSuspended: true,
+    });
+    expect(assessment.approved).toBe(true);
+  });
+
+  it("still rejects when no level exists at all, even with srProximityGateSuspended -- only the distance band is suspended, not the validation requirement", () => {
+    const engine = new RiskEngine();
+    const flatBars: OhlcBar[] = Array.from({ length: 20 }, (_, i) => ({
+      time: new Date(Date.UTC(2026, 0, 1, 0, i)),
+      open: 20000, high: 20000, low: 20000, close: 20000, volume: 100,
+    }));
+    const assessment = engine.assessNewTrade({
+      side: "long", entryPrice: new Decimal(20000), atrValue: new Decimal(6.667), structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
+      accountState: accountState(), limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
+      bars: flatBars,
+      srProximityGateSuspended: true,
+    });
+    expect(assessment.approved).toBe(false);
+    expect(assessment.reason).toContain("no support level found");
+  });
 });
 
 describe("RiskEngine.assessNewTrade -- breakout signal gate", () => {

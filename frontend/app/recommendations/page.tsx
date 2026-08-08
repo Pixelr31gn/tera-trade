@@ -73,11 +73,13 @@ function ExecutionDecisionEnginePanel() {
   );
 }
 
-const VERSION_FILTERS = ["all", "v1", "v2", "v3", "v4", "v5"] as const;
-// v5 (2026-07-21) is deliberately NOT included here -- it's shadow-scored
-// but not a consensus voter yet (see engine/loop.ts's SHADOW_ONLY_VERSIONS),
-// so the "all three agree" completeness badge below stays v1/v2/v3 only.
-// Filter to the "v5" tab above to see its rows on their own.
+const VERSION_FILTERS = ["all", "v1", "v2", "v3", "v4", "v5", "v6", "v7"] as const;
+// v5/v6 (2026-07-21 / 2026-08-02) are deliberately NOT included here -- the
+// "all three agree" completeness badge below stays v1/v2/v3 only (v6 is
+// scored on every signal and, as of 2026-08-06, is what actually gates
+// execution -- see the explanatory text below -- but it's still not one of
+// the three grouped "real strategy" columns this badge tracks). Filter to
+// the "V5"/"V6" tabs above to see their rows on their own.
 const REAL_VERSIONS = ["v1", "v2", "v3"] as const;
 
 interface SignalGroup {
@@ -158,17 +160,20 @@ export default function RecommendationsPage() {
         }
       >
         <p className="mb-3 text-xs text-gray-500">
-          Every signal is shadow-scored by v1/v2/v3 -- see the Strategy page to compare their performance (v4 filter still
-          works for historical rows from before it was removed 2026-07-15). &quot;Taken&quot; means that version&apos;s own
-          score cleared its threshold, not that a trade happened on its own. Both paper and live execute a signal once{" "}
-          <strong>at least 2 of the 3 versions independently clear the 65% threshold</strong> (2026-07-16, a straight
-          majority vote on the raw score). A nearby support/resistance level and passing risk sizing still have to clear
-          too either way. A row only links to a real trade # once all of that clears.{" "}
-          <strong>In the All tab</strong>, rows for the same signal are grouped together with a V1/V2/V3 completeness badge.
-          Continuous-scan rows (a running per-bar directional read, not a detected chart pattern) are also scored by all
-          three versions and can execute -- but only when one version clears <strong>70%</strong> and neither of the
-          other two is below <strong>50%</strong>, a stricter bar than a real strategy signal since there&apos;s no
-          confirmed pattern behind it.
+          Every signal is shadow-scored by v1/v2/v3/v5/v6/v7 -- see the Strategy page to compare their performance (v4
+          filter still works for historical rows from before it was removed 2026-07-15). &quot;Taken&quot; means that
+          version&apos;s own score cleared its threshold, not that a trade happened on its own.{" "}
+          <strong>As of 2026-08-07, both paper and live execute a signal once EITHER v3 alone clears 29.5% OR v6 alone
+          clears 29.55% -- no other version&apos;s agreement is required either way.</strong> (Replaces the earlier
+          v1/v2/v3-majority and v6-mandatory-plus-confirmation rules, then added the v3-solo leg alongside v6-solo the
+          same day; see engine/loop.ts&apos;s V3_SOLO_EXECUTION_THRESHOLD/V6_SOLO_EXECUTION_THRESHOLD for the full
+          history.) A nearby support/resistance level (currently suspended 24h, see the <code>open-gate</code> skill)
+          and passing risk sizing still have to clear too either way. A row only links to a real trade # once all of
+          that clears.{" "}
+          <strong>In the All tab</strong>, rows for the same signal are grouped together with a V1/V2/V3 completeness
+          badge -- filter to the <strong>V3</strong> or <strong>V6</strong> tabs to see the two versions that actually
+          decide execution. Continuous-scan rows (a running per-bar directional read, not a detected chart pattern)
+          share the exact same v3-or-v6-solo rule as a real strategy signal.
         </p>
 
         {groups && (
@@ -204,9 +209,9 @@ export default function RecommendationsPage() {
                         .map((s) => (
                           <tr key={s.id}>
                             <td className="w-16">
-                              <Badge text={s.strategyVersion} tone={s.strategyVersion === "v3" || s.strategyVersion === "v4" || s.strategyVersion === "v5" ? "good" : "neutral"} />
+                              <Badge text={s.strategyVersion} tone={["v3", "v4", "v5", "v6", "v7"].includes(s.strategyVersion) ? "good" : "neutral"} />
                             </td>
-                            <td className="w-16">{(s.probability * 100).toFixed(0)}%</td>
+                            <td className="w-16">{(s.probability * 100).toFixed(1)}%</td>
                             <td className="w-40">
                               {s.decision !== "taken" ? (
                                 <Badge text="skipped" tone="neutral" />
@@ -253,12 +258,12 @@ export default function RecommendationsPage() {
                   <td className="font-medium text-white">{s.symbol}</td>
                   <td className="text-gray-400">{s.strategyId}</td>
                   <td>
-                    <Badge text={s.strategyVersion} tone={s.strategyVersion === "v3" || s.strategyVersion === "v4" || s.strategyVersion === "v5" ? "good" : "neutral"} />
+                    <Badge text={s.strategyVersion} tone={["v3", "v4", "v5", "v6", "v7"].includes(s.strategyVersion) ? "good" : "neutral"} />
                   </td>
                   <td>
                     <Badge text={s.side} tone={s.side === "long" ? "good" : "bad"} />
                   </td>
-                  <td>{(s.probability * 100).toFixed(0)}%</td>
+                  <td>{(s.probability * 100).toFixed(1)}%</td>
                   <td>
                     {s.decision !== "taken" ? (
                       <Badge text="skipped" tone="neutral" />

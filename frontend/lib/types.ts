@@ -10,7 +10,7 @@ export interface SystemState {
   brokerKind: string;
   liveBrokerConnected: boolean;
   minScoreThreshold: number;
-  activeStrategyVersion: "v1" | "v2" | "v3" | "v4" | "v5" | "v6";
+  activeStrategyVersion: "v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7";
   executionDecisionEngineEnabled: boolean;
   /** Shared across every strategy/scoring version -- see risk/stops.ts's computeInitialStop. */
   takeProfitRMultiple: number;
@@ -62,7 +62,7 @@ export interface RecommendationScore {
   decision: string;
   explanation: string;
   tradeId: number | null;
-  strategyVersion: "v1" | "v2" | "v3" | "v4" | "v5" | "v6";
+  strategyVersion: "v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7";
   entryPrice: number;
   stopPrice: number;
   takeProfitPrice: number;
@@ -89,7 +89,7 @@ export interface ActionableRecommendation {
   probability: number;
   explanation: string;
   actionability: "fresh" | "stale";
-  strategyVersion: "v1" | "v2" | "v3" | "v4" | "v5" | "v6";
+  strategyVersion: "v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7";
   entryPrice: number;
   stopPrice: number;
   takeProfitPrice: number;
@@ -188,7 +188,7 @@ export interface SessionPerformance {
   byPriceAction: Record<string, SessionLabelBreakdown>;
 }
 
-export type StrategyComparison = Record<"v1" | "v2" | "v3" | "v4" | "v5" | "v6", Record<string, SessionPerformance>>;
+export type StrategyComparison = Record<"v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7", Record<string, SessionPerformance>>;
 
 export interface DivergenceBucket {
   n: number;

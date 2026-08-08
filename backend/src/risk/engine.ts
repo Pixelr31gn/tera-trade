@@ -3,8 +3,12 @@
  *
  * Order of checks (fail fast, cheapest/most-important first):
  * 1. Circuit breakers (daily loss, trailing drawdown, consecutive losses, daily trade cap)
- * 2. Support/resistance proximity -- entries are only taken close to a real
- *    swing-pivot level, never mid-air (see analytics/supportResistance.ts)
+ * 2. Support/resistance validation -- a real, previously-touched level must
+ *    exist nearby at all (see analytics/supportResistance.ts). The
+ *    distance-from-that-level band (MAX/MIN_ENTRY_DISTANCE_ATR) is a
+ *    separate sub-check and can be temporarily suspended via
+ *    srProximityGateSuspended (2026-08-06, see that param's own comment) --
+ *    the level-existence/touch-count requirement itself never is.
  * 3. Stop-loss plan (structure vs ATR) -- no valid stop, no trade
  * 4. Position sizing from the stop distance -- if it sizes to zero contracts, no trade
  *
@@ -100,8 +104,21 @@ export class RiskEngine {
     /** Strategy-provided explicit stop/target -- see strategy/types.ts's Signal.explicitStopPrice/explicitTakeProfitPrice and risk/tradePlan.ts's computeTradePlan for how this overrides the generic stop/target. */
     explicitStopPrice?: Decimal;
     explicitTakeProfitPrice?: Decimal;
+    /**
+     * 2026-08-06 (operator request, 24h-boxed): skips both the
+     * MAX_ENTRY_DISTANCE_ATR ceiling and MIN_ENTRY_DISTANCE_ATR floor checks
+     * below -- the S/R *validation* requirement (a real 2+-touch level must
+     * still exist nearby at all, see MIN_LEVEL_TOUCHES above) is unchanged,
+     * only the distance-from-it band is suspended. This module stays pure
+     * (no Date/Date.now() in risk/, see CLAUDE.md) -- the expiry check
+     * itself lives in the caller (engine/loop.ts's
+     * isSrProximityGateSuspended), which passes the already-computed
+     * boolean in here. Defaults to false so every existing call site
+     * (including replay) is unaffected unless it explicitly opts in.
+     */
+    srProximityGateSuspended?: boolean;
   }): RiskAssessment {
-    const { side, entryPrice, atrValue, structureSwingPrice, signalKind, breakoutLevelPrice, accountState, limits, pointValue, tickSize, bars, averageProbability, takeProfitRMultiple, confidenceTiers, explicitStopPrice, explicitTakeProfitPrice } = params;
+    const { side, entryPrice, atrValue, structureSwingPrice, signalKind, breakoutLevelPrice, accountState, limits, pointValue, tickSize, bars, averageProbability, takeProfitRMultiple, confidenceTiers, explicitStopPrice, explicitTakeProfitPrice, srProximityGateSuspended = false } = params;
 
     const breaker = checkCircuitBreakers(accountState, limits);
     if (!breaker.allowed) {
@@ -142,19 +159,24 @@ export class RiskEngine {
     // Reversal-only: see MAX_ENTRY_DISTANCE_ATR's 2026-08-01 comment. A
     // breakout running far past the level it broke is the strategy working,
     // not a reason to reject it -- only a reversal signal stales out this way.
-    if (signalKind === "reversal" && nearest.distanceInAtr > MAX_ENTRY_DISTANCE_ATR) {
-      return {
-        approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
-        reason: `entry is ${nearest.distanceInAtr.toFixed(2)}x ATR from the nearest ${nearest.level.type} level (${nearest.level.price.toFixed(2)}, ${nearest.level.touches} touches) -- needs to be within ${MAX_ENTRY_DISTANCE_ATR}x ATR`,
-        tripKillSwitch: false, nearestSrLevel: nearest.level,
-      };
-    }
-    if (nearest.distanceInAtr < MIN_ENTRY_DISTANCE_ATR) {
-      return {
-        approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
-        reason: `entry is only ${nearest.distanceInAtr.toFixed(2)}x ATR from the nearest ${nearest.level.type} level (${nearest.level.price.toFixed(2)}, ${nearest.level.touches} touches) -- too close, needs to be at least ${MIN_ENTRY_DISTANCE_ATR}x ATR away`,
-        tripKillSwitch: false, nearestSrLevel: nearest.level,
-      };
+    // Both this and the floor below are skippable via srProximityGateSuspended
+    // (2026-08-06, see that param's comment) -- the level-existence/touch-count
+    // checks above still ran and still apply either way.
+    if (!srProximityGateSuspended) {
+      if (signalKind === "reversal" && nearest.distanceInAtr > MAX_ENTRY_DISTANCE_ATR) {
+        return {
+          approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
+          reason: `entry is ${nearest.distanceInAtr.toFixed(2)}x ATR from the nearest ${nearest.level.type} level (${nearest.level.price.toFixed(2)}, ${nearest.level.touches} touches) -- needs to be within ${MAX_ENTRY_DISTANCE_ATR}x ATR`,
+          tripKillSwitch: false, nearestSrLevel: nearest.level,
+        };
+      }
+      if (nearest.distanceInAtr < MIN_ENTRY_DISTANCE_ATR) {
+        return {
+          approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
+          reason: `entry is only ${nearest.distanceInAtr.toFixed(2)}x ATR from the nearest ${nearest.level.type} level (${nearest.level.price.toFixed(2)}, ${nearest.level.touches} touches) -- too close, needs to be at least ${MIN_ENTRY_DISTANCE_ATR}x ATR away`,
+          tripKillSwitch: false, nearestSrLevel: nearest.level,
+        };
+      }
     }
 
     // Fixed-dollar risk overrides percentage-of-equity when configured, so

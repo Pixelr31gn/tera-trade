@@ -41,7 +41,7 @@ import { ppmDirectionSignal } from "../analytics/ppm.js";
 // check as a confirmation bonus (see ruleScorerV6.ts). Also shadow-scored
 // only for now -- same promotion bar as v5, not skipped just because it's
 // newer.
-export type StrategyVersion = "v1" | "v2" | "v3" | "v4" | "v5" | "v6";
+export type StrategyVersion = "v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7";
 
 // Weights are hand-set, documented priors -- not fit to data. Magnitudes
 // reflect how strongly each factor should move the pre-threshold
