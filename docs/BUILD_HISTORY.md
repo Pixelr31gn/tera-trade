@@ -425,6 +425,14 @@ been hiding:
   values and missed a password inside a longer string. Rules removed, history for `master` rebuilt
   without it (no force-push), and the password must be treated as compromised and rotated. Scans
   should now also search the password portion of every URL-shaped secret.
+- **Dead files removed** (operator request: "delete what is not needed"), each checked for
+  references first and all recoverable from git history: `infra/docker-compose.yml`,
+  `backend/Dockerfile` and `frontend/Dockerfile` (added in the 2026-07-04 scaffold, never touched
+  since, referenced by nothing; they described the Neon-era layout and baked `NEXT_PUBLIC_API_KEY`
+  into the browser bundle -- the pattern the dashboard login replaced), and `docs/ROLLOUT_PLAN.md`
+  (last edited 2026-07-05, still called analysis-only "the current state"). The root
+  `docker-compose.yml` (local Postgres) is the only compose file now. The operator's own research
+  and ops scripts in `backend/scripts/` were deliberately left alone.
 
 Verified on a clean clone with no `.env`, no DB and no `license.ts`: `npm ci`, `tsc`, `npm run
 build`, `vitest` (DB-backed tests skip themselves), frontend `next build`, and every migration
