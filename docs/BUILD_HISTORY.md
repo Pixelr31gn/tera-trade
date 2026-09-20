@@ -393,6 +393,43 @@ SEA's `require()` restriction at all). `scripts/build-exe.ps1` orchestrates the 
 falling back to their original behavior unchanged outside packaging. Postgres and Chrome remain
 external in both cases, same as every other Tera Trade distribution.
 
+### Public-repo readiness: clean-clone install and updates (2026-09-20)
+
+Operator goal: anyone can `git clone` the (public) repo, set Tera Trade up locally, and later pull
+updates. Checked the only honest way -- cloning the pushed branch into an empty directory and
+building it -- which found real blockers that a working tree full of gitignored local files had
+been hiding:
+
+- **The backend could not compile or start on a clone.** `src/index.ts` imported the deliberately
+  gitignored `core/license.ts` (it holds the license-signing secret). **License gate removed**
+  (operator decision): `checkLicense()` and the import are gone from `index.ts`, and the dead
+  `license:generate` npm script was dropped. `LICENSE_KEY`/`LICENSED_TO`/`LICENSE_SIGNING_SECRET`
+  remain in `core/config.ts`, now unused; `exe-setup.cjs` still writes them harmlessly. **Open
+  item:** `LICENSE.md` is still written around a required License Key ("required for the Software
+  to run", no circumventing key verification) and now contradicts the code -- the owner needs to
+  choose license terms that match a public, keyless repo; it was left untouched on purpose.
+- **`npm run build` failed on a clone** because it copies `src/scoring/artifacts/`, a folder whose
+  only contents are gitignored model JSONs. Added a tracked `.gitkeep`.
+- **`backend/.env.example` had become live-by-default** (`TRADING_MODE=live`, `BROKER_KIND=
+  browser_control`, `LIVE_TRADING_CONFIRMED=true`, `DRY_RUN_ORDERS=false`) for the 2026-08-13 .exe
+  request, so a stranger copying it to `.env` would trade a real account. Reverted the source
+  template to paper/simulated/false/true; `scripts/build-exe.ps1` now applies the four live values
+  to the .exe deliverable's own copy, so the .exe is unchanged.
+- **README/setup were stale** (Neon hosted Postgres, v1/v2/v3, a required license key, a shared
+  frontend API key). Rewritten; `scripts/setup.ps1` gained the dashboard-password step; new
+  `scripts/update.ps1` (fast-forward pull, npm install, prisma generate, migrate deploy) refuses
+  to run while the app is up, since Windows locks Prisma's engine file.
+- **A secret was pushed and caught after the fact.** `.claude/settings.json` embedded the local
+  Postgres password in two permission-allowlist entries (`TEST_DATABASE_URL=...`) and went public
+  with the 2026-09-20 checkpoint commit; the first secret scan compared whole connection-string
+  values and missed a password inside a longer string. Rules removed, history for `master` rebuilt
+  without it (no force-push), and the password must be treated as compromised and rotated. Scans
+  should now also search the password portion of every URL-shaped secret.
+
+Verified on a clean clone with no `.env`, no DB and no `license.ts`: `npm ci`, `tsc`, `npm run
+build`, `vitest` (DB-backed tests skip themselves), frontend `next build`, and every migration
+applied to an empty Postgres with no schema drift.
+
 ## Current architecture
 
 ### Module map (`backend/src/`)

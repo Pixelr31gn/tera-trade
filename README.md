@@ -7,7 +7,8 @@ stops, market-regime detection, and a plain-English explanation behind every dec
 your account and prices directly off TopstepX's own web platform in a dedicated, auto-managed
 Chrome tab -- no broker API key required.
 
-See [LICENSE.md](LICENSE.md) for the terms of use. No license key is needed to run it.
+Use of this software is governed by [LICENSE.md](LICENSE.md). (The app itself no longer asks for
+a license key at startup.)
 
 **This software can place real orders against a real funded account.** It ships in `paper`
 mode (a simulated account, no real orders) and stays there until *you* change several settings
