@@ -26,7 +26,7 @@ This does everything except the two things only you can provide:
 
 - Creates `app\.env` from the template.
 - Generates a real API key and database password automatically.
-- Applies a license key that's already built into this package -- nothing to enter.
+- Writes the license lines into `app\.env` for you (no longer checked by the app -- nothing to enter).
 - Starts Postgres in Docker and waits for it to report healthy.
 - Applies the database schema.
 - If this package includes a database snapshot (`app\db-seed.dump`), restores it automatically
@@ -84,8 +84,10 @@ real once you trust what you're seeing.
   Start it, then re-run `tera-trade-setup.exe` -- it's safe to run more than once.
 - **"Postgres didn't report healthy in time"**: check `docker compose logs` from inside the
   extracted folder, or just re-run `tera-trade-setup.exe` again.
-- **The backend window opens and immediately closes**: your license key is likely missing,
-  invalid, or expired -- check the `LICENSE_KEY`/`LICENSED_TO` lines in `app\.env`.
+- **The backend window opens and immediately closes**: read the last lines it printed before
+  closing -- most often the database isn't reachable (is Docker Desktop running?) or a value
+  in `app\.env` is malformed. (A missing or invalid license key can no longer cause this;
+  the license check was removed 2026-09-20.)
 - **Dashboard loads but shows no account data**: make sure the TopstepX Chrome window from
   "Log into TopstepX" above is still open and you're actually logged in there.
 

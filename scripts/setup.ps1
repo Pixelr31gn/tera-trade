@@ -79,9 +79,6 @@ if ([string]::IsNullOrWhiteSpace($currentApiKey) -or $currentApiKey -eq "change-
     $newApiKey = ($randomBytes | ForEach-Object { $_.ToString("x2") }) -join ""
     Set-EnvValue ".env" "API_KEY" $newApiKey
     Write-Host "Generated a real API_KEY (was the shared placeholder)." -ForegroundColor Green
-    $apiKeyToShareWithFrontend = $newApiKey
-} else {
-    $apiKeyToShareWithFrontend = $currentApiKey
 }
 
 # --- Database: your own local Postgres in Docker, no hosted account needed ---
@@ -139,17 +136,36 @@ if ($LASTEXITCODE -ne 0) { Write-Host "frontend npm install failed" -ForegroundC
 
 if (-not (Test-Path ".env.local")) {
     Copy-Item ".env.example" ".env.local"
+    Write-Host "Created frontend\.env.local from the template."
 }
-Set-EnvValue ".env.local" "NEXT_PUBLIC_API_KEY" $apiKeyToShareWithFrontend
-Write-Host "frontend\.env.local's NEXT_PUBLIC_API_KEY set to match backend\.env's API_KEY automatically."
+# No NEXT_PUBLIC_API_KEY step any more: the dashboard signs in with a password
+# and an httpOnly session cookie (see frontend/lib/api.ts), and a key baked
+# into the browser bundle would be readable by anyone. This script used to copy
+# backend\.env's API_KEY into .env.local here; nothing reads it any more.
+Pop-Location
+
+# --- Dashboard login password ---------------------------------------------
+# Login is refused (fails closed) until AUTH_PASSWORD_HASH is set, so without
+# this the dashboard loads but nobody can ever sign in. `auth:set-password`
+# prompts for the password with masked input and writes only its hash (plus a
+# session secret) into backend\.env. Interactive, so it needs a real console.
+Push-Location "$root\backend"
+if ([string]::IsNullOrWhiteSpace((Get-EnvValue ".env" "AUTH_PASSWORD_HASH"))) {
+    Write-Host "`n--- Dashboard password ---" -ForegroundColor Cyan
+    Write-Host "Choose the password you'll use to sign in to the dashboard (min 8 characters)."
+    npm run auth:set-password
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "No dashboard password was set. Run 'npm run auth:set-password' in backend\ before you try to sign in." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "`nDashboard password already set in backend\.env, leaving it as-is."
+}
 Pop-Location
 
 Write-Host "`n=== Next steps ===" -ForegroundColor Cyan
-$needsLicense = [string]::IsNullOrWhiteSpace((Get-EnvValue "$root\backend\.env" "LICENSE_KEY"))
-if ($needsLicense) {
-    Write-Host "1. You still need a license key -- see LICENSE.md, or ask whoever gave you this package for one." -ForegroundColor Yellow
-    Write-Host "2. Run scripts\start.ps1 to launch the app."
-} else {
-    Write-Host "1. Run scripts\start.ps1 to launch the app."
-}
-Write-Host "See README.md for the full walkthrough."
+# The license-key step that used to be listed here was removed 2026-09-20 --
+# the app no longer checks for a key (see the note at the top of backend/src/index.ts).
+Write-Host "1. Run scripts\start.ps1 to launch the app."
+Write-Host "2. In the Chrome window that opens, log into TopstepX (once -- it's remembered)."
+Write-Host "3. Open http://localhost:3000 and sign in with the dashboard password you just set."
+Write-Host "Tera Trade starts in PAPER mode (a simulated account, no real orders). See README.md, 'Trading modes'."

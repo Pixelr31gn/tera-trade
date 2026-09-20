@@ -12,7 +12,6 @@ import { getBroker, TRADESEA_AUTHENTICATED_PAGE_MARKER } from "./brokers/index.j
 import { SimulatedBroker } from "./brokers/simulatedBroker.js";
 import type { BrokerClient } from "./brokers/types.js";
 import { AccountSource, BrokerKind, getSettings, PriceSource } from "./core/config.js";
-import { DEFAULT_LICENSE_SIGNING_SECRET, verifyLicenseKey } from "./core/license.js";
 import { logger } from "./core/logger.js";
 import { prisma } from "./db/client.js";
 import { setLiveBrokerConnected, setTradeseaLiveBrokerConnected } from "./execution/mode.js";
@@ -48,37 +47,21 @@ process.on("unhandledRejection", (reason) => {
   logger.error({ err: String(reason) }, "unhandled_rejection_survived");
 });
 
-// The very first thing the app does, before touching the database or
-// anything else -- see core/license.ts for what this mechanism actually
-// provides (and its honest limits) and ../../LICENSE.md for the agreement
-// itself. Refuses to start rather than running in some degraded mode:
-// a license gate that can be silently bypassed by just not having a key
-// isn't a gate at all.
-function checkLicense(): void {
-  const settings = getSettings();
-  // The env var, if set, overrides the constant baked into license.ts (see
-  // that file's comment) -- most installs, including every recipient's
-  // unmodified copy, just use the baked-in constant.
-  const secret = settings.licenseSigningSecret || DEFAULT_LICENSE_SIGNING_SECRET;
-
-  if (!settings.licenseKey || !settings.licensedTo) {
-    logger.error(
-      "license_missing -- set LICENSE_KEY and LICENSED_TO in backend/.env. See LICENSE.md, or run `npx tsx scripts/generateLicenseKey.ts` if you are the licensor."
-    );
-    process.exit(1);
-  }
-
-  const result = verifyLicenseKey(settings.licenseKey, settings.licensedTo, secret);
-  if (!result.valid) {
-    logger.error({ reason: result.reason }, "license_invalid");
-    process.exit(1);
-  }
-
-  logger.info({ licensedTo: result.payload.licensedTo, expiresAt: result.payload.expiresAt }, "license_valid");
-}
+// License gate REMOVED (2026-09-20, operator decision: the repo is public and
+// the goal is that anyone can clone it and set Tera Trade up locally). This
+// used to be the first thing main() did -- checkLicense() verified
+// LICENSE_KEY/LICENSED_TO against a signing secret baked into
+// core/license.ts and process.exit(1)'d on a missing or invalid key. That
+// file is deliberately gitignored (it holds the signing secret, and CLAUDE.md
+// forbids committing it), so a fresh clone couldn't even compile, let alone
+// start. LICENSE.md remains the legal terms; nothing is enforced in code any
+// more. core/license.ts, scripts/generateLicenseKey.ts and
+// tests/license.test.ts still exist on the operator's own machine
+// (gitignored) but nothing here imports them. The LICENSE_KEY / LICENSED_TO /
+// LICENSE_SIGNING_SECRET settings in core/config.ts are left in place and are
+// now simply unused.
 
 async function main(): Promise<void> {
-  checkLicense();
   const settings = getSettings();
 
   await ensureInstrumentsSeeded();

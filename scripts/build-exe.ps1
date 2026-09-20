@@ -98,6 +98,29 @@ Copy-Item $nodeExePath "$deliverableDir\node\node.exe" -ErrorAction Stop
 Copy-Item "$root\backend\prisma" "$deliverableDir\app\prisma" -Recurse -ErrorAction Stop
 Copy-Item "$root\docker-compose.yml" "$deliverableDir\docker-compose.yml" -ErrorAction Stop
 Copy-Item "$root\backend\.env.example" "$deliverableDir\.env.example" -ErrorAction Stop
+
+# The .exe deliverable ships live-by-default (2026-08-13, operator request:
+# "packaged with live trade mode = true or enabled"), but backend\.env.example
+# itself went back to paper/simulated/false/dry-run-true on 2026-09-20 so a
+# from-source clone of the public repo can't start trading a real account by
+# accident. Apply the live values to THIS COPY only, so the source template
+# stays the single source of truth for every other key and this deliverable
+# behaves exactly as it did before that change.
+$exeEnvLines = Get-Content "$deliverableDir\.env.example"
+$exeLiveDefaults = [ordered]@{
+    "TRADING_MODE"           = "live"
+    "BROKER_KIND"            = "browser_control"
+    "LIVE_TRADING_CONFIRMED" = "true"
+    "DRY_RUN_ORDERS"         = "false"
+}
+foreach ($key in $exeLiveDefaults.Keys) {
+    $matched = $false
+    $exeEnvLines = $exeEnvLines | ForEach-Object {
+        if ($_ -match "^$key=") { $matched = $true; "$key=$($exeLiveDefaults[$key])" } else { $_ }
+    }
+    if (-not $matched) { throw "build-exe.ps1: $key= not found in backend\.env.example -- the live-defaults patch for the .exe deliverable no longer matches the template; update `$exeLiveDefaults." }
+}
+Set-Content -Path "$deliverableDir\.env.example" -Value $exeEnvLines
 Copy-Item "$root\docs\EXE_README.md" "$deliverableDir\README.md" -ErrorAction Stop
 Pop-Location
 
