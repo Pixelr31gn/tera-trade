@@ -50,15 +50,6 @@ export function explainRiskRejection(symbol: string, side: string, assessment: R
   return `${side.toUpperCase()} ${symbol}: risk engine blocked this trade -- ${assessment.reason}`;
 }
 
-export function explainTradeEntry(symbol: string, side: string, quantity: number, entryPrice: Decimal, assessment: RiskAssessment, scoreExplanation: string): string {
-  return (
-    `${scoreExplanation} Entered ${side} ${quantity} ${symbol} @ ${entryPrice}. ` +
-    `Stop ${assessment.stopPrice} (${assessment.stopDistancePoints} pts), ` +
-    `target ${assessment.takeProfitPrice}, trailing after breakeven by ${assessment.trailTicks} ticks. ` +
-    `${assessment.reason}`
-  );
-}
-
 export function explainTradeExit(symbol: string, side: string, exitReason: string, exitPrice: Decimal, pnl: Decimal): string {
   const outcome = pnl.gte(0) ? "a gain" : "a loss";
   const reasonText: Record<string, string> =

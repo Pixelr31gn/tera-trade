@@ -91,6 +91,25 @@ export function findNearestRelevantLevel(levels: SrLevel[], side: "long" | "shor
 }
 
 /**
+ * Where price is actually likely headed, in the trade's favor -- the
+ * opposite lookup from findNearestRelevantLevel above (which finds the
+ * level an entry should be near, i.e. a floor to buy from / ceiling to sell
+ * into). A long's target is the nearest RESISTANCE above current price; a
+ * short's is the nearest SUPPORT below it. Same 2+ touch requirement as
+ * everywhere else in this file -- a level formed from one untested pivot
+ * isn't a real target either, just a swing point. Returns null when no such
+ * level exists (e.g. price has already run past every prior pivot in a
+ * strong trend) -- callers should fall back to a generic target, not block
+ * the trade on this alone.
+ */
+export function findNearestTargetLevel(levels: SrLevel[], side: "long" | "short", currentPrice: number): SrLevel | null {
+  const wantType = side === "long" ? "resistance" : "support";
+  const relevant = levels.filter((l) => l.type === wantType && l.touches >= MIN_LEVEL_TOUCHES);
+  if (relevant.length === 0) return null;
+  return relevant.reduce((closest, l) => (Math.abs(l.price - currentPrice) < Math.abs(closest.price - currentPrice) ? l : closest));
+}
+
+/**
  * For a breakout signal: finds the detected level cluster nearest to the
  * *specific* price the strategy says it broke through (not the nearest
  * level to current price, which -- as the breakout runs further from the

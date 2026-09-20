@@ -4,17 +4,19 @@ import { BrokerKind, getSettings } from "../core/config.js";
 import type { Account } from "@prisma/client";
 import type { OhlcBar } from "../regime/indicators.js";
 
-// Paper (simulated broker) and real (browser_control/projectx) trading must
-// never share an account row -- otherwise a paper trade's P&L lands on the
-// same equity curve and "open positions" list as a real Topstep position,
-// and simulated fills could look like they're happening on the real account.
-// Keying the account by brokerKind keeps them fully separate: paper starts
-// fresh at $0 and only ever contains trades the simulated broker actually
-// filled, real keeps its own $50k-funded-account equity curve untouched.
-export async function ensureDefaultAccount(): Promise<Account> {
+// Paper (simulated broker) and real (browser_control/projectx/tradesea)
+// trading must never share an account row -- otherwise a paper trade's P&L
+// lands on the same equity curve and "open positions" list as a real
+// position, and simulated fills could look like they're happening on a real
+// account. Keying the account by brokerKind keeps them fully separate: paper
+// starts fresh at $0 and only ever contains trades the simulated broker
+// actually filled; each real broker kind keeps its own funded-account equity
+// curve untouched by the others.
+export async function ensureAccountForBrokerKind(brokerKind: BrokerKind): Promise<Account> {
   const settings = getSettings();
-  const isPaper = settings.brokerKind === BrokerKind.SIMULATED;
-  const name = isPaper ? "paper" : "default";
+  const isPaper = brokerKind === BrokerKind.SIMULATED;
+  const isTradesea = brokerKind === BrokerKind.TRADESEA_BROWSER_CONTROL;
+  const name = isPaper ? "paper" : isTradesea ? "tradesea" : "default";
 
   const existing = await prisma.account.findFirst({ where: { name } });
   if (existing) return existing;
@@ -23,15 +25,27 @@ export async function ensureDefaultAccount(): Promise<Account> {
     data: { name, startingBalance: isPaper ? "0" : "50000", isActive: true },
   });
 
+  // Tradesea's risk limits mirror TopstepX's DEFAULT_* values unless a
+  // dedicated TRADESEA_DEFAULT_* override is set (operator's explicit
+  // choice: same risk posture on both venues even though the underlying
+  // account balances differ -- see docs/BUILD_HISTORY.md's Tradesea entry).
+  const perTradeRiskPct = (isTradesea ? settings.tradeseaDefaultPerTradeRiskPct : undefined) ?? settings.defaultPerTradeRiskPct;
+  const maxDailyLossPct = (isTradesea ? settings.tradeseaDefaultMaxDailyLossPct : undefined) ?? settings.defaultMaxDailyLossPct;
+  const maxTrailingDrawdownPct =
+    (isTradesea ? settings.tradeseaDefaultMaxTrailingDrawdownPct : undefined) ?? settings.defaultMaxTrailingDrawdownPct;
+  const maxPositionSize = (isTradesea ? settings.tradeseaDefaultMaxPositionSize : undefined) ?? settings.defaultMaxPositionSize;
+  const maxConsecutiveLosses = (isTradesea ? settings.tradeseaMaxConsecutiveLosses : undefined) ?? settings.maxConsecutiveLosses;
+  const maxDailyTrades = (isTradesea ? settings.tradeseaMaxDailyTrades : undefined) ?? settings.maxDailyTrades;
+
   await prisma.riskLimit.create({
     data: {
       accountId: account.id,
-      perTradeRiskPct: settings.defaultPerTradeRiskPct.toString(),
-      maxDailyLossPct: settings.defaultMaxDailyLossPct.toString(),
-      maxTrailingDrawdownPct: settings.defaultMaxTrailingDrawdownPct.toString(),
-      maxPositionSize: settings.defaultMaxPositionSize,
-      maxConsecutiveLosses: settings.maxConsecutiveLosses,
-      maxDailyTrades: settings.maxDailyTrades,
+      perTradeRiskPct: perTradeRiskPct.toString(),
+      maxDailyLossPct: maxDailyLossPct.toString(),
+      maxTrailingDrawdownPct: maxTrailingDrawdownPct.toString(),
+      maxPositionSize,
+      maxConsecutiveLosses,
+      maxDailyTrades,
       perTradeRiskDollars: settings.defaultPerTradeRiskDollars?.toString(),
       perTradeProfitDollars: settings.defaultPerTradeProfitDollars?.toString(),
       maxDailyLossDollars: settings.defaultMaxDailyLossDollars?.toString(),
@@ -39,6 +53,10 @@ export async function ensureDefaultAccount(): Promise<Account> {
   });
 
   return account;
+}
+
+export async function ensureDefaultAccount(): Promise<Account> {
+  return ensureAccountForBrokerKind(getSettings().brokerKind);
 }
 
 // TopstepX's funded-account starting balance depends on account *type*, not

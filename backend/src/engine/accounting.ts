@@ -25,23 +25,40 @@ export async function computeOpenUnrealizedPnl(accountId: number, lastPrices: Ma
   return total;
 }
 
-export async function computeAccountEquity(account: Account, lastPrices: Map<string, Decimal>): Promise<Decimal> {
+export async function computeAccountEquity(
+  account: Account,
+  lastPrices: Map<string, Decimal>,
+  brokerKindOverride?: BrokerKind
+): Promise<Decimal> {
   const settings = getSettings();
-  // The scraped balance is the REAL Topstep account's equity -- only
-  // meaningful while actually trading LIVE. Previously gated on
-  // `account.name !== "paper"`, which assumed a separate account row per
-  // mode that never actually existed in this schema (there is exactly one
-  // account, always named "default", shared by both paper and live trades
-  // -- see Trade.brokerKind for how a given trade's own broker is tracked
-  // instead). That condition was therefore always true, so switching to
-  // PAPER mode never stopped showing the real live balance (2026-07-15
-  // operator report). Now keyed off the actual current system mode: paper
-  // and analysis-only both compute their own equity purely from this
-  // account's own trade history below, exactly like a fresh paper account
-  // simulating from its starting balance should.
-  const systemState = await getSystemState();
-  if (settings.accountSource === AccountSource.BROWSER && systemState.mode === TradingMode.LIVE) {
-    const snapshot = getLatestBrowserAccountSnapshot();
+  // The scraped balance is the REAL account's equity -- only meaningful
+  // while actually trading LIVE. Previously gated on `account.name !==
+  // "paper"`, which assumed a separate account row per mode that never
+  // actually existed in this schema (there is exactly one non-paper account,
+  // always named "default", shared by both paper and live trades -- see
+  // Trade.brokerKind for how a given trade's own broker is tracked instead).
+  // That condition was therefore always true, so switching to PAPER mode
+  // never stopped showing the real live balance (2026-07-15 operator
+  // report). Now keyed off the actual current system mode: paper and
+  // analysis-only both compute their own equity purely from this account's
+  // own trade history below, exactly like a fresh paper account simulating
+  // from its starting balance should.
+  //
+  // brokerKindOverride (added for the Tradesea second-broker integration)
+  // lets a caller explicitly say "compute equity for THIS broker kind,"
+  // bypassing the single global settings.brokerKind/systemState.mode this
+  // function otherwise infers from. It is the caller's assertion that this
+  // broker is genuinely live right now (loop.ts only passes it once
+  // Tradesea's own independent live-enable gate has already cleared) -- this
+  // function doesn't re-check that itself, same as it never re-derives
+  // liveTradingConfirmed for the primary path either. Omitted, behavior is
+  // byte-identical to before this parameter existed.
+  const brokerKind = brokerKindOverride ?? ((await currentBrokerKind()) as BrokerKind);
+  const readsBrowserSnapshot = brokerKindOverride
+    ? brokerKind !== BrokerKind.SIMULATED
+    : settings.accountSource === AccountSource.BROWSER && brokerKind !== BrokerKind.SIMULATED;
+  if (readsBrowserSnapshot) {
+    const snapshot = getLatestBrowserAccountSnapshot(brokerKind);
     const scraped = snapshot?.equity ?? snapshot?.balance;
     if (scraped !== null && scraped !== undefined) return new Decimal(scraped);
     // No snapshot read yet (watcher hasn't polled, or the page didn't match any label) --
@@ -61,12 +78,18 @@ export async function computeAccountEquity(account: Account, lastPrices: Map<str
   // TTL-cached stats in engine/*Cache.ts, realized P&L feeds real risk/
   // drawdown checks and has zero acceptable staleness, so a cache isn't the
   // right fix here -- an exact DB-side aggregate is.
+  //
+  // scopedBrokerKind stays hardcoded to SIMULATED for the no-override path
+  // (byte-identical to before), but uses the resolved brokerKind for an
+  // override (e.g. Tradesea with no snapshot read yet) so its fallback
+  // reflects that venue's own trade history instead of always reading zero.
+  const scopedBrokerKind = brokerKindOverride ? brokerKind : BrokerKind.SIMULATED;
   const realizedAgg = await prisma.trade.aggregate({
-    where: { accountId: account.id, status: "closed", brokerKind: BrokerKind.SIMULATED },
+    where: { accountId: account.id, status: "closed", brokerKind: scopedBrokerKind },
     _sum: { pnl: true },
   });
   const realized = new Decimal(realizedAgg._sum.pnl?.toString() ?? "0");
-  const unrealized = await computeOpenUnrealizedPnl(account.id, lastPrices, BrokerKind.SIMULATED);
+  const unrealized = await computeOpenUnrealizedPnl(account.id, lastPrices, scopedBrokerKind);
   return new Decimal(account.startingBalance.toString()).plus(realized).plus(unrealized);
 }
 
@@ -94,10 +117,36 @@ export async function currentBrokerKind(): Promise<string> {
   return systemState.mode === TradingMode.LIVE ? settings.brokerKind : BrokerKind.SIMULATED;
 }
 
-export async function computeAccountRiskState(account: Account, currentEquity: Decimal): Promise<AccountRiskState> {
+/**
+ * Which brokerKind a GIVEN account's trade/equity rows are actually scoped
+ * under -- currentBrokerKind() alone is only correct for the primary
+ * ("default"/"paper") accounts, whose brokerKind genuinely varies with the
+ * current global mode (see onPriceTick's own equity recording, which calls
+ * brokerKindForMode(mode) -- the same account id can carry both
+ * "browser_control" rows from a past LIVE stretch and "simulated" rows from
+ * a past PAPER stretch). Tradesea's account is different: every row it
+ * writes uses the fixed BrokerKind.TRADESEA_BROWSER_CONTROL constant,
+ * completely independent of TopstepX's mode (see
+ * TradingEngine.recordTradeseaEquitySnapshot) -- filtering it by the global
+ * currentBrokerKind() would silently return nothing. Added for the
+ * multi-account API widening (2026-08-28) -- every other account continues
+ * to resolve via currentBrokerKind(), unchanged.
+ */
+export async function brokerKindForAccount(account: Account): Promise<string> {
+  if (account.name === "tradesea") return BrokerKind.TRADESEA_BROWSER_CONTROL;
+  return currentBrokerKind();
+}
+
+export async function computeAccountRiskState(
+  account: Account,
+  currentEquity: Decimal,
+  brokerKindOverride?: BrokerKind
+): Promise<AccountRiskState> {
   const now = new Date();
   const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const brokerKind = await currentBrokerKind();
+  // See computeAccountEquity's own comment on brokerKindOverride -- same
+  // meaning here: omitted, byte-identical to before this parameter existed.
+  const brokerKind = brokerKindOverride ?? (await currentBrokerKind());
 
   const peakRow = await prisma.equityCurvePoint.aggregate({ where: { accountId: account.id, brokerKind }, _max: { equity: true } });
   let peakEquity = peakRow._max.equity ? new Decimal(peakRow._max.equity.toString()) : currentEquity;

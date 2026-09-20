@@ -22,6 +22,10 @@ import type { StrategyVersion } from "../scoring/ruleScorer.js";
 import type { GatedScore } from "../scoring/gate.js";
 import type { SetupFeatures } from "../scoring/features.js";
 import type { determineConsensus } from "../engine/loop.js";
+import type { BanditSelectionResult } from "../scoring/consensusBandit.js";
+import type { SessionPerformanceSelection } from "../scoring/sessionPerformance.js";
+import type { DealerLevelResult } from "../marketData/dealerGex.js";
+import type { DailyPlanZone } from "../risk/engine.js";
 
 /** `ConsensusDecision` itself isn't exported by loop.ts — pull its shape off the exported function rather than redeclaring it, so a field rename there breaks the build here instead of silently drifting. */
 type ConsensusDecision = ReturnType<typeof determineConsensus>;
@@ -99,6 +103,124 @@ export interface DecisionContext {
   hasOpenPosition(symbol: string, at: Date): Promise<boolean>;
 
   /**
+   * Is `symbol`'s correlated partner (ES<->NQ, see
+   * marketData/instruments.ts's getConflictingPartnerSymbol) currently
+   * holding an open position on the OPPOSITE side of `side`? (2026-09-01,
+   * operator request: "ES and NQ should never enter into conflicting
+   * trades" -- see risk/engine.ts's hasConflictingCrossSymbolPosition param
+   * for where this actually blocks a trade.) Live:
+   * engine/crossSymbolConflictCheck.ts's hasConflictingCrossSymbolPosition.
+   * Replay: the harness's own in-memory openPositions map.
+   */
+  hasConflictingPosition(symbol: string, side: "long" | "short", at: Date): Promise<boolean>;
+
+  /**
+   * Contextual UCB1 bandit selection for the v1/v2/v3/v6/v7 leg of
+   * determineConsensus (scoring/consensusBandit.ts) -- `bucket` is
+   * analytics/contextBucket.ts's computeContextBucket(session, trendLabel,
+   * volLabel) for the bar being decided. Live: engine/consensusBanditCache.ts's
+   * getBanditVersionSelection (TTL-cached). Replay: computeBanditSelection
+   * called directly every time -- see replayDecisionContext.ts for why a
+   * wall-clock cache would be wrong here (same reasoning as fixedTargetEdge).
+   */
+  banditVersionSelection(bucket: string, at: Date): Promise<BanditSelectionResult>;
+
+  /**
+   * Rolling session-performance selection for the "session-best-version"
+   * consensus gate (2026-08-10, operator request): ranks
+   * scoring/sessionPerformance.ts's SESSION_PERFORMANCE_ARMS (the same
+   * v1/v2/v3/v6/v7 pool the bandit above uses) by realized win rate within
+   * the CURRENT trading session only (analytics/session.ts's
+   * getSessionStart) -- no context bucketing, no exploration bonus, just
+   * whichever version is winning right now. SUPERSEDES the bandit leg above
+   * as of this change (banditVersionSelection is kept, unused, for a
+   * one-line revert -- see engine/loop.ts's hasSessionBestVersionAgreement
+   * comment). Live: engine/sessionPerformanceCache.ts (TTL-cached, short
+   * TTL -- see its own header comment for why). Replay:
+   * computeSessionPerformanceSelection called directly every time, same
+   * look-ahead-safety reasoning as banditVersionSelection above.
+   */
+  sessionPerformanceSelection(at: Date): Promise<SessionPerformanceSelection>;
+
+  /**
+   * Dealer gamma exposure (GEX) levels for the current trading session
+   * (analytics/dealerGex.ts's pure math, marketData/dealerGex.ts's CBOE
+   * fetch/persist, engine/dealerGexCache.ts's session-scoped cache) -- feeds
+   * risk/engine.ts's new dealer-level proximity gate (2026-08-11, operator
+   * request). `recentBars` is passed through so the S/R-pivot confirmation
+   * cross-check can reuse the bar window decideOnBar already loaded rather
+   * than fetching its own. Null when unavailable -- CBOE fetch failed, this
+   * session's levels haven't been computed yet, or (ALWAYS true in replay)
+   * CBOE's historical options chain cannot be backfilled, same fidelity
+   * limit as orderFlow above. decideOnBar records a null result via
+   * degraded[] (same convention as orderFlow) -- the gate itself fails open
+   * on null rather than inventing a rejection, so this never silently
+   * changes what a historical replay would have done; it just means the
+   * gate's restrictive effect is 100% un-replayable going forward, exactly
+   * like order flow already is. Live: engine/dealerGexCache.ts. Replay:
+   * always returns null directly, no DB/cache involved.
+   */
+  dealerLevels(symbol: string, recentBars: OhlcBar[], at: Date): Promise<DealerLevelResult | null>;
+
+  /**
+   * This session's key price zones for this symbol, set by the AI
+   * assistant's daily-plan tool -- manually or via its own scheduler,
+   * assistant/dailyPlanScheduler.ts (2026-08-29, see risk/engine.ts's
+   * DailyPlanZone/classifyDailyPlanZone). Live: engine/dailyPlanZoneCache.ts,
+   * TTL-cached and scoped to `at`'s session (analytics/session.ts's
+   * getSessionStart). Replay: ALWAYS returns [] (empty), unconditionally --
+   * and deliberately does NOT report this via
+   * contextDegradations() the way orderFlow/dealerLevels do. Those two are
+   * real data live actually has that replay genuinely can't reconstruct (a
+   * fidelity GAP). This is different: an LLM-authored "today's plan" has no
+   * meaning for a historical replay date at all -- there is no true value
+   * replay is failing to recover, so reporting it as degraded would suggest
+   * a gap that isn't really there. Real, worth knowing anyway: if you
+   * replay a window covering the actual present while the assistant
+   * currently has zones set, live's gate would restrict trades that replay
+   * won't -- a genuine live/replay divergence, just not the "missing
+   * historical data" kind the rest of this file tracks.
+   */
+  dailyPlanZones(symbol: string, at: Date): Promise<DailyPlanZone[]>;
+
+  /**
+   * strategyIds currently taken out of live signal generation (see prisma's
+   * DisabledStrategy model, engine/strategyEnablementCache.ts,
+   * assistant/tools.ts's disable_strategy/enable_strategy tools) --
+   * 2026-08-30, operator request, in response to a live strategy-performance
+   * breakdown showing one strategy lagging heavily in a specific regime.
+   * Live: TTL-cached. Replay: ALWAYS returns an empty set -- same reasoning
+   * as dailyPlanZones above (a live operator/assistant toggle has no
+   * meaning for a historical replay date, so this is never "degraded,"
+   * just genuinely inapplicable).
+   */
+  disabledStrategyIds(): Promise<Set<string>>;
+
+  /**
+   * Symbols currently taken out of live signal generation entirely (see
+   * prisma's DisabledSymbol model, engine/symbolEnablementCache.ts) --
+   * 2026-09-03, operator request: "add a toggle so i can turn off which
+   * markets are executable." Coarser than disabledStrategyIds above -- this
+   * stops every strategy/path for the symbol, not just one. Live: TTL-cached.
+   * Replay: ALWAYS returns an empty set, same reasoning as
+   * disabledStrategyIds (a live operator toggle has no meaning for a
+   * historical replay date).
+   */
+  disabledSymbols(): Promise<Set<string>>;
+
+  /**
+   * (strategyId, symbol) pairs currently taken out of live signal generation for THAT symbol only
+   * (see prisma's DisabledStrategySymbol model, engine/strategySymbolEnablementCache.ts's
+   * strategySymbolKey for the composite-key encoding) -- 2026-09-04, operator request, in direct
+   * response to a per-symbol performance breakdown showing a strategy strong on one instrument and
+   * losing on others: "only trade the winning signals." Finer than disabledStrategyIds above, not
+   * a replacement for it -- a strategyId can be blocked by either gate independently. Live:
+   * TTL-cached. Replay: ALWAYS returns an empty set, same reasoning as disabledStrategyIds/
+   * disabledSymbols (a live operator toggle has no meaning for a historical replay date).
+   */
+  disabledStrategySymbolPairs(): Promise<Set<string>>;
+
+  /**
    * Fields degraded on the CONTEXT side since the last call — decideOnBar
    * merges this into its own degraded[] list right after fetching
    * newsRisk/openingRange/dailyTrend/dailyEmaTrend. Live has nothing to
@@ -122,6 +244,16 @@ export interface BarDecision {
     signalKind: "breakout" | "reversal";
     structureSwingPrice: Decimal | null;
     breakoutLevelPrice: Decimal | null;
+    /**
+     * Carried through from Signal.explicitStopPrice/explicitTakeProfitPrice
+     * (strategy/types.ts) so a second live venue (see the Tradesea
+     * integration, engine/loop.ts's evaluateNewSignals) can re-run
+     * RiskEngine.assessNewTrade with its own account state but the EXACT
+     * same inputs the primary venue's plan used -- added 2026-08-27, additive
+     * only, no existing consumer's behavior changes.
+     */
+    explicitStopPrice: Decimal | null;
+    explicitTakeProfitPrice: Decimal | null;
   } | null;
   /** The full feature vector scored for this signal — null when signal is null. Live persists this verbatim onto the Score row (see loop.ts's persistScores); kept here rather than dropped so live doesn't need to rebuild it. */
   features: SetupFeatures | null;
@@ -138,9 +270,11 @@ export interface BarDecision {
    * silently drifting. Populated only when consensus was reached.
    * `entryPrice` is the one thing decideOnBar adds beyond RiskAssessment
    * itself, since RiskEngine.assessNewTrade takes it as an input rather than
-   * returning it.
+   * returning it -- as of 2026-08-09 it's analytics/smartEntry.ts's picked
+   * price, not necessarily the raw signal/bar-close price (see
+   * smartEntryBasis/smartEntryReason for which and why).
    */
-  plan: (RiskAssessment & { entryPrice: Decimal }) | null;
+  plan: (RiskAssessment & { entryPrice: Decimal; smartEntryBasis: "poc" | "vwap" | "signal_price"; smartEntryReason: string }) | null;
   /** Which context fields were unavailable — the replay-vs-live fidelity record. */
   degraded: string[];
 }

@@ -68,12 +68,48 @@ export interface OrderResult {
 }
 
 export interface ClosedSimTrade {
+  // 2026-09-03 (operator report: manually-closed positions weren't
+  // auto-clearing) -- required, not derived from symbol, so
+  // TradingEngine.closeTrade closes the EXACT trade being evaluated instead
+  // of guessing "the most recent open trade on this symbol." That guess
+  // silently broke once more than one trade could be open on the same
+  // symbol at once (a known consequence of the same-symbol duplicate-entry
+  // race) -- see engine/loop.ts's manageOpenTrades for the matching fix.
+  tradeId: number;
   symbol: string;
   accountId: string;
   exitTime: Date;
   exitPrice: Decimal;
-  exitReason: "stop" | "target";
+  // "trailing_stop" added 2026-08-12 -- see engine/loop.ts's
+  // manageLiveOpenTrade for why a real trailing-stop close needs its own
+  // reason distinct from "stop" (explain/engine.ts's explainTradeExit
+  // already had the right message for it, this type was the only thing
+  // blocking that call site from using it).
+  exitReason: "stop" | "target" | "trailing_stop";
   customTag?: string;
+}
+
+/**
+ * A single real, confirmed row from the broker's own closed-trade history --
+ * not this app's own estimate. See browserControl/tradeHistoryPanel.ts for
+ * where this is read for BrowserControlBroker (TopstepX's own "Trade
+ * History" grid, confirmed live 2026-08-31 against real account data).
+ */
+export interface ClosedTradeHistoryEntry {
+  brokerTradeId: string;
+  contractCode: string;
+  quantity: number;
+  side: "long" | "short";
+  entryTime: Date;
+  exitTime: Date;
+  entryPrice: Decimal;
+  exitPrice: Decimal;
+  /** Gross P&L before commissions/fees, exactly as the broker's own grid reports it. */
+  grossPnl: Decimal;
+  /** commissions + fees summed (both already negative/deductions on the source row). */
+  totalDeductions: Decimal;
+  /** grossPnl + totalDeductions -- the real, net realized dollar result that hit the account. */
+  netPnl: Decimal;
 }
 
 export type MarketDataHandler = (event: { event: string; data: unknown }) => Promise<void>;
@@ -127,6 +163,25 @@ export interface BrokerClient {
    */
   placeTrailingStop?(symbol: string, side: "long" | "short", quantity: number, trailTicks: number): Promise<OrderResult>;
   /**
+   * Places a real, broker-native resting LIMIT order at `limitPrice` that closes an existing
+   * position if price reaches it -- opposite side from the position itself (sell to take profit
+   * on a long, buy to take profit on a short), same quantity. 2026-09-04 (operator report: a
+   * position's own recorded price data showed it crossing takeProfitPrice more than once while
+   * still open -- root cause was the browser price feed going stale, which silently stops
+   * engine/loop.ts's own polling-based target check along with it, since both run off the same
+   * price-tick stream). This gives the target a real broker-side enforcement path independent of
+   * our own feed's health, mirroring placeTrailingStop's own resting-order shape exactly -- NOT
+   * TopstepX's native Position Brackets feature (checkbox + popover + Save Changes), which caused
+   * a real incident when tried 2026-07-21 and was deliberately ruled out (see
+   * browserControlBroker.ts's own header comment). This reuses the same plain order-ticket
+   * automation (setOrderType/setLimitPrice/setQuantity + a normal Buy/Sell submit) already proven
+   * live by placeOrder's own limit-order path and by placeTrailingStop. A resting order, not an
+   * immediate fill -- returns `status: "pending"` on success, same convention as
+   * placeTrailingStop/a limit order. Only implemented by brokers that support it (e.g.
+   * BrowserControlBroker).
+   */
+  placeTakeProfitOrder?(symbol: string, side: "long" | "short", quantity: number, limitPrice: Decimal): Promise<OrderResult>;
+  /**
    * Cancels every resting order for `symbol` -- not a single order by ID.
    * The existing `cancelOrder(accountId, brokerOrderId)` method's signature
    * has no way to carry symbol, and TopstepX's ticket only offers "Cancel
@@ -137,4 +192,14 @@ export interface BrokerClient {
    * it (e.g. BrowserControlBroker).
    */
   cancelRestingOrder?(symbol: string): Promise<OrderResult>;
+  /**
+   * Reads the broker's own closed-trade history for `symbol`, most recent
+   * first -- real confirmed fills/P&L/fees, not this app's own estimates.
+   * Only implemented by brokers with such a panel (e.g. BrowserControlBroker,
+   * TopstepX's own Trade History grid). Returns null when the panel itself
+   * can't be read (don't guess, same posture as isPositionFlat); an empty
+   * array is a real "no closed trades found for this symbol," never confused
+   * with null.
+   */
+  readClosedTradeHistory?(symbol: string): Promise<ClosedTradeHistoryEntry[] | null>;
 }

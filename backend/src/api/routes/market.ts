@@ -9,45 +9,52 @@ import { getLatestRegimeSnapshot } from "../../engine/regimeSnapshotCache.js";
 import { getPpm } from "../../engine/ppmCache.js";
 import { getSupportResistanceLevels } from "../../engine/supportResistanceCache.js";
 
+// One combined snapshot per instrument -- last price, contract specs, and
+// current regime -- built for the Quick Order Panel / Watchlist so the
+// frontend doesn't need to stitch together several endpoints just to know
+// "what can I trade and at roughly what price right now." Shared with the
+// assistant's get_market_snapshot tool.
+export async function getMarketSnapshot() {
+  const now = new Date();
+  const session = classifySession(now);
+
+  return Promise.all(
+    DEFAULT_INSTRUMENTS.map(async (spec) => {
+      const [lastBar, trendLevels] = await Promise.all([
+        prisma.bar.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }),
+        getTrendLevels(spec.symbol),
+      ]);
+      const regimeRow = getLatestRegimeSnapshot(spec.symbol);
+
+      return {
+        symbol: spec.symbol,
+        tickSize: spec.tickSize.toString(),
+        pointValue: spec.pointValue.toString(),
+        lastPrice: lastBar?.close ?? null,
+        lastPriceTime: lastBar?.time ?? null,
+        trendLabel: regimeRow?.trendLabel ?? null,
+        volLabel: regimeRow?.volLabel ?? null,
+        regimeConfidence: regimeRow?.confidence ?? null,
+        session,
+        maStack: trendLevels.maStack,
+        swingHigh: trendLevels.swingHigh,
+        swingLow: trendLevels.swingLow,
+        swingDirection: trendLevels.swingDirection,
+        fibLevels: trendLevels.fibLevels,
+      };
+    })
+  );
+}
+
+/** Shared by GET /api/market/support-resistance and the assistant's get_support_resistance tool. */
+export async function getSupportResistanceSnapshot() {
+  return Promise.all(DEFAULT_INSTRUMENTS.map((spec) => getSupportResistanceLevels(spec.symbol)));
+}
+
 export async function marketRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", requireApiKey);
 
-  // One combined snapshot per instrument -- last price, contract specs, and
-  // current regime -- built for the Quick Order Panel / Watchlist so the
-  // frontend doesn't need to stitch together several endpoints just to know
-  // "what can I trade and at roughly what price right now."
-  app.get("/api/market/snapshot", async () => {
-    const now = new Date();
-    const session = classifySession(now);
-
-    const out = await Promise.all(
-      DEFAULT_INSTRUMENTS.map(async (spec) => {
-        const [lastBar, trendLevels] = await Promise.all([
-          prisma.bar.findFirst({ where: { symbol: spec.symbol }, orderBy: { time: "desc" } }),
-          getTrendLevels(spec.symbol),
-        ]);
-        const regimeRow = getLatestRegimeSnapshot(spec.symbol);
-
-        return {
-          symbol: spec.symbol,
-          tickSize: spec.tickSize.toString(),
-          pointValue: spec.pointValue.toString(),
-          lastPrice: lastBar?.close ?? null,
-          lastPriceTime: lastBar?.time ?? null,
-          trendLabel: regimeRow?.trendLabel ?? null,
-          volLabel: regimeRow?.volLabel ?? null,
-          regimeConfidence: regimeRow?.confidence ?? null,
-          session,
-          maStack: trendLevels.maStack,
-          swingHigh: trendLevels.swingHigh,
-          swingLow: trendLevels.swingLow,
-          swingDirection: trendLevels.swingDirection,
-          fibLevels: trendLevels.fibLevels,
-        };
-      })
-    );
-    return out;
-  });
+  app.get("/api/market/snapshot", async () => getMarketSnapshot());
 
   // Live, in-memory order-flow read directly off TopstepX's own WebSocket
   // feed (see browserWatch/orderFlowListener.ts) -- purely observational for
@@ -74,7 +81,5 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
   // Support/resistance levels an entry is actually gated against (see
   // risk/engine.ts's proximity check) -- exposed so the levels are visible
   // and verifiable, not just implicit in a rejection reason string.
-  app.get("/api/market/support-resistance", async () => {
-    return Promise.all(DEFAULT_INSTRUMENTS.map((spec) => getSupportResistanceLevels(spec.symbol)));
-  });
+  app.get("/api/market/support-resistance", async () => getSupportResistanceSnapshot());
 }

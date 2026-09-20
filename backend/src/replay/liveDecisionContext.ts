@@ -31,7 +31,19 @@ import { getLatestOrderFlowSnapshot } from "../engine/liveOrderFlowCache.js";
 import { getOpeningRangeStats } from "../engine/openingRangeCache.js";
 import { getNewsRiskStatus } from "../news/risk.js";
 import { loadRecentBars } from "../engine/bootstrap.js";
-import type { AccountRiskState, RiskLimitsConfig } from "../risk/index.js";
+import { getBanditVersionSelection } from "../engine/consensusBanditCache.js";
+import type { BanditSelectionResult } from "../scoring/consensusBandit.js";
+import { getSessionPerformanceSelection } from "../engine/sessionPerformanceCache.js";
+import type { SessionPerformanceSelection } from "../scoring/sessionPerformance.js";
+import { getDealerLevels } from "../engine/dealerGexCache.js";
+import { getActiveDailyPlanZones } from "../engine/dailyPlanZoneCache.js";
+import { getDisabledStrategyIds } from "../engine/strategyEnablementCache.js";
+import { getDisabledSymbols } from "../engine/symbolEnablementCache.js";
+import { getDisabledStrategySymbolPairs } from "../engine/strategySymbolEnablementCache.js";
+import { hasConflictingCrossSymbolPosition } from "../engine/crossSymbolConflictCheck.js";
+import type { DealerLevelResult } from "../marketData/dealerGex.js";
+import type { OhlcBar } from "../regime/indicators.js";
+import type { AccountRiskState, DailyPlanZone, RiskLimitsConfig } from "../risk/index.js";
 import type { DecisionContext, ExecutionSettings } from "./types.js";
 
 export class LiveDecisionContext implements DecisionContext {
@@ -41,6 +53,8 @@ export class LiveDecisionContext implements DecisionContext {
       accountState: AccountRiskState;
       riskLimits: RiskLimitsConfig;
       executionSettings: ExecutionSettings;
+      /** Tradesea's own account, when it's connected -- widens hasConflictingPosition to treat the two venues as one coordinated system (same "move together as a pair" posture as engine/loop.ts's openCheckAccountIds). Does NOT widen hasOpenPosition above, which stays scoped to accountId alone, unchanged from before this field existed. */
+      secondaryAccountId?: number;
     },
   ) {}
 
@@ -96,5 +110,38 @@ export class LiveDecisionContext implements DecisionContext {
       select: { id: true },
     });
     return open !== null;
+  }
+
+  async hasConflictingPosition(symbol: string, side: "long" | "short"): Promise<boolean> {
+    const accountIds = this.deps.secondaryAccountId ? [this.deps.accountId, this.deps.secondaryAccountId] : [this.deps.accountId];
+    return hasConflictingCrossSymbolPosition(accountIds, symbol, side);
+  }
+
+  async banditVersionSelection(bucket: string, at: Date): Promise<BanditSelectionResult> {
+    return getBanditVersionSelection(bucket, at);
+  }
+
+  async sessionPerformanceSelection(at: Date): Promise<SessionPerformanceSelection> {
+    return getSessionPerformanceSelection(at);
+  }
+
+  async dealerLevels(symbol: string, recentBars: OhlcBar[], at: Date): Promise<DealerLevelResult | null> {
+    return getDealerLevels(symbol, recentBars, at);
+  }
+
+  async dailyPlanZones(symbol: string, at: Date): Promise<DailyPlanZone[]> {
+    return getActiveDailyPlanZones(symbol, at);
+  }
+
+  async disabledStrategyIds(): Promise<Set<string>> {
+    return getDisabledStrategyIds();
+  }
+
+  async disabledSymbols(): Promise<Set<string>> {
+    return getDisabledSymbols();
+  }
+
+  async disabledStrategySymbolPairs(): Promise<Set<string>> {
+    return getDisabledStrategySymbolPairs();
   }
 }

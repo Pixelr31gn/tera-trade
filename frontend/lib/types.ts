@@ -4,14 +4,25 @@ export interface ConfidenceTier {
 }
 
 export interface SystemState {
+  /** Per-instrument executable toggle -- every symbol in ACTIVE_INSTRUMENTS, with whether it's currently allowed to open new trades. Doesn't affect an already-open position on the symbol. */
+  tradableSymbols: { symbol: string; enabled: boolean }[];
   mode: "analysis_only" | "paper" | "live";
   killSwitch: boolean;
   killSwitchReason: string | null;
   brokerKind: string;
   liveBrokerConnected: boolean;
+  tradesea: {
+    enabled: boolean;
+    liveEnabled: boolean;
+    liveBrokerConnected: boolean;
+  };
+  /** The AI assistant's own independent gates -- see execution/mode.ts's setAssistantActionsEnabled. `enabled` reflects static env config (ASSISTANT_ENABLED); `actionsEnabled` reflects the runtime DB toggle that gates its real-money write-tools. */
+  assistant: {
+    enabled: boolean;
+    actionsEnabled: boolean;
+  };
   minScoreThreshold: number;
   activeStrategyVersion: "v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7";
-  executionDecisionEngineEnabled: boolean;
   /** Shared across every strategy/scoring version -- see risk/stops.ts's computeInitialStop. */
   takeProfitRMultiple: number;
   /** Exactly 3, ascending by threshold -- see risk/sizing.ts's computeConfidenceTierQuantity. */
@@ -69,17 +80,6 @@ export interface RecommendationScore {
   quantity: number;
 }
 
-export interface ExecutionOpportunity {
-  symbol: string;
-  side: string;
-  strategyId: string;
-  state: "waiting" | "building_entry" | "ready" | "resting_order" | "filled" | "cancelled";
-  bestEntryPrice: number | null;
-  bestEntryScore: number | null;
-  ageSeconds: number;
-  cancelReason: string | null;
-}
-
 export interface ActionableRecommendation {
   id: number;
   time: string;
@@ -109,7 +109,11 @@ export interface Position {
   score: number | null;
   explanation: string;
   trailingStopPlaced: boolean;
+  /** Whether a real broker-side take-profit LIMIT order is resting for this position yet (see engine/loop.ts's activateTakeProfitOrder) -- false means the target is only enforced by this app's own price-tick polling. */
+  takeProfitOrderPlaced: boolean;
   letItRide: boolean;
+  /** Which broker this position is actually open on -- e.g. "browser_control" (TopstepX), "tradesea_browser_control", "simulated". Matters now that positions from more than one live broker can appear in the same list. */
+  brokerKind: string;
 }
 
 export interface Trade {
@@ -120,6 +124,8 @@ export interface Trade {
   quantity: number;
   entryTime: string;
   entryPrice: number;
+  stopPrice: number;
+  takeProfitPrice: number | null;
   exitTime: string | null;
   exitPrice: number | null;
   exitReason: string | null;
@@ -179,8 +185,15 @@ export interface SessionPerformance {
   totalScores: number;
   outcomeCounts: Record<string, number>;
   resolvedCount: number;
+  /** Blended across every scored setup (taken + skipped) -- converges across scoring versions almost regardless of judgment quality. See takenWinRate. */
   winRate: number | null;
   avgRMultiple: number | null;
+  /** How many setups this version's own decision was "taken" on. */
+  takenCount: number;
+  takenResolvedCount: number;
+  /** Win rate restricted to this version's own decision === "taken" rows -- the metric that actually differs between versions. */
+  takenWinRate: number | null;
+  takenAvgRMultiple: number | null;
   modelTrained: boolean;
   minRowsRequiredForModel: number;
   byMarketStructure: Record<string, SessionLabelBreakdown>;
@@ -189,6 +202,20 @@ export interface SessionPerformance {
 }
 
 export type StrategyComparison = Record<"v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7", Record<string, SessionPerformance>>;
+
+/** GET /api/dealer-levels -- see backend/src/analytics/dealerGex.ts. One entry per symbol (ES, NQ), always the most recently computed levels regardless of which session computed them. */
+export interface DealerLevels {
+  time: string;
+  session: "new_york" | "london" | "asian";
+  spotPrice: string;
+  callWall: string | null;
+  putWall: string | null;
+  gammaFlip: string | null;
+  callWallConfirmedByPriceAction: boolean;
+  putWallConfirmedByPriceAction: boolean;
+}
+
+export type DealerLevelsBySymbol = Record<string, DealerLevels>;
 
 export interface DivergenceBucket {
   n: number;
@@ -251,7 +278,9 @@ export interface PerformanceSummary {
     volatilityAnnualized: number | null;
     cagr: number | null;
   };
-  byStrategy: Record<string, { tradeCount: number; totalPnl: number; winRate: number }>;
+  // Keyed by strategyId, then by symbol -- "all" is the blended-across-symbols total (see
+  // backend/src/api/routes/performance.ts's own comment on why this is nested now).
+  byStrategy: Record<string, Record<string, { tradeCount: number; totalPnl: number; winRate: number }>>;
   byRegime: Record<string, { tradeCount: number; totalPnl: number; winRate: number }>;
 }
 
@@ -269,4 +298,77 @@ export interface PpmSnapshot {
   downPointsPerMinute: number;
   netPointsPerMinute: number;
   sampleCount: number;
+}
+
+/** One raw Gemini content part -- see backend/src/assistant/client.ts. A message's `content` is an array of these; most messages carry exactly one, but a multi-tool-call turn carries several. */
+export interface AssistantContentPart {
+  text?: string;
+  functionCall?: { id?: string; name?: string; args?: Record<string, unknown> };
+  functionResponse?: { id?: string; name?: string; response?: { output?: string; error?: string } };
+  thoughtSignature?: string;
+}
+
+export interface AssistantMessage {
+  id: number;
+  role: "user" | "assistant";
+  content: AssistantContentPart[];
+  createdAt: string;
+}
+
+/** Audit row for a real write-tool call -- see backend/src/assistant/tools.ts's withAssistantAudit. Written on every write-tool call regardless of outcome. */
+export interface AssistantAction {
+  id: number;
+  toolName: string;
+  input: unknown;
+  status: "success" | "error";
+  resultSummary: string;
+  rawResult: unknown;
+  errorMessage: string | null;
+  tradeId: number | null;
+  messageId: number | null;
+  createdAt: string;
+}
+
+/** GET /api/daily-plan -- see backend/src/api/routes/dailyPlan.ts. */
+export interface DailyPlanSymbolView {
+  support: { priceLow: number; priceHigh: number; label: string } | null;
+  resistance: { priceLow: number; priceHigh: number; label: string } | null;
+  takeProfitLikelyMovePoints: number | null;
+  takeProfitCapPoints: number | null;
+  takeProfitLabel: string | null;
+  currentPrice: number | null;
+  status: "no_plan" | "below_support" | "testing_support" | "mid_range" | "testing_resistance" | "above_resistance";
+}
+
+/** GET /api/scout/pitches -- see backend/src/api/routes/scout.ts. */
+export interface ScoutPitch {
+  id: number;
+  title: string;
+  problem: string;
+  proposedAgent: string;
+  toolsNeeded: unknown;
+  costEstimate: string;
+  frequencyEstimate: string;
+  category: string;
+  occurrenceCount: number;
+  status: string;
+  score: number;
+  rating: number | null;
+  ratingNote: string | null;
+  ratedAt: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export interface ScoutPitchesResponse {
+  pitches: ScoutPitch[];
+  taylorApprovalMinRating: number;
+}
+
+/** GET /api/taylor/blueprints -- see backend/src/api/routes/taylor.ts. */
+export interface TailorBlueprint {
+  pitchId: number;
+  pitchTitle: string;
+  pitchRatingAtGeneration: number;
+  createdAt: string;
 }

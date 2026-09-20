@@ -12,7 +12,7 @@ import { classifySession, type TradingSession } from "../analytics/session.js";
 import { findSwing } from "../analytics/fibonacci.js";
 import { computePpm } from "../analytics/ppm.js";
 import type { OrderFlowSnapshot } from "../browserWatch/orderFlowListener.js";
-import type { EmaTrend } from "../analytics/emaTrend.js";
+import { computeEma20Ema200Regime, type EmaTrend, type Ema20Ema200Regime } from "../analytics/emaTrend.js";
 import { intraday5mEmaDistanceAtr } from "../analytics/intradayEmaProximity.js";
 
 export interface SetupFeatures {
@@ -62,6 +62,8 @@ export interface SetupFeatures {
   dailyEma20Trend: EmaTrend;
   /** Signed distance (in ATR) from current price to a fast intraday 20-EMA on 5-minute bars (see analytics/intradayEmaProximity.ts) -- positive means price is above the EMA, negative below. Null until there are at least 20 five-minute bars or ATR isn't available. */
   intraday5mEmaDistanceAtr: number | null;
+  /** Which side of the 20/200 EMA crossover price currently sits on, computed on this same bar series (see analytics/emaTrend.ts's computeEma20Ema200Regime) -- distinct from intraday5mEmaDistanceAtr's fast-20-EMA-only proximity read and from dailyEma20Trend's daily-bar signal. Null until there are at least 200 bars for a real slow EMA. */
+  ema20Ema200Regime: Ema20Ema200Regime;
 }
 
 function mean(xs: number[]): number {
@@ -149,6 +151,7 @@ export function buildSetupFeatures(
   const netPointsPerMinute = ppm.sampleCount >= 2 ? ppm.netPointsPerMinute : null;
 
   const intraday5mEmaDistance = intraday5mEmaDistanceAtr(bars, lastAtr);
+  const ema20Ema200Regime = computeEma20Ema200Regime(bars);
 
   return {
     symbol,
@@ -185,5 +188,6 @@ export function buildSetupFeatures(
     orderFlowSnapshot,
     dailyEma20Trend,
     intraday5mEmaDistanceAtr: intraday5mEmaDistance,
+    ema20Ema200Regime,
   };
 }

@@ -37,6 +37,15 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Scout (backend/src/scout/) -- local runtime state: tail offsets into Claude Code session logs/
+# shell history, and rendered daily digests. Personal dev-activity data, not source.
+backend/.scout-state/
+
+# Auto-Provisioner (backend/src/autoProvisioner/) -- staged, not-yet-reviewed agent scaffolds. Never
+# committed on their own; a human promotes a staged directory into a real one (renamed, out of
+# _provisioned/) once it's reviewed, which un-ignores it naturally.
+backend/src/_provisioned/
+
 # Dev-server logs
 backend/backend-dev.log
 frontend/frontend-dev.log

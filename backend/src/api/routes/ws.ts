@@ -5,7 +5,7 @@ import { manager } from "../wsManager.js";
 export async function wsRoutes(app: FastifyInstance): Promise<void> {
   app.get("/ws/live", { websocket: true }, (socket, request) => {
     const apiKey = (request.query as Record<string, string>).api_key ?? null;
-    if (!isValidWsApiKey(apiKey)) {
+    if (!isValidWsApiKey(apiKey, request.headers.cookie)) {
       socket.close(1008, "invalid api key");
       return;
     }

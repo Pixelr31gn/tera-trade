@@ -40,8 +40,19 @@ describe("hasReachedTrailingStopActivation", () => {
     expect(hasReachedTrailingStopActivation(d(100), d(80), "short", d(99), d(89))).toBe(true);
   });
 
-  it("exposes the activation fraction and tick distance as the expected v1.3 constants", () => {
+  it("exposes the activation fraction as the expected v1.3 constant", () => {
     expect(TRAILING_STOP_ACTIVATION_FRACTION).toBe(0.5);
-    expect(TRAILING_STOP_DISTANCE_TICKS).toBe(30);
+  });
+});
+
+// 2026-09-09 (operator instruction: "a trailing stop loss with 5 ticks
+// should be applied when an execution hits half way to the target tp") --
+// supersedes the previous flat-15-point distance (2026-08-18, converted to
+// ticks per instrument), which is gone, not left dormant. Already in ticks,
+// so it's just a flat number now -- no per-instrument conversion, and
+// nothing to fall back to if a tickSize is unusable, since none is needed.
+describe("TRAILING_STOP_DISTANCE_TICKS", () => {
+  it("is a flat 5 ticks, the same for every instrument", () => {
+    expect(TRAILING_STOP_DISTANCE_TICKS).toBe(5);
   });
 });

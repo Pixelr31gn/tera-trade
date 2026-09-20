@@ -40,6 +40,51 @@ const SLOPE_LOOKBACK_BARS = 10;
 // be revisited once real daily-EMA20 score distributions can be observed.
 const FLAT_SLOPE_THRESHOLD = 0.0003;
 
+export type Ema20Ema200Regime = "bullish" | "bearish" | null;
+
+/**
+ * Which side of the 20/200 EMA crossover price is currently on -- "bullish"
+ * when the fast EMA sits above the slow one, "bearish" when below, null
+ * until enough bars exist for a real 200-period EMA. Distinct from
+ * classifyEmaTrend above (which is a single-EMA slope/proximity read, daily
+ * bars only, feeds v3's daily trend-direction factor) -- this is a
+ * genuinely different signal (two EMAs crossing, intraday 5-minute bars).
+ *
+ * Built 2026-08-12 (operator claim: "any time the 20 ema and the 200 ema
+ * cross each other... price changes direction every single time
+ * guaranteed"). A real 5-minute-bar backtest of that claim
+ * (scripts/backtestIntraday20v200Cross.ts, ~3.7 months of ES/NQ bars,
+ * 430-500 crossovers/symbol) found negative or flat expectancy in every
+ * configuration tested when used as a HARD directional gate held across an
+ * entire regime -- an operator-toggleable gate was built on that basis and
+ * then cancelled at the operator's request in favor of this: exposing the
+ * raw regime as one INPUT among many to v1/v2/v3's existing scorers (see
+ * scoring/ruleScorer.ts's ema20Ema200RegimeEdge factor and
+ * scoring/ruleScorerV3.ts's computeEma20Ema200RegimeAdjustment), not a
+ * standalone veto. Being one bounded input to a multi-factor score is a
+ * materially different, unvalidated claim from "guaranteed" as a sole
+ * gate -- the backtest above speaks to the latter, not the former; treat
+ * the weights on those two factors as hand-set and unproven, same posture
+ * as every other hand-set weight in those files, not as backed by that
+ * backtest. v5/v6/v7 deliberately do NOT get this factor -- each of those
+ * files documents an exact, closed, either operator-specified points
+ * budget (v6) or data-mined pattern set (v5, v7) that sums to precisely
+ * 100; bolting on an un-mined, hand-set factor would silently break that
+ * documented contract. Period-agnostic like ema() itself, but named for
+ * the specific 20/200 pair the operator asked about -- callers on a
+ * different bar timeframe or period pair should treat the defaults as
+ * just that.
+ */
+export function computeEma20Ema200Regime(bars: OhlcBar[], fastPeriod = 20, slowPeriod = 200): Ema20Ema200Regime {
+  const closes = bars.map((b) => b.close);
+  if (closes.length < slowPeriod) return null;
+
+  const fast = ema(closes, fastPeriod).at(-1)!;
+  const slow = ema(closes, slowPeriod).at(-1)!;
+  if (fast === slow) return null; // exactly equal -- no real regime to report, vanishingly unlikely with real prices but not undefined behavior
+  return fast > slow ? "bullish" : "bearish";
+}
+
 export function classifyEmaTrend(bars: OhlcBar[], period = 20): EmaTrend {
   const closes = bars.map((b) => b.close);
   if (closes.length < period) return { ema: null, slope: null, label: "neutral" };

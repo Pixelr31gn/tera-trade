@@ -87,8 +87,3 @@ export async function getOpeningRangeStats(symbol: string): Promise<OpeningRange
   cache.set(symbol, { stats, computedAt: Date.now() });
   return stats;
 }
-
-/** Test-only: clear the cache so tests don't see another test's stale state. */
-export function _resetOpeningRangeCacheForTests(): void {
-  cache.clear();
-}

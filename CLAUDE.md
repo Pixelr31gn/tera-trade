@@ -75,8 +75,19 @@ say so instead of guessing.
 - Prefer small diffs. Do not reformat, reorder imports, or "tidy" files you
   were not asked to change.
 - Run `npm test` before reporting done. Say plainly if a test fails.
-- Never commit or modify `.env`, license keys, or anything under
-  `src/core/license.ts`.
+- Never commit `.env`, and never write or expose secret *values* in it
+  (API keys, tokens, DB credentials) — or anything under
+  `src/core/license.ts`. Narrowed 2026-09-10 (explicit, repeated operator
+  direction, after the operator judged the original blanket rule too costly
+  given how often a plain config toggle (e.g. `BROKER_KIND`) needed a
+  same-night change): non-secret configuration *values* already present in
+  `.env` (a broker-kind selector, a feature flag, a numeric setting) may be
+  edited directly when the operator has explicitly asked for that specific
+  change. This is not a general license to edit `.env` freely — each such
+  edit should still be one the operator has clearly, specifically asked for.
+  Invariant 3 above still applies in full: this doesn't authorize adding code
+  that flips these settings itself, only a human-directed one-line edit in
+  response to an explicit request.
 - Do not add new runtime dependencies without asking.
 - If a request would touch live order placement, stop and confirm first.
 

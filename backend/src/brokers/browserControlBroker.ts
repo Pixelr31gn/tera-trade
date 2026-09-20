@@ -40,12 +40,13 @@ import {
   submitClosePosition,
   submitSell,
 } from "../browserControl/orderTicket.js";
-import { isPositionFlatViaPanel } from "../browserControl/positionsPanel.js";
+import { isPositionFlatViaPanel, readOpenPositionFillPrice } from "../browserControl/positionsPanel.js";
+import { readClosedTradeHistoryForContract } from "../browserControl/tradeHistoryPanel.js";
 import { getSettings } from "../core/config.js";
 import { childLogger } from "../core/logger.js";
 import { getLatestBrowserAccountSnapshot } from "../engine/liveAccountOverride.js";
 import { getInstrument } from "../marketData/instruments.js";
-import type { BrokerAccount, BrokerClient, BrokerOrder, BrokerPosition, HistoricalBar, OrderRequest, OrderResult } from "./types.js";
+import type { BrokerAccount, BrokerClient, BrokerOrder, BrokerPosition, ClosedTradeHistoryEntry, HistoricalBar, OrderRequest, OrderResult } from "./types.js";
 import { OrderSide, OrderType } from "./types.js";
 
 const logger = childLogger("browserControlBroker");
@@ -82,6 +83,17 @@ export class BrowserControlBroker implements BrokerClient {
     this.browser = undefined;
   }
 
+  // v1.5 (2026-08-31, operator report of a closed trade recording the wrong
+  // entry/exit/pnl): reads TopstepX's own Trade History grid instead of
+  // guessing -- see tradeHistoryPanel.ts's header comment for why neither
+  // entry nor exit price this app records is guaranteed real without this.
+  async readClosedTradeHistory(symbol: string): Promise<ClosedTradeHistoryEntry[] | null> {
+    const instrument = getInstrument(symbol);
+    const page = await this.getPage().catch(() => null);
+    if (!page) return null;
+    return readClosedTradeHistoryForContract(page, instrument.brokerContractPrefix);
+  }
+
   private async getPage(): Promise<Page> {
     const settings = getSettings();
     if (!this.browser) this.browser = await connectToChrome(settings.browserCdpUrl);
@@ -107,8 +119,18 @@ export class BrowserControlBroker implements BrokerClient {
     if (request.quantity <= 0) {
       return { brokerOrderId: "", status: "rejected", error: "refusing to place an order with non-positive quantity" };
     }
-    if (!request.stopLossPrice || !request.referencePrice) {
-      return { brokerOrderId: "", status: "rejected", error: "refusing to place an order with no stop-loss price -- no stop, no trade" };
+    // Was `if (!request.stopLossPrice || !request.referencePrice)` -- the
+    // stopLossPrice half of this refusal is gone (2026-08-18, operator
+    // request: "remove stop loss constraints right now," explicitly
+    // confirmed as no stop-loss at all, not merely a looser one). Every real
+    // trade still carries a non-null stopLossPrice (risk/engine.ts's
+    // hardTakeProfitDollars path sends a sentinel far-away price instead of
+    // ever passing undefined -- see NO_STOP_LOSS_SENTINEL_POINTS), so this
+    // still guards against a genuinely malformed request; it's just no
+    // longer this class's job to decide whether that price is a real risk
+    // control.
+    if (!request.referencePrice) {
+      return { brokerOrderId: "", status: "rejected", error: "refusing to place an order with no reference price" };
     }
     const isLimit = request.orderType === OrderType.LIMIT;
     if (isLimit && !request.limitPrice) {
@@ -196,7 +218,8 @@ export class BrowserControlBroker implements BrokerClient {
           error: "order click succeeded but no real position appeared on the account afterward -- broker likely rejected it silently",
         };
       }
-      return { brokerOrderId: `browser-${Date.now()}`, status: "filled", filledPrice: request.referencePrice, filledAt: new Date() };
+      const filledPrice = await this.readRealFillPrice(request.symbol, request.referencePrice);
+      return { brokerOrderId: `browser-${Date.now()}`, status: "filled", filledPrice, filledAt: new Date() };
     } catch (err) {
       logger.error({ symbol: request.symbol, err: String(err) }, "order_placement_failed");
       return { brokerOrderId: "", status: "rejected", error: String(err) };
@@ -220,6 +243,42 @@ export class BrowserControlBroker implements BrokerClient {
       if (isFlat === false) return true;
     }
     return false;
+  }
+
+  // Reads the real fill price off the Positions panel after a confirmed real
+  // entry (2026-08-17, operator request) -- this class previously never read
+  // back a real fill price at all, always echoing the theoretical signal
+  // price straight back (see this class's header comment). Polls the same
+  // FILL_CONFIRMATION_RETRIES/_DELAY_MS cadence as confirmPositionOpened,
+  // since the row's price cell can take the same moment to populate as the
+  // row itself takes to appear. A reading is only trusted within 5% of the
+  // theoretical price -- a misread (wrong row, stale DOM, a mid-scroll
+  // partial render) must never feed a real stop-loss (see
+  // execution/engine.ts's shift-by-fill-offset logic, which is exactly what
+  // a bad read here would corrupt). Keeps polling across a rejected reading
+  // (not just an unreadable one) in case a later attempt catches a settled
+  // value; falls back to the theoretical price, logging which happened
+  // either way, rather than ever return null to a caller with no fallback
+  // of its own.
+  private async readRealFillPrice(symbol: string, theoreticalPrice: Decimal): Promise<Decimal> {
+    const instrument = getInstrument(symbol);
+    let lastDeviationPct: string | null = null;
+    for (let attempt = 0; attempt < FILL_CONFIRMATION_RETRIES; attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, FILL_CONFIRMATION_DELAY_MS));
+      const page = await this.getPage().catch(() => null);
+      if (!page) continue;
+      const raw = await readOpenPositionFillPrice(page, instrument.brokerContractPrefix).catch(() => null);
+      if (raw === null) continue;
+      const real = new Decimal(raw);
+      const deviation = real.minus(theoreticalPrice).abs().dividedBy(theoreticalPrice);
+      if (deviation.lte("0.05")) {
+        logger.info({ symbol, theoreticalPrice: theoreticalPrice.toString(), realPrice: real.toString() }, "real_fill_price_used");
+        return real;
+      }
+      lastDeviationPct = deviation.times(100).toFixed(2);
+    }
+    logger.warn({ symbol, theoreticalPrice: theoreticalPrice.toString(), lastDeviationPct }, "real_fill_price_unavailable_or_too_far_from_theoretical_using_theoretical");
+    return theoreticalPrice;
   }
 
   // Prefers the dedicated Positions panel (a single table of every open
@@ -353,6 +412,54 @@ export class BrowserControlBroker implements BrokerClient {
       return { brokerOrderId: `browser-trail-${Date.now()}`, status: "pending" };
     } catch (err) {
       logger.error({ symbol, err: String(err) }, "place_trailing_stop_failed");
+      return { brokerOrderId: "", status: "rejected", error: String(err) };
+    }
+  }
+
+  // See BrokerClient.placeTakeProfitOrder's own doc comment for why this exists and why it's
+  // deliberately built the same way as placeTrailingStop (a plain resting limit order via the
+  // normal order ticket) rather than TopstepX's native Position Brackets feature.
+  async placeTakeProfitOrder(symbol: string, side: "long" | "short", quantity: number, limitPrice: Decimal): Promise<OrderResult> {
+    const settings = getSettings();
+    if (quantity <= 0) {
+      return { brokerOrderId: "", status: "rejected", error: "refusing to place a take-profit order with non-positive quantity" };
+    }
+    try {
+      const page = await this.getPage();
+
+      const blockingModal = await findBlockingModalText(page);
+      if (blockingModal) {
+        return { brokerOrderId: "", status: "rejected", error: `TopstepX is showing a blocking modal: "${blockingModal}"` };
+      }
+
+      const instrument = getInstrument(symbol);
+      const widget = await findOrSwitchToOrderWidget(page, instrument.brokerContractPrefix);
+      if (!widget) {
+        return { brokerOrderId: "", status: "rejected", error: `no order-entry widget found for contract prefix "${instrument.brokerContractPrefix}"` };
+      }
+
+      await setOrderType(widget, "limit");
+      await setLimitPrice(widget, limitPrice, instrument.tickSize);
+      await setQuantity(widget, quantity);
+
+      // Protects an EXISTING position -- opposite side from the position itself (sell to take
+      // profit on a long, buy to take profit on a short), same shape as placeTrailingStop above.
+      const result = side === "long" ? await submitSell(widget, settings.dryRunOrders) : await submitBuy(widget, settings.dryRunOrders);
+
+      if (result.dryRun) {
+        return {
+          brokerOrderId: "",
+          status: "rejected",
+          error: `DRY_RUN_ORDERS is enabled -- would have clicked "${result.buttonText}" for a take-profit limit order at ${limitPrice.toString()}. Set DRY_RUN_ORDERS=false to place real orders.`,
+        };
+      }
+
+      // A resting limit order, not an immediate fill -- same "pending" convention placeOrder's
+      // limit-order path and placeTrailingStop both use.
+      logger.info({ symbol, side, quantity, limitPrice: limitPrice.toString() }, "take_profit_order_clicked");
+      return { brokerOrderId: `browser-tp-${Date.now()}`, status: "pending" };
+    } catch (err) {
+      logger.error({ symbol, err: String(err) }, "place_take_profit_order_failed");
       return { brokerOrderId: "", status: "rejected", error: String(err) };
     }
   }

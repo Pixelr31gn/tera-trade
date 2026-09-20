@@ -1,7 +1,6 @@
 import { Decimal } from "decimal.js";
 import { describe, expect, it } from "vitest";
 import { computeTradePlan } from "../src/risk/tradePlan.js";
-import { MAX_STOP_DISTANCE_POINTS } from "../src/risk/stops.js";
 
 describe("computeTradePlan -- minimum risk:reward floor", () => {
   it("widens the stop when a near-zero ATR would otherwise risk far less than 1/3 of the target", () => {
@@ -30,11 +29,11 @@ describe("computeTradePlan -- minimum risk:reward floor", () => {
     expect(plan.sizingReason).toContain("stop widened");
   });
 
-  it("does not touch the stop when the natural (capped) ATR-based risk already clears the floor", () => {
+  it("does not touch the stop when the natural ATR-based risk already clears the floor", () => {
     const plan = computeTradePlan({
       side: "long",
       entryPrice: new Decimal(6000),
-      atrValue: new Decimal(2), // 3pt stop at the default 1.5x multiplier -- under the 5pt max-stop cap, so uncapped
+      atrValue: new Decimal(2), // 3pt stop at the default 1.5x multiplier
       structureSwingPrice: null,
       tickSize: new Decimal("0.25"),
       pointValue: new Decimal(5),
@@ -47,22 +46,26 @@ describe("computeTradePlan -- minimum risk:reward floor", () => {
     expect(plan.stopDistancePoints.toNumber()).toBeCloseTo(3, 5);
   });
 
-  it("does not widen past the 5pt max-stop cap even when the fixed-dollar floor would otherwise want a wider stop (2026-08-06)", () => {
+  it("widens the stop as far as the fixed-dollar floor demands, with no upper cap (removed 2026-09-08, see stops.ts's MIN_REWARD_RISK_RATIO comment)", () => {
     const plan = computeTradePlan({
       side: "long",
       entryPrice: new Decimal(6000),
-      atrValue: new Decimal(6.667), // ~10pt natural ATR stop -- immediately capped to 5pt by stops.ts
+      atrValue: new Decimal(6.667), // ~10pt natural ATR stop
       structureSwingPrice: null,
       tickSize: new Decimal("0.25"),
       pointValue: new Decimal(5),
       riskAmount: new Decimal(200),
-      profitDollars: new Decimal(120), // floor = 40; would need an 8pt stop to clear it, past the 5pt cap
+      profitDollars: new Decimal(120), // floor = 40; needs an 8pt stop to clear it -- wider than the natural ~10pt stop's own risk was already fine, so this specific case shouldn't widen at all
       maxPositionSize: 3,
+      averageProbability: 0.7,
     });
 
-    expect(plan.stopDistancePoints.toNumber()).toBeLessThanOrEqual(MAX_STOP_DISTANCE_POINTS.toNumber());
+    // Natural stop (10.0005pt) already gives actualRiskDollars = 10.0005 x 5
+    // x quantity >= the $40 floor for any nonzero quantity -- confirms no
+    // widening needed here, the interesting case (needing MORE than the
+    // natural distance) is covered by the near-zero-ATR tests above.
     expect(plan.sizingReason).not.toContain("stop widened");
-    expect(plan.sizingReason).toContain("exceed the");
+    expect(plan.stopDistancePoints.toNumber()).toBeCloseTo(6.667 * 1.5, 4);
   });
 
   it("mirrors the widening below entry for a short (stop moves further above)", () => {
@@ -113,12 +116,13 @@ describe("computeTradePlan -- explicit stop/target override (strategy/trendPullb
       maxPositionSize: 3,
       averageProbability: 0.7,
       explicitStopPrice: new Decimal(5995), // 5pt stop -- tighter than either generic option
-      explicitTakeProfitPrice: new Decimal(6015), // 15pt target -- exactly 3:1, but exceeds the 10pt max-target cap
+      explicitTakeProfitPrice: new Decimal(6020), // 20pt target
     });
 
     expect(plan.stopPrice.toNumber()).toBe(5995);
-    // 2026-08-06: 15pt explicit target clamped to the 10pt max-target cap.
-    expect(plan.takeProfitPrice.toNumber()).toBe(6010);
+    // Both explicit -- taken exactly as given, no cap and no derivation
+    // (2026-09-08, see tradePlan.ts's "both explicit" branch).
+    expect(plan.takeProfitPrice.toNumber()).toBe(6020);
     expect(plan.stopDistancePoints.toNumber()).toBe(5);
   });
 
@@ -160,12 +164,12 @@ describe("computeTradePlan -- explicit stop/target override (strategy/trendPullb
       maxPositionSize: 3,
       averageProbability: 0.7,
       explicitStopPrice: new Decimal(6005),
-      explicitTakeProfitPrice: new Decimal(5985), // 15pt target -- exceeds the 10pt max-target cap
+      explicitTakeProfitPrice: new Decimal(5980), // 20pt target
     });
 
     expect(plan.stopPrice.toNumber()).toBe(6005);
-    // 2026-08-06: 15pt explicit target clamped to the 10pt max-target cap.
-    expect(plan.takeProfitPrice.toNumber()).toBe(5990);
+    // Both explicit -- taken exactly as given, no cap (2026-09-08).
+    expect(plan.takeProfitPrice.toNumber()).toBe(5980);
     expect(plan.stopDistancePoints.toNumber()).toBe(5);
   });
 
@@ -182,15 +186,15 @@ describe("computeTradePlan -- explicit stop/target override (strategy/trendPullb
       maxPositionSize: 3,
       averageProbability: 0.7,
       explicitStopPrice: new Decimal(5995),
-      explicitTakeProfitPrice: new Decimal(6015), // should win over the $500 target, then get capped at 10pt
+      explicitTakeProfitPrice: new Decimal(6020), // should win over the $500 target
     });
 
-    // 2026-08-06: 15pt explicit target clamped to the 10pt max-target cap.
-    expect(plan.takeProfitPrice.toNumber()).toBe(6010);
+    // Both explicit -- wins outright, taken exactly as given, no cap.
+    expect(plan.takeProfitPrice.toNumber()).toBe(6020);
     expect(plan.sizingReason).not.toContain("stop widened"); // the fixed-dollar floor logic never ran
   });
 
-  it("falls back to the generic stop/target when neither explicit price is provided, capped at the 5pt max-stop (2026-08-06)", () => {
+  it("falls back to the generic ATR-based stop/target when neither explicit price is provided", () => {
     const withoutOverride = computeTradePlan({
       side: "long",
       entryPrice: new Decimal(6000),
@@ -204,9 +208,9 @@ describe("computeTradePlan -- explicit stop/target override (strategy/trendPullb
       averageProbability: 0.7,
     });
 
-    // 1.5x ATR default stop multiplier would naturally give 15pt here (see
-    // risk/stops.ts's computeInitialStop), but the 5pt max-stop cap (2026-08-06,
-    // operator request) clamps it down.
-    expect(withoutOverride.stopDistancePoints.toNumber()).toBeCloseTo(5, 5);
+    // 1.5x ATR default stop multiplier, uncapped (2026-09-08, see
+    // risk/stops.ts's computeInitialStop) -- 10 x 1.5 = 15pt.
+    expect(withoutOverride.stopDistancePoints.toNumber()).toBeCloseTo(15, 5);
+    expect(withoutOverride.takeProfitPrice.minus(6000).abs().toNumber()).toBeCloseTo(15 * 3, 5); // stop x default takeProfitRMultiple(3.0)
   });
 });

@@ -8,18 +8,23 @@ import { manager } from "./api/wsManager.js";
 import { computeVolumeDelta } from "./browserWatch/extract.js";
 import { OrderFlowListener } from "./browserWatch/orderFlowListener.js";
 import { BrowserWatcher } from "./browserWatch/watcher.js";
-import { getBroker } from "./brokers/index.js";
+import { getBroker, TRADESEA_AUTHENTICATED_PAGE_MARKER } from "./brokers/index.js";
 import { SimulatedBroker } from "./brokers/simulatedBroker.js";
 import type { BrokerClient } from "./brokers/types.js";
 import { AccountSource, BrokerKind, getSettings, PriceSource } from "./core/config.js";
 import { DEFAULT_LICENSE_SIGNING_SECRET, verifyLicenseKey } from "./core/license.js";
 import { logger } from "./core/logger.js";
 import { prisma } from "./db/client.js";
-import { setLiveBrokerConnected } from "./execution/mode.js";
+import { setLiveBrokerConnected, setTradeseaLiveBrokerConnected } from "./execution/mode.js";
 import { setLatestBrowserAccountSnapshot } from "./engine/liveAccountOverride.js";
 import { appendOrderFlowHistory, setLatestOrderFlowSnapshot } from "./engine/liveOrderFlowCache.js";
+import { getDealerLevels, getDealerLevelsBucketed } from "./engine/dealerGexCache.js";
+import { loadRecentBars } from "./engine/bootstrap.js";
 import { TradingEngine } from "./engine/loop.js";
 import { evaluatePendingOutcomes } from "./engine/outcomeEvaluator.js";
+import { evaluateDealerLevelOutcomes } from "./engine/dealerLevelOutcomeEvaluator.js";
+import { startDailyPlanScheduler } from "./assistant/dailyPlanScheduler.js";
+import { refreshMacroIndicators } from "./marketData/macroIndicators.js";
 import { backfillDaily, ensureInstrumentsSeeded } from "./marketData/backfill.js";
 import { ACTIVE_INSTRUMENTS } from "./marketData/instruments.js";
 import { LiveBarPoller } from "./marketData/live.js";
@@ -124,7 +129,39 @@ async function main(): Promise<void> {
     }
   }
 
-  const engine = new TradingEngine(simulatedBroker, liveBroker, liveBrokerKind, (event) => manager.broadcast(event));
+  // Tradesea: a second, fully independent live broker connection (see
+  // docs/BUILD_HISTORY.md's Tradesea entry) -- never selected by
+  // BROKER_KIND/liveBrokerKind above, gated entirely by its own TRADESEA_*
+  // settings. A connection failure here is handled the same way the primary
+  // liveBroker's is: it just leaves Tradesea unavailable, never fatal to the
+  // rest of the process.
+  let secondaryBroker: BrokerClient | null = null;
+  // Disabled 2026-08-30 (operator request: "turn off anything to do with
+  // tradesea for now... when tradesea is ready with real data we can use
+  // what we built for tradesea") -- commented out, not deleted, so this is a
+  // one-block uncomment (plus the matching watcher block below) once
+  // Tradesea has real data to trade on. secondaryBroker stays null through
+  // this whole file with this block off, which is the single source of
+  // truth every Tradesea check in engine/loop.ts already gates on
+  // (`this.secondaryBroker && ...`) -- nothing else needed to change.
+  /*
+  if (settings.tradeseaEnabled) {
+    try {
+      secondaryBroker = await getBroker(BrokerKind.TRADESEA_BROWSER_CONTROL);
+      await secondaryBroker.connect();
+      setTradeseaLiveBrokerConnected(true);
+      logger.info({ cdpUrl: settings.tradeseaBrowserCdpUrl }, "tradesea_broker_connected");
+    } catch (err) {
+      logger.error({ err: String(err) }, "tradesea_broker_connect_failed -- Tradesea unavailable until this is resolved (e.g. restart), but TopstepX/paper/analysis are unaffected");
+      secondaryBroker = null;
+    }
+  }
+  */
+
+  const engine = new TradingEngine(
+    simulatedBroker, liveBroker, liveBrokerKind, (event) => manager.broadcast(event),
+    secondaryBroker, secondaryBroker ? BrokerKind.TRADESEA_BROWSER_CONTROL : null
+  );
 
   let stopDataSource: () => void;
   let dataSourcePromise: Promise<void>;
@@ -148,7 +185,7 @@ async function main(): Promise<void> {
         symbols: ACTIVE_INSTRUMENTS.map((i) => i.symbol),
         selectorsPath: settings.browserSelectorsPath,
       },
-      async (snapshot) => setLatestBrowserAccountSnapshot(snapshot),
+      async (snapshot) => setLatestBrowserAccountSnapshot(BrokerKind.BROWSER_CONTROL, snapshot),
       async (symbol, price, cumulativeVolume) => {
         if (settings.priceSource !== PriceSource.BROWSER) return;
         // Outside the real CME Globex week (Sun 6pm ET - Fri 5pm ET), any
@@ -209,6 +246,55 @@ async function main(): Promise<void> {
     dataSourcePromise = poller.run();
   }
 
+  // Tradesea's own account-snapshot watcher -- separate CDP connection/tab
+  // from the primary watcher above, independent of TopstepX's own
+  // PRICE_SOURCE/ACCOUNT_SOURCE settings (Tradesea's account data has no
+  // other source). CRITICAL: the price-tick handler is a no-op. A second
+  // BrowserWatcher that fed engine.onPriceTick/onNewBar the way the primary
+  // one does would race a second MinuteBarAggregator against the first,
+  // double-firing decideOnBar per real bar -- a direct violation of "decideOnBar
+  // runs exactly once per bar" (see .claude/rules/replay-harness.md) and
+  // duplicate Score rows. Both venues trade off the single, already-existing
+  // TopstepX-observed price series; only account equity is genuinely
+  // per-venue for Tradesea.
+  let stopTradeseaWatcher: (() => void) | undefined;
+  let tradeseaWatcherPromise: Promise<void> | undefined;
+  // Disabled 2026-08-30, same operator request as secondaryBroker above --
+  // commented out, not deleted. stopTradeseaWatcher/tradeseaWatcherPromise
+  // stay undefined with this block off, which the shutdown handler below
+  // already treats as a no-op (`stopTradeseaWatcher?.()`).
+  /*
+  if (settings.tradeseaEnabled) {
+    const tradeseaWatcher = new BrowserWatcher(
+      {
+        cdpUrl: settings.tradeseaBrowserCdpUrl,
+        urlMatch: settings.tradeseaBrowserUrlMatch,
+        pollSeconds: settings.browserPollSeconds,
+        // Empty, not ACTIVE_INSTRUMENTS -- this watcher's price-tick handler
+        // is a no-op (see above), so there's nothing to extract prices for;
+        // leaving this non-empty just produced pointless per-cycle
+        // "price_extraction_returned_null" log noise (confirmed live,
+        // 2026-08-28 -- Tradesea's DOM ladder doesn't render bare "ES"/"NQ"
+        // rows the way TopstepX's Quotes panel does, so every cycle logged a
+        // warning for work that was always going to be thrown away anyway).
+        symbols: [],
+        contentMarker: TRADESEA_AUTHENTICATED_PAGE_MARKER,
+      },
+      async (snapshot) => {
+        setLatestBrowserAccountSnapshot(BrokerKind.TRADESEA_BROWSER_CONTROL, snapshot);
+        // Independent of TopstepX's own price ticks -- see
+        // TradingEngine.recordTradeseaEquitySnapshot's own comment for why
+        // this is the fix, not onPriceTick alone.
+        await engine.recordTradeseaEquitySnapshot();
+      },
+      async () => {} // no-op -- see this block's header comment
+    );
+    stopTradeseaWatcher = () => tradeseaWatcher.stop();
+    tradeseaWatcherPromise = tradeseaWatcher.run();
+    logger.info({ cdpUrl: settings.tradeseaBrowserCdpUrl }, "tradesea_watch_enabled");
+  }
+  */
+
   let stopOrderFlow: (() => void) | undefined;
   let orderFlowPromise: Promise<void> | undefined;
   if (settings.priceSource === PriceSource.BROWSER && settings.orderFlowEnabled) {
@@ -265,6 +351,41 @@ async function main(): Promise<void> {
   runOutcomeEvaluation();
   const outcomeEvaluationTimer = setInterval(runOutcomeEvaluation, OUTCOME_EVALUATION_INTERVAL_MS);
 
+  // Same pattern, for dealer-GEX level outcomes (2026-08-11, operator
+  // request) -- see engine/dealerLevelOutcomeEvaluator.ts. Same 5-minute
+  // cadence as the score evaluator above; most passes will find nothing to
+  // do (a snapshot's own session has to have actually ended first).
+  let dealerLevelOutcomeEvaluationRunning = false;
+  const runDealerLevelOutcomeEvaluation = (): void => {
+    if (dealerLevelOutcomeEvaluationRunning) return;
+    dealerLevelOutcomeEvaluationRunning = true;
+    evaluateDealerLevelOutcomes()
+      .catch((err) => logger.error({ err: String(err) }, "dealer_level_outcome_evaluation_failed"))
+      .finally(() => {
+        dealerLevelOutcomeEvaluationRunning = false;
+      });
+  };
+  runDealerLevelOutcomeEvaluation();
+  const dealerLevelOutcomeEvaluationTimer = setInterval(runDealerLevelOutcomeEvaluation, OUTCOME_EVALUATION_INTERVAL_MS);
+
+  // 10Y yield / VIX (2026-08-11, operator request) -- same 5-minute cadence
+  // as the outcome evaluators above; both are daily-granularity Yahoo
+  // readings that still update intraday as the current day's bar forms, so
+  // this is frequent enough to feel current without hammering Yahoo's free
+  // endpoint. See marketData/macroIndicators.ts.
+  let macroIndicatorRefreshRunning = false;
+  const runMacroIndicatorRefresh = (): void => {
+    if (macroIndicatorRefreshRunning) return;
+    macroIndicatorRefreshRunning = true;
+    refreshMacroIndicators()
+      .catch((err) => logger.error({ err: String(err) }, "macro_indicator_refresh_failed"))
+      .finally(() => {
+        macroIndicatorRefreshRunning = false;
+      });
+  };
+  runMacroIndicatorRefresh();
+  const macroIndicatorRefreshTimer = setInterval(runMacroIndicatorRefresh, OUTCOME_EVALUATION_INTERVAL_MS);
+
   // A running v3 confidence read per instrument, independent of whether any
   // strategy actually fired a signal -- see TradingEngine.runContinuousScan's
   // comment for why this is observational only and never executes. Guarded
@@ -298,6 +419,44 @@ async function main(): Promise<void> {
   runContinuousScan();
   const continuousScanTimer = setInterval(runContinuousScan, CONTINUOUS_SCAN_INTERVAL_MS);
 
+  // Dealer GEX levels (2026-08-11, operator request: "gex should compute
+  // live like any other gex chart") -- runs on its OWN wall-clock timer,
+  // independent of bar completion/continuous-scan's dedup logic. Originally
+  // this only got recomputed as a side effect of scanSymbolContinuously/
+  // decideOnBar running, both of which skip their own work entirely when
+  // the underlying futures price feed hasn't produced a genuinely new bar
+  // yet -- confirmed live this produced multi-minute gaps between
+  // computations whenever price data was slow/stale, which isn't what a
+  // "live" GEX chart means. Dealer positioning doesn't need a fresh futures
+  // tick to be worth re-polling; it just needs its own clock. Same
+  // 60s cadence as engine/dealerGexCache.ts's own CACHE_TTL_MS -- kept in
+  // sync deliberately, since a faster timer here would just re-hit a warm
+  // cache for nothing.
+  const DEALER_GEX_REFRESH_INTERVAL_MS = 60_000;
+  let dealerGexRefreshRunning = false;
+  const runDealerGexRefresh = (): void => {
+    if (dealerGexRefreshRunning) return;
+    dealerGexRefreshRunning = true;
+    (async () => {
+      const now = new Date();
+      for (const spec of ACTIVE_INSTRUMENTS) {
+        const bars = await loadRecentBars(spec.symbol, 300);
+        if (bars.length === 0) continue;
+        await getDealerLevels(spec.symbol, bars, now);
+        // Report-only 0DTE/structural split (2026-08-11, operator request) --
+        // same cadence, own cache, never read by the live gate above. See
+        // engine/dealerGexCache.ts's getDealerLevelsBucketed.
+        await getDealerLevelsBucketed(spec.symbol, bars, now);
+      }
+    })()
+      .catch((err) => logger.error({ err: String(err) }, "dealer_gex_refresh_failed"))
+      .finally(() => {
+        dealerGexRefreshRunning = false;
+      });
+  };
+  runDealerGexRefresh();
+  const dealerGexRefreshTimer = setInterval(runDealerGexRefresh, DEALER_GEX_REFRESH_INTERVAL_MS);
+
   // bars_daily (dailyTrendCache.ts's v1/v2 daily-trend factor, and
   // dailyEmaTrendCache.ts's v3 daily-EMA20 factor) was found 11 days stale
   // (2026-07-20 DB audit) -- nothing had ever kept it current after the
@@ -326,17 +485,36 @@ async function main(): Promise<void> {
   runDailyBarRefresh();
   const dailyBarRefreshTimer = setInterval(runDailyBarRefresh, DAILY_BAR_REFRESH_INTERVAL_MS);
 
+  // Automatically asks the AI assistant to build/set fresh daily-plan zones
+  // at each session boundary -- see assistant/dailyPlanScheduler.ts's own
+  // header comment. Purely opportunistic (no-op when ASSISTANT_ENABLED or
+  // the runtime actions gate is off), so safe to always start.
+  const dailyPlanSchedulerTimer = startDailyPlanScheduler();
+
   const shutdown = async () => {
     logger.info("terra_trade_stopping");
     clearInterval(outcomeEvaluationTimer);
+    clearInterval(dealerLevelOutcomeEvaluationTimer);
+    clearInterval(macroIndicatorRefreshTimer);
     clearInterval(continuousScanTimer);
+    clearInterval(dealerGexRefreshTimer);
     clearInterval(dailyBarRefreshTimer);
+    clearInterval(dailyPlanSchedulerTimer);
     stopDataSource();
     await dataSourcePromise;
+    stopTradeseaWatcher?.();
+    await tradeseaWatcherPromise;
     stopOrderFlow?.();
     await orderFlowPromise;
     await simulatedBroker.disconnect();
     await liveBroker?.disconnect();
+    // `as BrokerClient | null` -- with the Tradesea connect block above
+    // commented out, secondaryBroker's only reachable assignment is its
+    // `null` initializer, so TS narrows it to the literal `null` here and
+    // flags `.disconnect` on the resulting `never`. Widens back to the
+    // variable's real declared type; drop this cast once that block is
+    // uncommented again.
+    await (secondaryBroker as BrokerClient | null)?.disconnect();
     await app.close();
     process.exit(0);
   };

@@ -10,7 +10,9 @@ import { Decimal } from "decimal.js";
 import { beforeAll, describe, expect, it } from "vitest";
 import { makeTrendingBars } from "./fixtures.js";
 import { getLatestRegimeSnapshot } from "../src/engine/regimeSnapshotCache.js";
+import { computeContextBucket } from "../src/analytics/contextBucket.js";
 import type { OhlcBar } from "../src/regime/indicators.js";
+import type { SetupFeatures } from "../src/scoring/features.js";
 
 const TEST_DB_URL = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
 const hasRealDb = !!TEST_DB_URL && !TEST_DB_URL.includes("test:test@localhost");
@@ -59,6 +61,17 @@ describe.skipIf(!hasRealDb)("engine integration", () => {
     const bars = shiftToSyntheticWindow(makeTrendingBars(200));
     const engine = new TradingEngine(new SimulatedBroker(), null, null);
 
+    // Self-healing: a PRIOR run of this exact test that was interrupted
+    // before its own `finally` cleanup below (e.g. a vitest-level timeout
+    // under full-suite DB contention -- confirmed happens, see
+    // vitest.config.ts's testTimeout comment) leaves synthetic rows behind
+    // that collide with this run's own inserts on the (time, symbol) unique
+    // constraint. Clearing the same window up front makes a fresh run
+    // recover on its own instead of failing on someone else's leftovers.
+    await prisma.score.deleteMany({ where: { symbol: SYMBOL, time: { gte: SYNTHETIC_START } } });
+    await prisma.trade.deleteMany({ where: { symbol: SYMBOL, entryTime: { gte: SYNTHETIC_START } } });
+    await prisma.bar.deleteMany({ where: { symbol: SYMBOL, time: { gte: SYNTHETIC_START } } });
+
     try {
       // Bars are inserted and decided one at a time -- bulk-inserting the
       // whole dataset upfront and then calling onNewBar would let
@@ -106,6 +119,16 @@ describe.skipIf(!hasRealDb)("engine integration", () => {
       expect(versions.has("v3")).toBe(true);
       expect(versions.has("v5")).toBe(true);
       expect(scores.length % 4).toBe(0); // exactly one v1 + one v2 + one v3 + one v5 per signal
+
+      // persistScores writes contextBucket from the same `features` blob it
+      // stores on the row (engine/loop.ts) -- confirm the two never drift,
+      // for every row, not just one signal's worth (scoring/consensusBandit.ts
+      // depends on this column matching what the row's own features say).
+      for (const score of scores) {
+        const features = score.features as unknown as SetupFeatures;
+        const expectedBucket = computeContextBucket(features.session, features.trendLabel as "up" | "down" | "none", features.volLabel as "high" | "normal" | "low");
+        expect(score.contextBucket, `contextBucket mismatch for score ${score.id}`).toBe(expectedBucket);
+      }
     } finally {
       // Scoped to the synthetic time range, not the symbol -- "ES" is a real,
       // permanently-registered instrument other rows may legitimately use,

@@ -54,8 +54,3 @@ export async function getTrendLevels(symbol: string): Promise<TrendLevels> {
   cache.set(symbol, { levels, computedAt: Date.now() });
   return levels;
 }
-
-/** Test-only: clear the cache so tests don't see another test's stale state. */
-export function _resetTrendLevelsCacheForTests(): void {
-  cache.clear();
-}

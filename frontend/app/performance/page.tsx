@@ -37,28 +37,54 @@ export default function PerformancePage() {
       </div>
 
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <Panel title="By Strategy">
-          <table>
-            <thead>
-              <tr>
-                <th>Strategy</th>
-                <th>Trades</th>
-                <th>Win Rate</th>
-                <th>Total P&L</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data &&
-                Object.entries(data.byStrategy).map(([k, v]) => (
-                  <tr key={k}>
-                    <td className="text-white">{k}</td>
-                    <td>{v.tradeCount}</td>
-                    <td>{pct(v.winRate)}</td>
-                    <td className={v.totalPnl >= 0 ? "text-good" : "text-bad"}>${v.totalPnl.toFixed(0)}</td>
+        <Panel title="By Strategy -- which signal is better to trade, per instrument">
+          {(() => {
+            if (!data) return null;
+            const strategies = Object.keys(data.byStrategy);
+            // Column set is whatever symbols actually appear in the data (not hardcoded) --
+            // "all" is rendered last, as the blended Total column, not alongside real symbols.
+            const symbols = [...new Set(strategies.flatMap((s) => Object.keys(data.byStrategy[s]).filter((sym) => sym !== "all")))].sort();
+            return (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Strategy</th>
+                    {symbols.map((sym) => (
+                      <th key={sym}>{sym}</th>
+                    ))}
+                    <th>Total</th>
                   </tr>
-                ))}
-            </tbody>
-          </table>
+                </thead>
+                <tbody>
+                  {strategies.map((strategyId) => {
+                    const bySymbol = data.byStrategy[strategyId];
+                    return (
+                      <tr key={strategyId}>
+                        <td className="text-white">{strategyId}</td>
+                        {symbols.map((sym) => {
+                          const v = bySymbol[sym];
+                          return (
+                            <td key={sym}>
+                              {v ? (
+                                <>
+                                  {pct(v.winRate)} <span className="text-gray-500">(n={v.tradeCount})</span>
+                                </>
+                              ) : (
+                                <span className="text-gray-600">-</span>
+                              )}
+                            </td>
+                          );
+                        })}
+                        <td>
+                          {pct(bySymbol.all?.winRate)} <span className="text-gray-500">(n={bySymbol.all?.tradeCount ?? 0})</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            );
+          })()}
         </Panel>
 
         <Panel title="By Regime (trend/vol at entry)">

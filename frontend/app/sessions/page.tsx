@@ -2,7 +2,7 @@
 
 import useSWR from "swr";
 import { fetcher } from "@/lib/api";
-import { SessionPerformance, SessionLabelBreakdown } from "@/lib/types";
+import { SessionPerformance, SessionLabelBreakdown, DealerLevelsBySymbol } from "@/lib/types";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
 import { ProbabilityBar } from "@/components/ProbabilityBar";
@@ -72,6 +72,106 @@ function LabelBreakdownTable({ title, breakdown }: { title: string; breakdown: R
   );
 }
 
+function DealerLevelReportPanel() {
+  const { data } = useSWR<Record<string, string>>("/api/dealer-levels/report", fetcher, {
+    refreshInterval: 60000,
+  });
+
+  const symbols = data ? Object.keys(data).sort() : [];
+
+  return (
+    <Panel title="Session Report">
+      <p className="mb-4 text-sm text-gray-400">
+        Generated from real, currently-known data only -- dealer GEX levels, 10Y yield, VIX, and regime state. No
+        invented scenario odds: Tera Trade is accumulating its own real historical hold-rate data (see the hold-rate
+        lines below) rather than guessing at percentages the way a paid vendor report would.
+      </p>
+      {symbols.length === 0 ? (
+        <p className="text-sm text-gray-500">No report available yet -- dealer levels haven&apos;t been computed for any symbol this session.</p>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {symbols.map((symbol) => (
+            <pre key={symbol} className="whitespace-pre-wrap rounded-xl border border-white/10 bg-white/[0.02] p-4 font-mono text-xs text-gray-300">
+              {data![symbol]}
+            </pre>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function DealerLevelsPanel() {
+  const { data } = useSWR<DealerLevelsBySymbol>("/api/dealer-levels", fetcher, {
+    refreshInterval: 60000, // levels only change once per session -- a minute is plenty responsive without hammering the endpoint
+  });
+
+  const symbols = data ? Object.keys(data).sort() : [];
+
+  return (
+    <Panel title="Dealer GEX Levels">
+      <p className="mb-4 text-sm text-gray-400">
+        Options-derived dealer positioning (call wall, put wall, gamma flip) computed each session from CBOE&apos;s free
+        delayed options chain -- ES from SPX options, NQ from NDX options (see backend/src/analytics/dealerGex.ts). Live
+        entries are gated to within 1.0x ATR of one of these levels; &quot;confirmed&quot; means that wall also lines up
+        with a real price-action support/resistance pivot right now.
+      </p>
+      {symbols.length === 0 ? (
+        <p className="text-sm text-gray-500">No dealer levels computed yet this session.</p>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {symbols.map((symbol) => {
+            const levels = data![symbol]!;
+            return (
+              <div key={symbol} className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <span className="text-sm font-semibold text-white">{symbol}</span>
+                  <Badge text={SESSION_LABELS[levels.session] ?? levels.session} tone="neutral" />
+                </div>
+                <dl className="space-y-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <dt className="text-gray-400">Spot</dt>
+                    <dd className="text-gray-200">{Number(levels.spotPrice).toFixed(2)}</dd>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-gray-400">Call wall (ceiling)</dt>
+                    <dd className="flex items-center gap-2">
+                      <span className="text-gray-200">{levels.callWall ? Number(levels.callWall).toFixed(2) : "n/a"}</span>
+                      {levels.callWall && (
+                        <Badge
+                          text={levels.callWallConfirmedByPriceAction ? "confirmed" : "unconfirmed"}
+                          tone={levels.callWallConfirmedByPriceAction ? "good" : "neutral"}
+                        />
+                      )}
+                    </dd>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-gray-400">Put wall (floor)</dt>
+                    <dd className="flex items-center gap-2">
+                      <span className="text-gray-200">{levels.putWall ? Number(levels.putWall).toFixed(2) : "n/a"}</span>
+                      {levels.putWall && (
+                        <Badge
+                          text={levels.putWallConfirmedByPriceAction ? "confirmed" : "unconfirmed"}
+                          tone={levels.putWallConfirmedByPriceAction ? "good" : "neutral"}
+                        />
+                      )}
+                    </dd>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-gray-400">Gamma flip (pivot)</dt>
+                    <dd className="text-gray-200">{levels.gammaFlip ? Number(levels.gammaFlip).toFixed(2) : "n/a"}</dd>
+                  </div>
+                </dl>
+                <p className="mt-3 text-xs text-gray-500">as of {new Date(levels.time).toLocaleString()}</p>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 export default function SessionsPage() {
   const { data } = useSWR<Record<string, SessionPerformance>>("/api/analytics/session-performance", fetcher, {
     refreshInterval: 3600000, // backend caches this for 24h -- polling faster than that just re-requests the same cached response
@@ -79,6 +179,9 @@ export default function SessionsPage() {
 
   return (
     <div className="space-y-6">
+      <DealerLevelReportPanel />
+      <DealerLevelsPanel />
+
       <Panel title="Session-Segmented Trade Data">
         <p className="text-sm text-gray-400">
           New York, London, and Asian sessions are never blended together -- each has its own dataset of every setup the

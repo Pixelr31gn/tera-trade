@@ -133,15 +133,41 @@ export function cagr(equity: number[]): number | null {
   return totalReturn ** (1 / years) - 1;
 }
 
+// Non-positive equity is filtered before any ratio below is computed
+// (2026-08-11, operator report: "make sure this calculates properly" on a
+// dashboard showing Max Drawdown 100.9% and Sharpe/Sortino/Volatility all
+// blank). Confirmed empirically, not assumed: account 1/browser_control's
+// equity_curve shows a crash from $97,860.11 to $0.00 to -$873.42 and back
+// to $182.42, all within ~30 minutes on 2026-07-20, with ZERO trades
+// executing in that window (cross-checked against the trades table) -- not
+// real P&L, a data-quality artifact. A real Topstep-funded account can't
+// legitimately go negative (margin/liquidation rules stop that), so this
+// is consistent with the browser-scraping/account-identity bugs this
+// project's own history documents being hardened away in the days after
+// (per-account equity separation and Chrome page-detection hardening).
+// Left unfixed, a single such point poisons every stat here: maxDrawdown
+// can only mathematically exceed 100% if equity crossed zero, and
+// pctChange's division by a non-positive prior value produces
+// Infinity/NaN that propagates through stddev, silently nulling out
+// Sharpe/Sortino/volatility for the WHOLE account history, not just the
+// bad window. Filtered once, here, rather than at every caller, since
+// every consumer of this shared module benefits from the same guard --
+// this does not touch the underlying stored rows, only what feeds these
+// ratios.
+function excludeNonPositiveEquity(equity: number[]): number[] {
+  return equity.filter((e) => e > 0);
+}
+
 export function computePortfolioStats(equity: number[]): PortfolioStats {
-  const returns = pctChange(equity);
-  const [dd, ddDuration] = maxDrawdown(equity);
+  const clean = excludeNonPositiveEquity(equity);
+  const returns = pctChange(clean);
+  const [dd, ddDuration] = maxDrawdown(clean);
   return {
     sharpe: sharpeRatio(returns),
     sortino: sortinoRatio(returns),
     maxDrawdownPct: dd,
     maxDrawdownDurationDays: ddDuration,
     volatilityAnnualized: realizedVolatility(returns),
-    cagr: cagr(equity),
+    cagr: cagr(clean),
   };
 }

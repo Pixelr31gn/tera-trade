@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clusterLevels, computeSupportResistanceLevels, detectPivots, findNearestRelevantLevel, type Pivot } from "../src/analytics/supportResistance.js";
+import { clusterLevels, computeSupportResistanceLevels, detectPivots, findNearestRelevantLevel, findNearestTargetLevel, type Pivot } from "../src/analytics/supportResistance.js";
 import type { OhlcBar } from "../src/regime/indicators.js";
 
 function barsWithPivotLowNear(price: number): OhlcBar[] {
@@ -109,5 +109,34 @@ describe("findNearestRelevantLevel", () => {
   it("returns null when no relevant-type level exists", () => {
     const levels = [{ price: 105, touches: 1, type: "resistance" as const }];
     expect(findNearestRelevantLevel(levels, "long", 100, 5)).toBeNull();
+  });
+});
+
+describe("findNearestTargetLevel", () => {
+  it("targets resistance (ahead of price) for a long, support for a short", () => {
+    const levels = [
+      { price: 95, touches: 2, type: "support" as const },
+      { price: 105, touches: 2, type: "resistance" as const },
+    ];
+    expect(findNearestTargetLevel(levels, "long", 100)?.type).toBe("resistance");
+    expect(findNearestTargetLevel(levels, "short", 100)?.type).toBe("support");
+  });
+
+  it("picks the closest of multiple candidate target levels", () => {
+    const levels = [
+      { price: 108, touches: 2, type: "resistance" as const },
+      { price: 103, touches: 2, type: "resistance" as const },
+    ];
+    expect(findNearestTargetLevel(levels, "long", 100)?.price).toBe(103);
+  });
+
+  it("ignores a level with fewer than MIN_LEVEL_TOUCHES touches", () => {
+    const levels = [{ price: 105, touches: 1, type: "resistance" as const }];
+    expect(findNearestTargetLevel(levels, "long", 100)).toBeNull();
+  });
+
+  it("returns null when no real level exists in the trade's direction, rather than blocking on it", () => {
+    const levels = [{ price: 95, touches: 3, type: "support" as const }];
+    expect(findNearestTargetLevel(levels, "long", 100)).toBeNull();
   });
 });

@@ -56,3 +56,50 @@ export async function isPositionFlatViaPanel(page: Page, contractPrefix: string)
   if (openRoots === null) return null;
   return !openRoots.has(contractPrefix.toUpperCase());
 }
+
+// Candidate data-field names for the row's entry/fill price cell, tried in
+// order (2026-08-17, operator request: the broker previously never read back
+// a real fill price at all, always echoing the theoretical signal price
+// instead -- see brokers/browserControlBroker.ts's header comment). First
+// name is the one the operator confirmed directly against the live DOM
+// ("entry price"); the second is a fallback for a row that doesn't expose
+// that field under this exact key, following this file's existing
+// camelCase data-field convention ("symbolName", "positionSize") since a MUI
+// DataGrid's field keys don't always match its visible column labels
+// one-to-one.
+const FILL_PRICE_FIELD_CANDIDATES = ["entryPrice", "avgPrice"];
+
+/**
+ * Reads the real fill/entry price for `contractPrefix`'s currently-open row,
+ * or null if the panel, the row, or a usable price cell isn't readable --
+ * callers must fall back to the theoretical signal price on null, same
+ * "never guess" posture as isPositionFlatViaPanel above. Never throws.
+ */
+export async function readOpenPositionFillPrice(page: Page, contractPrefix: string): Promise<number | null> {
+  const table = page.locator('[data-testid="positions-display-table"]');
+  if ((await table.count()) === 0) {
+    logger.warn("positions_panel_not_found");
+    return null;
+  }
+
+  try {
+    const rows = table.locator('[role="row"][data-id]');
+    const symbolTexts = await rows.locator('[data-field="symbolName"]').allTextContents();
+    const rowIndex = symbolTexts.findIndex((s) => s.trim().replace(/^\//, "").toUpperCase() === contractPrefix.toUpperCase());
+    if (rowIndex === -1) return null;
+
+    const row = rows.nth(rowIndex);
+    for (const field of FILL_PRICE_FIELD_CANDIDATES) {
+      const cell = row.locator(`[data-field="${field}"]`);
+      if ((await cell.count()) === 0) continue;
+      const text = (await cell.first().textContent())?.trim();
+      if (!text) continue;
+      const parsed = Number(text.replace(/[^0-9.-]/g, ""));
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    }
+    return null;
+  } catch (err) {
+    logger.warn({ err: String(err), contractPrefix }, "positions_panel_fill_price_read_failed");
+    return null;
+  }
+}

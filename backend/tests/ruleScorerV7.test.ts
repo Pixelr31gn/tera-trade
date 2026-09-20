@@ -43,6 +43,7 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     orderFlowSnapshot: null,
     dailyEma20Trend: { ema: null, slope: null, label: "neutral" },
     intraday5mEmaDistanceAtr: null,
+    ema20Ema200Regime: null,
     ...overrides,
   };
 }
@@ -90,10 +91,10 @@ describe("scoreAdxRegimeAsymmetry", () => {
     expect(long.points).toBe(0); // long gets nothing at ADX>=25 per the muted, mostly-flat long-side read
   });
 
-  it("caps the long-side weight at half the short-side weight, even at its own best case", () => {
+  it("equalizes the long-side and short-side weight ceilings (2026-08-17) -- long's own best case now matches short's", () => {
     const bestLong = scoreAdxRegimeAsymmetry(10, "long");
     const bestShort = scoreAdxRegimeAsymmetry(45, "short");
-    expect(bestLong.points).toBeLessThan(bestShort.points);
+    expect(bestLong.points).toBe(bestShort.points);
   });
 
   it("treats a missing ADX reading as zero rather than throwing", () => {
@@ -147,9 +148,9 @@ describe("scoreSetupV7", () => {
     expect(strongShort.probability).toBeGreaterThan(sameFeaturesLong.probability);
   });
 
-  it("never exceeds 0.85 probability for a long -- the ADX factor's long-side max is half the short-side max", () => {
+  it("can reach 1.0 probability for a long too (2026-08-17: the ADX factor's long-side ceiling was equalized with short's)", () => {
     const bestPossibleLong = scoreSetupV7(features({ side: "long", distanceFromMa20Atr: -2, adx: 10, netPointsPerMinute: 2 }));
-    expect(bestPossibleLong.probability).toBeLessThanOrEqual(0.85);
+    expect(bestPossibleLong.probability).toBe(1.0);
   });
 
   it("can reach 1.0 probability for a short at every factor's best case", () => {

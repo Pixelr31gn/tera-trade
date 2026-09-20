@@ -3,75 +3,9 @@
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { fetcher } from "@/lib/api";
-import { ExecutionOpportunity, RecommendationScore, SystemState } from "@/lib/types";
+import { RecommendationScore } from "@/lib/types";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
-
-const EXECUTION_STATE_TONE: Record<ExecutionOpportunity["state"], "good" | "bad" | "warn" | "neutral"> = {
-  waiting: "neutral",
-  building_entry: "neutral",
-  ready: "warn",
-  resting_order: "warn",
-  filled: "good",
-  cancelled: "bad",
-};
-
-// Distinct from the Score-row-driven table below: a resting/building
-// opportunity has no Trade row yet (only a confirmed fill gets one -- see
-// executionDecisionEngine.ts), so without this it's invisible next to the
-// per-version score explanations, which never change after the fact.
-function ExecutionDecisionEnginePanel() {
-  const { data: systemState } = useSWR<SystemState>("/api/system/state", fetcher, { refreshInterval: 8000 });
-  const { data: opportunities } = useSWR<ExecutionOpportunity[]>("/api/execution/opportunities", fetcher, {
-    refreshInterval: 5000,
-  });
-
-  if (!systemState?.executionDecisionEngineEnabled) return null;
-
-  return (
-    <Panel title="Execution Decision Engine -- live opportunities">
-      {!opportunities || opportunities.length === 0 ? (
-        <p className="py-2 text-sm text-gray-500">
-          No signal is currently being worked by the EDE. It only appears here once a signal clears consensus and risk
-          approval -- see the feed below for what&apos;s been scored.
-        </p>
-      ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Symbol</th>
-              <th>Side</th>
-              <th>Strategy</th>
-              <th>State</th>
-              <th>Best entry</th>
-              <th>Age</th>
-              <th>Note</th>
-            </tr>
-          </thead>
-          <tbody>
-            {opportunities.map((o) => (
-              <tr key={o.symbol}>
-                <td className="font-medium text-white">{o.symbol}</td>
-                <td>
-                  <Badge text={o.side} tone={o.side === "long" ? "good" : "bad"} />
-                </td>
-                <td className="text-gray-400">{o.strategyId}</td>
-                <td>
-                  <Badge text={o.state.replace("_", " ")} tone={EXECUTION_STATE_TONE[o.state]} />
-                </td>
-                <td className="font-mono text-gray-300">
-                  {o.bestEntryPrice !== null ? `${o.bestEntryPrice.toFixed(2)} (${o.bestEntryScore?.toFixed(1)})` : "--"}
-                </td>
-                <td className="text-gray-400">{o.ageSeconds}s</td>
-                <td className="max-w-xs text-gray-300">{o.cancelReason ?? ""}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </Panel>
-  );
-}
 
 const VERSION_FILTERS = ["all", "v1", "v2", "v3", "v4", "v5", "v6", "v7"] as const;
 // v5/v6 (2026-07-21 / 2026-08-02) are deliberately NOT included here -- the
@@ -140,7 +74,6 @@ export default function RecommendationsPage() {
 
   return (
     <div className="space-y-6">
-      <ExecutionDecisionEnginePanel />
       <Panel
         title="Recommendation Feed"
         action={

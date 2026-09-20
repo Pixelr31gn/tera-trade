@@ -12,7 +12,6 @@ import type {
   BrokerClient,
   BrokerOrder,
   BrokerPosition,
-  ClosedSimTrade,
   HistoricalBar,
   OrderRequest,
   OrderResult,
@@ -175,32 +174,6 @@ export class SimulatedBroker implements BrokerClient {
    */
   getBracketStopPrice(accountId: string, symbol: string): Decimal | null {
     return this.brackets.get(this.key(accountId, symbol))?.stopPrice ?? null;
-  }
-
-  /** Check whether this bar's range triggered the resting stop or target. */
-  evaluateBar(accountId: string, symbol: string, high: Decimal, low: Decimal, barTime: Date): ClosedSimTrade | null {
-    const key = this.key(accountId, symbol);
-    const bracket = this.brackets.get(key);
-    if (!bracket) return null;
-
-    let hitStop: boolean;
-    let hitTarget: boolean;
-    if (bracket.side === OrderSide.BUY) {
-      hitStop = low.lte(bracket.stopPrice);
-      hitTarget = bracket.takeProfitPrice !== undefined && high.gte(bracket.takeProfitPrice);
-    } else {
-      hitStop = high.gte(bracket.stopPrice);
-      hitTarget = bracket.takeProfitPrice !== undefined && low.lte(bracket.takeProfitPrice);
-    }
-
-    if (!hitStop && !hitTarget) return null;
-
-    // Conservative: if both could have hit intrabar, assume the adverse one (stop) triggered first.
-    const exitReason: "stop" | "target" = hitStop ? "stop" : "target";
-    const exitPrice = hitStop ? bracket.stopPrice : bracket.takeProfitPrice!;
-    this.positions.delete(key);
-    this.brackets.delete(key);
-    return { symbol, accountId, exitTime: barTime, exitPrice, exitReason, customTag: bracket.customTag };
   }
 
   async getHistoricalBars(): Promise<HistoricalBar[]> {

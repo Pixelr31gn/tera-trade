@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { classifyEmaTrend } from "../src/analytics/emaTrend.js";
 import { computeRsi } from "../src/analytics/rsi.js";
-import { computeBreakoutStrengthAdjustment, computeEmaProximityAdjustment, computeOrderFlowAdjustment, computeV3Bucket, scoreSetupV3Directional } from "../src/scoring/ruleScorerV3.js";
+import { computeBreakoutStrengthAdjustment, computeEma20Ema200RegimeAdjustment, computeEmaProximityAdjustment, computeOrderFlowAdjustment, computeV3Bucket, scoreSetupV3Directional } from "../src/scoring/ruleScorerV3.js";
 import { computeAdjustmentFromOutcomes } from "../src/scoring/v3HistoricalAdjustment.js";
 import type { SetupFeatures } from "../src/scoring/features.js";
 import type { OhlcBar } from "../src/regime/indicators.js";
@@ -43,6 +43,7 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     orderFlowSnapshot: null,
     dailyEma20Trend: { ema: null, slope: null, label: "neutral" },
     intraday5mEmaDistanceAtr: null,
+    ema20Ema200Regime: null,
     ...overrides,
   };
 }
@@ -311,5 +312,32 @@ describe("computeEmaProximityAdjustment", () => {
     const far = computeEmaProximityAdjustment(-5.0, "long");
     expect(near.adjustmentPoints).toBeCloseTo(-4);
     expect(far.adjustmentPoints).toBeCloseTo(-4);
+  });
+});
+
+describe("computeEma20Ema200RegimeAdjustment", () => {
+  it("gives no adjustment when there aren't enough bars for a 200-period EMA yet", () => {
+    const result = computeEma20Ema200RegimeAdjustment(null, "long");
+    expect(result.adjustmentPoints).toBe(0);
+  });
+
+  it("rewards a long when the regime is bullish", () => {
+    const result = computeEma20Ema200RegimeAdjustment("bullish", "long");
+    expect(result.adjustmentPoints).toBeCloseTo(8);
+  });
+
+  it("rewards a short when the regime is bearish", () => {
+    const result = computeEma20Ema200RegimeAdjustment("bearish", "short");
+    expect(result.adjustmentPoints).toBeCloseTo(8);
+  });
+
+  it("penalizes a long when the regime is bearish", () => {
+    const result = computeEma20Ema200RegimeAdjustment("bearish", "long");
+    expect(result.adjustmentPoints).toBeCloseTo(-8);
+  });
+
+  it("penalizes a short when the regime is bullish", () => {
+    const result = computeEma20Ema200RegimeAdjustment("bullish", "short");
+    expect(result.adjustmentPoints).toBeCloseTo(-8);
   });
 });

@@ -32,12 +32,18 @@ export interface BrowserAccountSnapshot {
   brokerAccountId: string | null;
 }
 
-// "bal:"/"up&l:" etc. are TopstepX's own compact HUD notation (confirmed
-// against a real account page); the longer-form labels are kept as a
-// fallback for other broker platforms.
-const BALANCE_LABELS = ["bal:", "account balance", "cash balance", "balance"];
+// "bal:"/"up&l:" are TopstepX's own compact HUD notation (confirmed against
+// a real account page); "bal"/"up&l" (no colon) are Tradesea's own -- its
+// account panel renders "Bal" and "UP&L" as bare labels on their own line,
+// confirmed live 2026-08-28 against the real sandbox account (extraction
+// returned all-null before this addition). The longer-form labels are kept
+// as a fallback for other broker platforms. No label for Tradesea's "RP&L"
+// (realized P&L) -- BrowserAccountSnapshot has no field for it, and nothing
+// downstream needs it: equity is already correctly synthesized below from
+// balance + unrealized P&L alone.
+const BALANCE_LABELS = ["bal:", "bal", "account balance", "cash balance", "balance"];
 const EQUITY_LABELS = ["net liquidation", "account equity", "equity"];
-const UNREALIZED_PNL_LABELS = ["up&l:", "unrealized p&l", "open p&l"];
+const UNREALIZED_PNL_LABELS = ["up&l:", "up&l", "unrealized p&l", "open p&l"];
 
 /** Parses a dollar-like string into a number, handling $, commas, and accounting-style negatives like "($1,234.56)". */
 export function parseMoney(raw: string): number | null {

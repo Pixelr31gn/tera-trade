@@ -50,6 +50,7 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     orderFlowSnapshot: null,
     dailyEma20Trend: { ema: null, slope: null, label: "neutral" },
     intraday5mEmaDistanceAtr: null,
+    ema20Ema200Regime: null,
     ...overrides,
   };
 }

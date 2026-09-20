@@ -49,7 +49,7 @@ const hasRealDb = !!TEST_DB_URL && !TEST_DB_URL.includes("test:test@localhost");
 // gracefully), so a made-up symbol throws the moment any strategy actually
 // fires a signal.
 //
-// "GC", not "ES" -- confirmed live (2026-08-02) that a synthetic bar-time
+// "CL", not "ES" -- confirmed live (2026-08-02) that a synthetic bar-time
 // window alone stopped being enough isolation once real historical "ES" data
 // existed in the DB (backfilled for actual backtesting use): the LIVE path's
 // loadRecentBars(symbol, 300) has no time upper bound, so once ~120 synthetic
@@ -57,12 +57,40 @@ const hasRealDb = !!TEST_DB_URL && !TEST_DB_URL.includes("test:test@localhost");
 // window with real trailing 2026 "ES" data to fill the limit, while the
 // REPLAY path's ReplayDecisionContext reads only the synthetic bars handed
 // to its constructor -- a real divergence between the two paths' indicator
-// inputs, not a harness bug. "GC" is registered (getInstrument-safe) but
-// deliberately excluded from ACTIVE_INSTRUMENTS (marketData/instruments.ts),
-// so nothing ever backfills or live-feeds it -- permanently collision-free
-// regardless of what real data ES/NQ accumulate.
-const SYMBOL = "GC";
-const SYNTHETIC_START = new Date("2099-01-01T00:00:00Z");
+// inputs, not a harness bug. The symbol used here needs to be registered
+// (getInstrument-safe) but excluded from ACTIVE_INSTRUMENTS
+// (marketData/instruments.ts), so nothing ever backfills or live-feeds it --
+// permanently collision-free regardless of what real data the active symbols
+// accumulate.
+//
+// CHANGED FROM "GC" to "CL" (2026-09-08): GC was the original choice here for
+// exactly the reason above, but was itself promoted to ACTIVE_INSTRUMENTS on
+// 2026-09-03 (operator request, traded as MGC) -- silently invalidating this
+// test's isolation from that point on. Surfaced as a hard failure the same
+// day risk/engine.ts's requiresDailyPlan gate shipped (operator request: "i
+// dont want any trades taken for gc unless it has a daily trading plan") --
+// replay's own DailyPlanZone posture is always empty zones (see
+// ReplayDecisionContext's own comment), so a REQUIRE_DAILY_PLAN_SYMBOLS
+// member can now never complete a trade in replay at all, timing out this
+// test instead of reaching "the first trade entry" it's actually testing
+// for. Nothing about that gate is specific to this test's actual purpose
+// (live/replay scoring equivalence) -- CL is registered but still excluded
+// from ACTIVE_INSTRUMENTS, so it's the same kind of safe choice GC used to
+// be. If CL is ever promoted to active trading too, pick another excluded
+// symbol here rather than assuming this comment is still accurate.
+const SYMBOL = "CL";
+// 13:00 UTC = the start of the New York session (analytics/session.ts's
+// classifySession) -- 2026-08-13, this test's 200 one-minute bars used to
+// start at midnight (Asian session) and started failing the moment
+// engine/loop.ts's determineConsensus gained an Asian-only v6-v7
+// restriction (operator request), since this fixture's downtrend reliably
+// triggers via a non-v6/v7 consensus path (see the comment below) that's
+// now correctly blocked during Asian. That restriction has its own
+// dedicated coverage in tests/paperConsensus.test.ts -- this test's actual
+// purpose is live/replay bar-by-bar equivalence, unrelated to which session
+// is active, so it's shifted into New York hours to stay unaffected by it
+// (London would also have worked, since only Asian is restricted).
+const SYNTHETIC_START = new Date("2099-01-01T13:00:00Z");
 const MIN_BARS_FOR_REGIME = 120; // keep in sync with engine/loop.ts and replay/decisionCore.ts
 
 function shiftToSyntheticWindow(bars: OhlcBar[]): OhlcBar[] {
@@ -106,6 +134,16 @@ describe.skipIf(!hasRealDb)("replay equivalence (Phase 1 definition of done)", (
     const account = await ensureDefaultAccount();
     const engine = new TradingEngine(new SimulatedBroker(), null, null);
 
+    // Self-healing: see tests/engineIntegration.test.ts's identical comment --
+    // a prior run interrupted before reaching its own `finally` cleanup below
+    // (confirmed happens under full-suite DB contention, see
+    // vitest.config.ts's testTimeout comment) leaves synthetic rows behind
+    // that would otherwise collide with this run's own inserts.
+    await prisma.orderRecord.deleteMany({ where: { symbol: SYMBOL, trade: { entryTime: { gte: SYNTHETIC_START } } } });
+    await prisma.trade.deleteMany({ where: { symbol: SYMBOL, entryTime: { gte: SYNTHETIC_START } } });
+    await prisma.score.deleteMany({ where: { symbol: SYMBOL, time: { gte: SYNTHETIC_START } } });
+    await prisma.bar.deleteMany({ where: { symbol: SYMBOL, time: { gte: SYNTHETIC_START } } });
+
     // This engine instance has no live broker (null, null above), so it can
     // only ever execute in PAPER -- but onNewBar reads the real, SHARED
     // SystemState.mode, which the operator may legitimately have set to
@@ -118,6 +156,11 @@ describe.skipIf(!hasRealDb)("replay equivalence (Phase 1 definition of done)", (
     await setMode("paper");
 
     let firstTradeOpenedAtIndex: number | null = null;
+    // Captured when the live loop finds the opened trade below -- lets the
+    // replay loop assert decideOnBar's own `consensus` (not just each
+    // version's individual probability/decision) matches what live actually
+    // acted on, at the exact bar the trade opened.
+    let openedTradeSnapshot: { strategyId: string; explanation: string } | null = null;
     try {
       // ---- Feed the live path bar-by-bar, exactly as the real system does.
       // Inserting the whole dataset upfront and then calling onNewBar
@@ -144,6 +187,7 @@ describe.skipIf(!hasRealDb)("replay equivalence (Phase 1 definition of done)", (
         const openTrade = await prisma.trade.findFirst({ where: { accountId: account.id, symbol: SYMBOL, status: "open" } });
         if (openTrade) {
           firstTradeOpenedAtIndex = i;
+          openedTradeSnapshot = { strategyId: openTrade.strategyId, explanation: openTrade.explanation };
           break; // see file header's SCOPE NOTE
         }
       }
@@ -208,6 +252,27 @@ describe.skipIf(!hasRealDb)("replay equivalence (Phase 1 definition of done)", (
           expect(replayGated, `replay decision for "${liveScore.strategyId}" on ${b.time.toISOString()} has no ${version} score`).toBeDefined();
           expect(replayGated!.decision, `${version} decision mismatch on ${b.time.toISOString()}`).toBe(liveScore.decision);
           expect(replayGated!.probability, `${version} probability mismatch on ${b.time.toISOString()}`).toBeCloseTo(Number(liveScore.probability.toString()), 4);
+        }
+
+        // Bar-level check, not just per-version: at the exact bar live opened
+        // its trade, replay's own determineConsensus call must have reached
+        // the same conclusion for the same strategy -- not merely produced
+        // matching individual v1/v2/v3/v5 probabilities. execution/engine.ts's
+        // executeIfApproved builds every real trade's explanation as
+        // `CONSENSUS [${consensus.summary}]. ...` (engine/loop.ts's
+        // decisionExplanationPrefix), so the live trade row's stored summary
+        // string is a direct, already-persisted fingerprint of live's
+        // consensus.taken + representativeVersion decision -- comparing it
+        // to replay's consensus.summary here is a stronger check than
+        // reimplementing the comparison field-by-field.
+        if (i === barsUpToTrade.length - 1 && openedTradeSnapshot) {
+          const tradeDecision = replayDecisions.find((d) => d.signal?.strategyId === openedTradeSnapshot!.strategyId);
+          expect(tradeDecision, `no replay decision for the strategy ("${openedTradeSnapshot.strategyId}") whose trade live actually opened on ${b.time.toISOString()}`).toBeDefined();
+          expect(tradeDecision!.consensus.taken, `replay did not reach consensus on the bar live opened a trade on (${b.time.toISOString()})`).toBe(true);
+          expect(tradeDecision!.consensus.representativeVersion, "replay consensus reached but has no representativeVersion").not.toBeNull();
+          expect(tradeDecision!.plan?.approved, `replay's risk assessment did not approve the trade live actually opened on ${b.time.toISOString()}`).toBe(true);
+          const liveSummaryPrefix = `CONSENSUS [${tradeDecision!.consensus.summary}]. `;
+          expect(openedTradeSnapshot.explanation.startsWith(liveSummaryPrefix), "live trade's stored consensus summary does not match replay's consensus.summary").toBe(true);
         }
       }
     } finally {

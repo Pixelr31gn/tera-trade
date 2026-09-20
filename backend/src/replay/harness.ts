@@ -218,6 +218,15 @@ function resolveAgainstBar(
  * at the trailed level from the same bar's ratchet.
  */
 function updateTrailingStop(p: OpenReplayPosition, bar: OhlcBar, tickSize: Decimal): void {
+  // Mirrors SimulatedBroker.evaluateBar's own guard (simulatedBroker.ts:154):
+  // trailTicks is null whenever risk/engine.ts's hardTakeProfitDollars
+  // override fired (no real stop-loss for this trade at all, see
+  // risk/stops.ts's HARD_TAKE_PROFIT_DOLLARS, currently configured for both
+  // ES and NQ) -- there's nothing to trail. The old non-null assertion here
+  // predates that override (comment above was accurate until 2026-08-18) and
+  // crashed the very first hardTakeProfitDollars trade any replay resolved.
+  if (p.trailTicks === null) return;
+
   const high = new Decimal(bar.high);
   const low = new Decimal(bar.low);
 
@@ -225,10 +234,8 @@ function updateTrailingStop(p: OpenReplayPosition, bar: OhlcBar, tickSize: Decim
     ? Decimal.max(p.peakFavorable, high)
     : Decimal.min(p.peakFavorable, low);
 
-  // trailTicks is guaranteed set whenever a position is open: it flows from
-  // computeInitialStop (always >= 1) through an approved RiskEngine
-  // assessment, and only approved plans ever open a position (see runReplay).
-  const trailDistance = tickSize.times(p.trailTicks!);
+  // trailTicks is non-null past the guard above.
+  const trailDistance = tickSize.times(p.trailTicks);
   const trailed = p.side === "long"
     ? p.peakFavorable.minus(trailDistance)
     : p.peakFavorable.plus(trailDistance);

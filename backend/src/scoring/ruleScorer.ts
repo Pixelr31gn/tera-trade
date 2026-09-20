@@ -64,6 +64,17 @@ const WEIGHTS_V1 = {
   // operator request) -- with every other weight fixed, ppmEdge=1.1 makes
   // 1.1 / (sum of all weights) land at ~10%.
   ppmEdge: 1.1,
+  // Hand-set, unproven as a standalone weighted factor -- see
+  // analytics/emaTrend.ts's computeEma20Ema200Regime header for the backtest
+  // this came from and why that evidence doesn't directly back this specific
+  // weight (it tested the regime as a sole hard gate held across an entire
+  // regime, not as one bounded input among many at a single setup's signal
+  // time -- a materially different, unvalidated claim). Set roughly in line
+  // with dailyTrendAlignment's disagreement-penalty scale (a comparable
+  // "which side of a higher-timeframe trend is price on" signal) but weighted
+  // lower since dailyTrendAlignment has an actual walk-forward result behind
+  // it and this doesn't. 2026-08-12, operator request.
+  ema20Ema200RegimeEdge: 0.9,
 };
 
 // Setups are centered on the 1:3 risk/reward floor already enforced at
@@ -135,14 +146,56 @@ export function scoreSetup(features: SetupFeatures, version: StrategyVersion = "
   // so a setup that fights a confident daily trend rarely clears the score
   // threshold no matter how good it looks on the last few minutes of bars.
   // This is the main defense against long/short/short/long whipsaw.
+  //
+  // Retuned 2026-08-11 (operator request, after a 12-year daily-bar backfill
+  // made this testable for the first time -- see
+  // scripts/backtestDailyTrendFactor.ts, BUILD_HISTORY.md). Walk-forward over
+  // ES+NQ 2014-2026 (2,896 usable daily samples/symbol, classifyRegime() run
+  // over the exact same 200-calendar-day rolling window
+  // engine/dailyTrendCache.ts uses live, no look-ahead) found this factor's
+  // premise partly backwards:
+  //   - dailyTrendLabel="none" days OUTPERFORMED "up" days at every horizon
+  //     tested (ES 5-day forward return: none +0.278%/61.0% positive vs.
+  //     up +0.085%/58.9% positive) -- the old formula flatly penalized
+  //     "none" (-0.2) while rewarding "up" agreement on a rising scale.
+  //   - HIGH-CONFIDENCE "up" readings (0.66-1.0 confidence) showed NEGATIVE
+  //     mean forward returns at 3-day/5-day horizons on both symbols
+  //     (ES: -0.022%/-0.095%, NQ: -0.276%/-0.358%) -- the old
+  //     `raw = dailyTrendConfidence` scaling rewarded exactly the readings
+  //     this data says were worst.
+  //   - dailyTrendLabel="down" showed the strongest positive forward returns
+  //     of the three labels, growing stronger at high confidence (ES 5-day
+  //     high-confidence: +0.473%/65.1% positive; NQ: +0.973%/68.0%
+  //     positive) -- a real mean-reversion pattern the old trend-following
+  //     assumption didn't capture.
+  // This is a proxy test of the daily-trend SIGNAL alone (unconditional
+  // forward drift by label), not a full replay of v1/v2 setups agreeing with
+  // or fighting it -- that would need 12 years of 5-minute bars, which don't
+  // exist (Yahoo's free feed caps intraday history at ~60 days). Given that
+  // gap, the response here is deliberately conservative rather than a full
+  // sign flip, and touches only the two branches the evidence actually
+  // speaks to: the "none" penalty is softened since the data no longer
+  // supports a flat -0.2, and the agreement reward is capped rather than
+  // left to scale unbounded with confidence, since higher confidence was not
+  // reliably better here (in fact worse, for "up"). The weight itself
+  // (1.8) and the disagreement branch are UNCHANGED and deliberately not
+  // touched -- an earlier version of this retune halved the shared weight
+  // and broke the "fights a confident daily trend even when everything else
+  // looks good" gate test below, because that weight also scales the
+  // disagreement penalty this factor's whipsaw defense depends on, and
+  // there's no evidence here that penalty is wrong. Scoped to v1/v2 only
+  // (operator instruction) -- v3 has no equivalent factor. Operator accepted
+  // this as lower-stakes than earlier live-gate retunes specifically because
+  // v6/v7, not v1/v2's own signal, now carry the forward data-mining
+  // workload this factor used to matter more for.
   {
     let raw: number;
     let desc: string;
     if (features.dailyTrendLabel === "none") {
-      raw = -0.2;
+      raw = -0.05;
       desc = "no clear daily trend to confirm this setup's direction";
     } else if ((features.dailyTrendLabel === "up" && direction === 1) || (features.dailyTrendLabel === "down" && direction === -1)) {
-      raw = features.dailyTrendConfidence;
+      raw = Math.min(features.dailyTrendConfidence, 0.5);
       desc = `agrees with the daily ${features.dailyTrendLabel} trend (${(features.dailyTrendConfidence * 100).toFixed(0)}% confidence)`;
     } else {
       raw = -clip(0.6 + features.dailyTrendConfidence);
@@ -304,6 +357,31 @@ export function scoreSetup(features: SetupFeatures, version: StrategyVersion = "
           ? `market moving ${features.netPointsPerMinute >= 0 ? "up" : "down"} at ${Math.abs(features.netPointsPerMinute).toFixed(2)} pts/min -- ${raw >= 0 ? "supports" : "opposes"} a ${features.side} setup`
           : "not enough recent ticks for a points-per-minute reading",
     });
+  }
+
+  // 10e. 20/200 EMA crossover regime -- every version scores this, same
+  // "shared, not v2-only" family as 10b-10d above. Rewards a setup whose
+  // side agrees with which side of the 20/200 EMA crossover price currently
+  // sits on (see analytics/emaTrend.ts's computeEma20Ema200Regime), penalizes
+  // fighting it. Distinct from trendAlignment (intraday regime classifier)
+  // and dailyTrendAlignment (daily-bar higher-timeframe trend) above -- this
+  // is specifically the two-EMA-crossover signal the operator asked about.
+  {
+    let raw: number;
+    let desc: string;
+    if (features.ema20Ema200Regime === null) {
+      raw = 0;
+      desc = "not enough bars yet for a 200-period EMA -- no 20/200 crossover reading";
+    } else if ((features.ema20Ema200Regime === "bullish" && direction === 1) || (features.ema20Ema200Regime === "bearish" && direction === -1)) {
+      raw = 1.0;
+      desc = `setup direction agrees with the 20/200 EMA crossover regime (${features.ema20Ema200Regime})`;
+    } else {
+      raw = -1.0;
+      desc = `setup direction fights the 20/200 EMA crossover regime (${features.ema20Ema200Regime})`;
+    }
+    const contribution = weights.ema20Ema200RegimeEdge * raw;
+    logit += contribution;
+    factors.push({ name: "ema20Ema200RegimeEdge", contribution, description: desc });
   }
 
   if (version === "v2") {

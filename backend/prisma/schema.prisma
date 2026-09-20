@@ -109,26 +109,29 @@ model SystemState {
   /// comparable -- this only controls which one is allowed to place real orders.
   activeStrategyVersion String @default("v1") @map("active_strategy_version")
 
-  /// Live dashboard toggle for the Execution Decision Engine (see
-  /// docs/EXECUTION_DECISION_ENGINE.md) -- seeded from EXECUTION_DECISION_ENGINE_ENABLED
-  /// the first time this row is created (see execution/mode.ts's getSystemState), then
-  /// authoritative from here on, same "env sets the boot default, DB is live from then on"
-  /// pattern as `mode` above. Only takes effect when the broker kind is browser_control
-  /// (see engine/loop.ts's attemptExecution) regardless of this flag's value.
-  executionDecisionEngineEnabled Boolean @default(false) @map("execution_decision_engine_enabled")
-
   /// Reward:risk multiple applied to every signal's take-profit target (see
   /// risk/stops.ts's computeInitialStop) -- shared across all strategies and
   /// scoring versions (v1/v2/v3/v5/v6+), since target computation has never
-  /// branched by strategyId or version. Default 2.0, NOT stops.ts's own 3.0
-  /// fallback -- 2.0 was risk/engine.ts's hardcoded real-execution value
-  /// since 2026-07-29 (see assessNewTrade's comment on why), and this column
-  /// replaces that hardcoding, so the seeded default must match what was
-  /// actually trading, not the generic pure-function fallback (2026-08-02,
-  /// made operator-adjustable at runtime, no restart, same "env sets the
-  /// boot default, DB is live from then on" pattern as activeStrategyVersion
+  /// branched by strategyId or version. 2.0 was risk/engine.ts's hardcoded
+  /// real-execution value since 2026-07-29 (see assessNewTrade's comment on
+  /// why), and this column replaced that hardcoding 2026-08-02 (made
+  /// operator-adjustable at runtime, no restart, same "env sets the boot
+  /// default, DB is live from then on" pattern as activeStrategyVersion
   /// above).
-  takeProfitRMultiple Decimal @default(2.0) @map("take_profit_r_multiple")
+  ///
+  /// Raised 2.0 -> 3.0 (2026-09-08, operator instruction: "keep the sl at 1:3
+  /// of the reward always or less never more what so ever") to match
+  /// risk/stops.ts's MIN_REWARD_RISK_RATIO, the new universal reward:risk
+  /// floor risk/engine.ts's assessNewTrade now rejects every trade against --
+  /// at 2.0 (below the floor), every real trade relying on this fallback
+  /// target (no qualifying S/R level) would be computed then immediately
+  /// rejected by that floor, which manages risk in the sense of trading less
+  /// but doesn't reflect what the operator actually asked for here. Existing
+  /// live SystemState rows are NOT touched by this seed default -- the
+  /// running value was separately updated the same day via
+  /// POST /api/system/take-profit-r-multiple; this default only matters for
+  /// a fresh account/reset going forward.
+  takeProfitRMultiple Decimal @default(3.0) @map("take_profit_r_multiple")
 
   /// Confidence-tier position sizing (see risk/sizing.ts's
   /// computeConfidenceTierQuantity) -- quantity placed is set directly by
@@ -142,6 +145,25 @@ model SystemState {
   confidenceTier2Quantity  Int     @default(2) @map("confidence_tier_2_quantity")
   confidenceTier3Threshold Decimal @default(0.85) @map("confidence_tier_3_threshold")
   confidenceTier3Quantity  Int     @default(3) @map("confidence_tier_3_quantity")
+
+  /// Tradesea's own independent live-enable switch (see
+  /// execution/mode.ts's setTradeseaLiveEnabled) -- deliberately separate
+  /// from `mode` above, which stays TopstepX-only. Requires
+  /// TRADESEA_ENABLED && TRADESEA_LIVE_TRADING_CONFIRMED before it can be
+  /// set true, same layered-gate posture as `mode` reaching LIVE. Defaults
+  /// false so an existing install is unaffected.
+  tradeseaLiveEnabled Boolean @default(false) @map("tradesea_live_enabled")
+
+  /// The AI assistant's own independent kill-switch for its autonomous
+  /// (no human confirmation) execution capability -- see
+  /// execution/mode.ts's setAssistantActionsEnabled. Deliberately separate
+  /// from `mode`/`tradeseaLiveEnabled` above: a single flip here disables
+  /// only the assistant's write-tools, without touching TopstepX's or
+  /// Tradesea's own trading gates at all. Requires ASSISTANT_ENABLED &&
+  /// ASSISTANT_ACTIONS_CONFIRMED before it can be set true, same
+  /// layered-gate posture as `tradeseaLiveEnabled`. Defaults false so an
+  /// existing install is unaffected.
+  assistantActionsEnabled Boolean @default(false) @map("assistant_actions_enabled")
 
   @@map("system_state")
 }
@@ -222,6 +244,16 @@ model Score {
   /// can be adjusted by how well similar-looking setups actually performed.
   v3Bucket String? @map("v3_bucket")
 
+  /// Session x intraday-trend x intraday-vol fingerprint at signal time --
+  /// version-agnostic (populated for every strategyVersion row, unlike
+  /// v3Bucket above), see analytics/contextBucket.ts. Used by
+  /// scoring/consensusBandit.ts to compare v1/v2/v3's own resolved
+  /// performance within the same market-condition bucket, so the consensus
+  /// gate can learn which version to trust per bucket instead of a fixed
+  /// majority-vote rule. Only populated going forward; existing rows are
+  /// backfilled from `features` by scripts/backfillContextBucket.ts.
+  contextBucket String? @map("context_bucket")
+
   /// Denormalized copies of the same-named fields inside `features` (JSON).
   /// The session-performance/strategy-comparison analytics queries only
   /// ever need these three scalars, not the whole feature vector -- pulling
@@ -243,64 +275,66 @@ model Score {
   @@index([session, outcomeLabel])
   @@index([strategyVersion, session, outcomeLabel])
   @@index([strategyVersion, v3Bucket, time])
+  @@index([strategyVersion, contextBucket, time])
   @@index([time, session])
   @@index([outcomeLabel, tradeId])
   @@map("scores")
 }
 
 model Trade {
-  id                 Int       @id @default(autoincrement())
-  accountId          Int       @map("account_id")
-  symbol             String
-  strategyId         String    @map("strategy_id")
-  side               String
-  quantity           Int
-  entryTime          DateTime  @map("entry_time")
-  entryPrice         Decimal   @map("entry_price") @db.Decimal(18, 8)
-  stopPrice          Decimal   @map("stop_price") @db.Decimal(18, 8)
-  takeProfitPrice    Decimal?  @map("take_profit_price") @db.Decimal(18, 8)
-  exitTime           DateTime? @map("exit_time")
-  exitPrice          Decimal?  @map("exit_price") @db.Decimal(18, 8)
-  exitReason         String?   @map("exit_reason")
-  pnl                Decimal?  @db.Decimal(18, 2)
-  fees               Decimal   @default(0) @db.Decimal(18, 2)
-  mae                Decimal?  @db.Decimal(18, 8)
-  mfe                Decimal?  @db.Decimal(18, 8)
-  score              Decimal?  @db.Decimal(6, 5)
-  /// Execution Decision Engine only (null for market-order trades via execution/engine.ts) --
-  /// the winning entryQualityModel ladder score (0-105ish, see execution/entryQualityModel.ts)
-  /// at the moment the resting limit order filled. Data collection for the (deferred)
-  /// self-adjusting weight recalibration described in the EDE spec -- not yet consumed anywhere.
-  entryQualityScore  Decimal?  @db.Decimal(6, 2) @map("entry_quality_score")
-  /// Execution Decision Engine only -- seconds between the resting limit order being placed and
-  /// its confirmed fill (see execution/executionDecisionEngine.ts). Null for market-order trades,
-  /// where fill is effectively instantaneous and there's nothing meaningful to record.
-  timeToFillSeconds  Int?      @map("time_to_fill_seconds")
-  regimeTrendAtEntry String?   @map("regime_trend_at_entry")
-  regimeVolAtEntry   String?   @map("regime_vol_at_entry")
-  explanation        String    @default("")
-  status             String    @default("open")
-  brokerOrderId      String?   @map("broker_order_id")
+  id                    Int       @id @default(autoincrement())
+  accountId             Int       @map("account_id")
+  symbol                String
+  strategyId            String    @map("strategy_id")
+  side                  String
+  quantity              Int
+  entryTime             DateTime  @map("entry_time")
+  entryPrice            Decimal   @map("entry_price") @db.Decimal(18, 8)
+  stopPrice             Decimal   @map("stop_price") @db.Decimal(18, 8)
+  takeProfitPrice       Decimal?  @map("take_profit_price") @db.Decimal(18, 8)
+  exitTime              DateTime? @map("exit_time")
+  exitPrice             Decimal?  @map("exit_price") @db.Decimal(18, 8)
+  exitReason            String?   @map("exit_reason")
+  pnl                   Decimal?  @db.Decimal(18, 2)
+  fees                  Decimal   @default(0) @db.Decimal(18, 2)
+  mae                   Decimal?  @db.Decimal(18, 8)
+  mfe                   Decimal?  @db.Decimal(18, 8)
+  score                 Decimal?  @db.Decimal(6, 5)
+  regimeTrendAtEntry    String?   @map("regime_trend_at_entry")
+  regimeVolAtEntry      String?   @map("regime_vol_at_entry")
+  explanation           String    @default("")
+  status                String    @default("open")
+  brokerOrderId         String?   @map("broker_order_id")
   /// Which broker actually owns this position ("simulated" | "browser_control" | "projectx") -- recorded at entry so an
   /// open trade is always managed by the correct broker regardless of later system-mode switches (see engine/loop.ts's
   /// brokerForTrade). Defaults to "simulated" for pre-migration rows; safe since no trade was open when this was added.
-  brokerKind         String    @default("simulated") @map("broker_kind")
+  brokerKind            String    @default("simulated") @map("broker_kind")
   /// v1.3: has a real broker-side Trailing Stop order been placed for this trade yet (see
   /// engine/loop.ts's trailing-stop activation check -- once price reaches halfway to the
   /// take-profit target, a real trailing-stop order replaces our own internal hard-stop-price
   /// check as the trade's downside protection). False for every trade before v1.3 and for any
   /// trade that hasn't reached the activation threshold yet.
-  trailingStopPlaced Boolean   @default(false) @map("trailing_stop_placed")
+  trailingStopPlaced    Boolean   @default(false) @map("trailing_stop_placed")
+  /// 2026-09-04: has a real broker-side take-profit LIMIT order been placed for this trade yet
+  /// (see engine/loop.ts's activateTakeProfitOrder) -- attempted right at entry, retried each tick
+  /// until it succeeds. Once true, this trade's protection against a missed target no longer
+  /// depends on our own price-feed polling staying healthy: manageLiveOpenTrade's own hitTarget
+  /// check stands down and defers entirely to isPositionFlat detecting the broker's own fill (same
+  /// pattern trailingStopPlaced already uses for the stop side). False for every trade before this
+  /// existed and for any trade with brokerKind "simulated" (SimulatedBroker doesn't implement
+  /// placeTakeProfitOrder).
+  takeProfitOrderPlaced Boolean   @default(false) @map("take_profit_order_placed")
   /// v1.3 operator override (Positions panel "let it ride" toggle) -- once true, the internal
   /// take-profit check in engine/loop.ts's manageLiveOpenTrade no longer force-closes this trade
   /// at its stored takeProfitPrice; only the real trailing-stop order (once placed) can close it.
   /// Meant for exactly one case: the operator sees something the system doesn't and wants to let
   /// a winner run past its original target.
-  letItRide          Boolean   @default(false) @map("let_it_ride")
+  letItRide             Boolean   @default(false) @map("let_it_ride")
 
-  account Account       @relation(fields: [accountId], references: [id])
-  orders  OrderRecord[]
-  scores  Score[]
+  account          Account           @relation(fields: [accountId], references: [id])
+  orders           OrderRecord[]
+  scores           Score[]
+  assistantActions AssistantAction[]
 
   @@index([symbol])
   @@index([accountId, status, brokerKind])
@@ -328,6 +362,116 @@ model OrderRecord {
   @@map("orders")
 }
 
+// Dealer gamma exposure (GEX) levels, computed from CBOE's free delayed
+// index-options chain (analytics/dealerGex.ts's pure math, marketData/
+// dealerGex.ts's fetch/persist) -- one row per (symbol, session), refreshed
+// at each session boundary. ES uses SPX options, NQ uses NDX (see
+// marketData/dealerGex.ts's CBOE_TICKER_BY_SYMBOL comment for why -- no
+// options exist on the futures contracts themselves). callWallConfirmed/
+// putWallConfirmed record whether that wall also lines up with a real
+// price-action S/R pivot (analytics/supportResistance.ts) at computation
+// time -- the "independent source agrees" signal used to rank which levels
+// are actually worth trading.
+model DealerGexLevel {
+  id                Int      @id @default(autoincrement())
+  time              DateTime
+  symbol            String
+  session           String
+  spotPrice         Decimal  @map("spot_price") @db.Decimal(18, 8)
+  callWall          Decimal? @map("call_wall") @db.Decimal(18, 8)
+  putWall           Decimal? @map("put_wall") @db.Decimal(18, 8)
+  gammaFlip         Decimal? @map("gamma_flip") @db.Decimal(18, 8)
+  callWallConfirmed Boolean  @default(false) @map("call_wall_confirmed")
+  putWallConfirmed  Boolean  @default(false) @map("put_wall_confirmed")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  /// Which expiration window this row's GEX was computed from (2026-08-11, operator request: split the
+  /// CBOE chain by expiration so the narrative report can compare a 0DTE book against the broader
+  /// structural one, matching how a real GEX report actually talks about them diverging). "blended" is the
+  /// ORIGINAL, still-unchanged 0-7-day-inclusive computation this column didn't used to need to name --
+  /// it's what feeds risk/engine.ts's live proximity gate and /api/dealer-levels, and its math is
+  /// byte-for-byte identical to before this column existed. "0dte"/"structural" are new, additive,
+  /// report-only splits of that same window (same-day expirations vs. the 1-7-day-out remainder) and are
+  /// NEVER read by the live gate -- adding them must not change which trades execute. Defaulted so the
+  /// migration backfills every pre-existing row as "blended" (correct: that's what they all were).
+  bucket String @default("blended") @map("bucket") // "blended" | "0dte" | "structural"
+
+  /// Outcome tracking (2026-08-11, operator request: build real historical scenario odds before generating
+  /// any report that implies them) -- walked forward against the bars that actually followed, once this
+  /// session's lookforward window (analytics/session.ts's getSessionEnd) has closed. See
+  /// engine/dealerLevelOutcomeEvaluator.ts. Null until evaluated; outcomeEvaluatedAt null means "not yet
+  /// evaluated," not "evaluated and found nothing."
+  callWallOutcome    String?   @map("call_wall_outcome") // "not_reached" | "rejected" | "broken"
+  putWallOutcome     String?   @map("put_wall_outcome") // "not_reached" | "rejected" | "broken"
+  gammaFlipOutcome   String?   @map("gamma_flip_outcome") // "stayed_above" | "stayed_below" | "crossed_up" | "crossed_down"
+  outcomeEvaluatedAt DateTime? @map("outcome_evaluated_at")
+
+  @@index([symbol, time])
+  @@index([symbol, bucket, time])
+  @@index([outcomeEvaluatedAt])
+  @@map("dealer_gex_levels")
+}
+
+/// Shadow-mode GEX observation log (2026-08-28, gamma-desk research brief's recommended first
+/// deliverable) -- for every continuous-scan setup that reaches a consensus decision, records
+/// the GEX regime/levels active at that moment alongside the actual consensus outcome and every
+/// version's score. Purely additive and read-only from the live loop's perspective: nothing here
+/// feeds risk/engine.ts or any consensus rule, and writing this row can never change which trades
+/// execute -- see engine/shadowGexSignalLogger.ts, where every write is wrapped so a failure here
+/// can never interrupt the trading loop. The prior dealer-GEX proximity gate was removed
+/// 2026-08-12 for vetoing good setups; this exists to accumulate the real live sample needed
+/// before proposing anything like it again, per .claude/rules/replay-harness.md's "report in R
+/// with standard error, not an impression" rule -- CBOE's historical options chain can't be
+/// backfilled, so this can only ever be built from live data.
+model ShadowGexSignal {
+  id         Int      @id @default(autoincrement())
+  time       DateTime
+  symbol     String
+  session    String
+  side       String
+  strategyId String   @map("strategy_id")
+
+  closePrice Decimal  @map("close_price") @db.Decimal(18, 8)
+  callWall   Decimal? @map("call_wall") @db.Decimal(18, 8)
+  putWall    Decimal? @map("put_wall") @db.Decimal(18, 8)
+  gammaFlip  Decimal? @map("gamma_flip") @db.Decimal(18, 8)
+  /// "positive_gamma" | "negative_gamma" | "unknown" -- see analytics/gexAlignment.ts.
+  gexRegime  String   @map("gex_regime")
+
+  consensusTaken              Boolean @map("consensus_taken")
+  consensusAverageProbability Decimal @map("consensus_average_probability") @db.Decimal(6, 5)
+  /// Per-version {probability, decision, modelUsed} at the moment this row was logged, e.g.
+  /// {"v1": {...}, "v2": {...}, ...} -- raw Json rather than a column per version so a new
+  /// scorer version never needs a migration to show up here.
+  versionScores               Json    @map("version_scores")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([symbol, time])
+  @@index([gexRegime, consensusTaken])
+  @@map("shadow_gex_signals")
+}
+
+/// Macro context for the narrative session report (2026-08-11, operator request) -- 10Y Treasury yield
+/// (^TNX) and VIX (^VIX), both free via the same Yahoo Finance chart endpoint marketData/backfill.ts
+/// already uses, confirmed live: ^TNX and ^VIX both resolve real current values through it. Not derived
+/// from anything Tera Trade computes itself -- these are genuine external readings.
+model MacroIndicator {
+  id        Int      @id @default(autoincrement())
+  time      DateTime
+  symbol    String // "^TNX" | "^VIX"
+  value     Decimal  @db.Decimal(10, 4)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  /// A real duplicate-row bug, caught live (2026-08-11): Yahoo's still-forming "today" daily bar keeps
+  /// the same `time` anchor but its `value` updates intraday, and the 5-minute refresh timer was doing a
+  /// blind create() every tick -- confirmed multiple rows for the identical (symbol, time) pair with
+  /// different values within an hour of this table existing. This constraint plus refreshMacroIndicators's
+  /// switch to upsert (marketData/macroIndicators.ts) fixes it at the source.
+  @@unique([symbol, time])
+  @@map("macro_indicators")
+}
+
 model EquityCurvePoint {
   time       DateTime
   accountId  Int      @map("account_id")
@@ -344,4 +488,335 @@ model EquityCurvePoint {
   @@id([time, accountId, brokerKind])
   @@index([accountId, brokerKind, time])
   @@map("equity_curve")
+}
+
+/// One row per turn in the AI assistant's conversation (see backend/src/assistant/).
+/// `content` is the full Gemini content-part array (text + functionCall + functionResponse
+/// parts), not just display text -- kept verbatim so a real exchange can be replayed/
+/// audited exactly as the model saw and produced it, not reconstructed from a lossy summary.
+model AssistantMessage {
+  id        Int      @id @default(autoincrement())
+  role      String // "user" | "assistant"
+  content   Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  actions AssistantAction[]
+
+  @@index([createdAt])
+  @@map("assistant_messages")
+}
+
+/// Audit log of every real action the assistant has taken -- written on every write-tool
+/// call regardless of outcome (see assistant/tools.ts's withAssistantAudit), since this is
+/// the operator's only after-the-fact visibility into what an autonomous, no-confirmation
+/// agent actually did (see execution/mode.ts's setAssistantActionsEnabled and its own
+/// header comment on why this table exists). Broadcast on the live WebSocket feed at the
+/// same time this row is written (api/wsManager.ts) so it's also visible in real time, not
+/// only after a page refresh.
+model AssistantAction {
+  id            Int      @id @default(autoincrement())
+  toolName      String   @map("tool_name")
+  input         Json
+  status        String // "success" | "error"
+  resultSummary String   @map("result_summary")
+  rawResult     Json?    @map("raw_result")
+  errorMessage  String?  @map("error_message")
+  tradeId       Int?     @map("trade_id")
+  messageId     Int?     @map("message_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  trade   Trade?            @relation(fields: [tradeId], references: [id])
+  message AssistantMessage? @relation(fields: [messageId], references: [id])
+
+  @@index([createdAt])
+  @@index([tradeId])
+  @@map("assistant_actions")
+}
+
+/// A key price zone for one symbol, for one trading SESSION -- set by the AI assistant's
+/// set_daily_plan_zones tool (see assistant/tools.ts), either asked manually in chat or
+/// automatically at each session boundary (assistant/dailyPlanScheduler.ts, 2026-08-29
+/// operator request: "is the daily plan going to be timer based activated? by session
+/// times"). Read by risk/engine.ts's assessNewTrade (via engine/dailyPlanZoneCache.ts's TTL
+/// cache) as a real execution gate, not just a dashboard filter -- an entry price outside
+/// every zone for its symbol this session is either rejected outright ("hard") or
+/// size-penalized ("soft"), per that zone's own enforcement, matching the same "fail toward
+/// not trading" posture as every other risk/engine.ts gate. Deliberately entirely opt-in per
+/// symbol: a symbol with no rows for the current session is completely unaffected by this
+/// gate, same as before this feature existed.
+/// `sessionStart` (2026-08-29, replaces the original `tradingDate` UTC-calendar-day scoping)
+/// is analytics/session.ts's getSessionStart(now) -- a precise timestamp identifying exactly
+/// which New York/London/Asian session this zone belongs to, so zones naturally and silently
+/// expire at each session boundary (a new session simply has zero rows until refreshed) rather
+/// than persisting stale across a whole UTC day regardless of how much the market structure
+/// has moved since. Replay always sees zero zones for any session (see
+/// replay/replayDecisionContext.ts's own comment) -- an LLM-authored "this session's plan" has
+/// no meaning for a historical replay date, so this is never treated as degraded/missing data
+/// there, unlike orderFlow/dealerLevels.
+model DailyPlanZone {
+  id           Int      @id @default(autoincrement())
+  symbol       String
+  sessionStart DateTime @map("session_start")
+  priceLow     Decimal  @map("price_low") @db.Decimal(18, 8)
+  priceHigh    Decimal  @map("price_high") @db.Decimal(18, 8)
+  /// "hard" = reject any entry outside this zone outright; "soft" = allow it, but size-penalized.
+  /// See risk/engine.ts's classifyDailyPlanZone for how multiple zones interact.
+  enforcement  String
+  label        String
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([symbol, sessionStart])
+  @@map("daily_plan_zones")
+}
+
+/// The AI assistant's own estimate of the likely achievable point move for one symbol, for one
+/// trading SESSION (2026-08-31, operator request, replacing the previously hardcoded
+/// risk/stops.ts HARD_TAKE_PROFIT_DOLLARS values: "it shouldn't go for short profits, it should
+/// go for the best trade possible based on the trading range or direction but divided by 3" --
+/// the assistant supplies its own read of how far price can realistically travel this session
+/// (informed by the same range/dealer-gamma/regime data behind DailyPlanZone), and
+/// risk/engine.ts's hard-take-profit path takes a fraction of THIS number
+/// (risk/stops.ts's DAILY_PLAN_TAKE_PROFIT_FRACTION) as the real target -- the fraction itself
+/// is a system-owned constant, not re-decided by the LLM each time. Same session-scoping as
+/// DailyPlanZone (engine/dailyPlanTakeProfitCache.ts, analytics/session.ts's getSessionStart) --
+/// expires at each session boundary. Falls back to the old static HARD_TAKE_PROFIT_DOLLARS value
+/// when no row exists yet for a symbol this session (assistant hasn't run, or the session just
+/// started). Replay always sees no row for any session, same posture as DailyPlanZone.
+model DailyPlanTakeProfitTarget {
+  id               Int      @id @default(autoincrement())
+  symbol           String
+  sessionStart     DateTime @map("session_start")
+  likelyMovePoints Decimal  @map("likely_move_points") @db.Decimal(18, 8)
+  label            String
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@index([symbol, sessionStart])
+  @@map("daily_plan_take_profit_targets")
+}
+
+/// A strategyId temporarily taken out of live signal generation -- set by the AI
+/// assistant's disable_strategy tool (see assistant/tools.ts), or the operator directly
+/// (2026-08-30, operator request, in response to a live strategy-performance breakdown
+/// showing breakout_donchian_20 lagging heavily). Presence of a row = disabled; there is
+/// no separate boolean, since a strategy with no row here is enabled by default, same
+/// "opt-in gate" shape as DailyPlanZone. Reversible by design (enable_strategy deletes the
+/// row) -- meant for "temporarily restrict this regime-losing strategy," not a permanent
+/// removal, which would just delete it from strategy/index.ts's ALL_STRATEGIES instead.
+/// Read by replay/decisionCore.ts's decideOnBar (via engine/strategyEnablementCache.ts) and
+/// engine/loop.ts's continuous-scan path -- both real live-signal-generation entry points.
+/// Replay always sees every strategy enabled (see replay/replayDecisionContext.ts's own
+/// comment) -- same reasoning as DailyPlanZone: a live operator/assistant toggle has no
+/// meaning for a historical replay date.
+model DisabledStrategy {
+  id         Int      @id @default(autoincrement())
+  strategyId String   @unique @map("strategy_id")
+  reason     String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("disabled_strategies")
+}
+
+/// Per-instrument executable toggle (2026-09-03, operator request: "add a toggle so i can turn
+/// off which markets are executable like nd es or gc") -- coarser than DisabledStrategy above:
+/// this stops EVERY strategy/path for the symbol, not just one. Same "presence = disabled" shape,
+/// same replay posture (replay always sees every symbol enabled -- see
+/// replay/replayDecisionContext.ts's own comment on DisabledStrategy for why: a live
+/// operator toggle has no meaning for a historical replay date).
+model DisabledSymbol {
+  id        Int      @id @default(autoincrement())
+  symbol    String   @unique
+  reason    String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("disabled_symbols")
+}
+
+/// Finer-grained than either gate above: takes ONE strategyId out of live signal generation for
+/// ONE specific symbol only, leaving it enabled on every other symbol (2026-09-04, operator
+/// request, in direct response to the per-symbol performance breakdown surfacing that
+/// continuous_v3_scan_long -- fully disabled 2026-09-03 off its blended 46.4% win rate -- was
+/// actually strong on ES (67.6%) and only losing on NQ/GC: "only trade the winning signals...
+/// only trading es and not allowing that strategy to trade nq or gc"). Same "presence = disabled"
+/// shape and same replay posture as DisabledStrategy/DisabledSymbol (a live operator toggle has no
+/// meaning for a historical replay date). Checked ALONGSIDE DisabledStrategy, not instead of it --
+/// a strategyId can be blocked by either gate independently; this one just adds a symbol dimension
+/// without requiring the coarser table to also track it.
+model DisabledStrategySymbol {
+  id         Int      @id @default(autoincrement())
+  strategyId String   @map("strategy_id")
+  symbol     String
+  reason     String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@unique([strategyId, symbol])
+  @@map("disabled_strategy_symbols")
+}
+
+/// Scout (see backend/src/scout/) -- a local dev-environment agent, separate from the trading
+/// AI assistant above, that watches two things: this repo's own build activity (Claude Code
+/// session logs, file touches, shell history) and Tera Trade's own runtime data (trades, scores,
+/// AssistantAction corrections -- all read-only, reusing what's already logged, never writing to
+/// any of it). When something looks both FREQUENT (recurring) and a source of FRICTION (tedious/
+/// costly to keep redoing by hand), Scout drafts a pitch for a small agent that would fix it.
+///
+/// This is the one durable "signal store" Scout writes to -- deliberately a single upserted table,
+/// not a raw event log. write_pitch (scout/pitchStore.ts) keys on `dedupeKey` (a stable
+/// fingerprint of the recurring thing, e.g. a slugified title): a fresh observation of something
+/// already pitched bumps occurrenceCount/lastSeenAt and appends to evidenceLog rather than
+/// creating a duplicate row. Rows are NEVER deleted (operator requirement, 2026-09-03: "pitches
+/// rerank as new signal arrives and can resurface later") -- `score` (scout/ranking.ts) is
+/// recomputed on every touch from occurrenceCount, recency, and the operator's own rating, so a
+/// pitch that goes quiet just sinks in the ranking rather than disappearing, and can climb back up
+/// on its own if the same friction recurs later.
+model ScoutPitch {
+  id        Int    @id @default(autoincrement())
+  /// Fingerprint identifying "the same recurring pitch" across separate Scout ticks -- see this
+  /// model's header comment. Derived from the pitch title (scout/pitchStore.ts's slugify), so two
+  /// LLM turns describing the same underlying friction in slightly different words still collide
+  /// on the same row as long as the title stays recognizably the same.
+  dedupeKey String @unique @map("dedupe_key")
+
+  title             String
+  /// What recurring frequency+friction this addresses, in plain English -- same "why, not what"
+  /// posture as explain/engine.ts's rendered explanations.
+  problem           String
+  /// What the proposed new agent would actually DO.
+  proposedAgent     String @map("proposed_agent")
+  /// Rough tool/integration list the proposed agent would need -- plain strings, not a schema; this
+  /// is a pitch, not a build spec. See TailorBlueprint below (backend/src/taylor/) for the agent
+  /// that turns an APPROVED (highly-rated) pitch into an actual detailed build spec.
+  toolsNeeded       Json   @map("tools_needed")
+  /// Rough, not precise -- e.g. "~$5-15/mo, a handful of LLM calls/day."
+  costEstimate      String @map("cost_estimate")
+  /// Rough run-frequency estimate -- e.g. "daily", "on each PR", "hourly".
+  frequencyEstimate String @map("frequency_estimate")
+  /// "frequency" | "friction" | "both" -- Scout is specifically built to find the "both" overlap,
+  /// but a strong single-signal observation can still be worth pitching on its own.
+  category          String
+
+  /// Append-only log of each observation that supported/reinforced this pitch -- {at, source,
+  /// summary} entries, capped (see pitchStore.ts's EVIDENCE_LOG_MAX_ENTRIES) so a long-lived pitch
+  /// can't grow this column unboundedly. This is the "why does this pitch still rank where it
+  /// does" audit trail.
+  evidenceLog     Json @default("[]") @map("evidence_log")
+  occurrenceCount Int  @default(1) @map("occurrence_count")
+
+  /// Never deleted (see header comment). "open" | "blueprinted" -- flips to "blueprinted" the
+  /// moment Taylor (backend/src/taylor/) writes this pitch's TailorBlueprint, so Taylor's own
+  /// list_approved_pitches tool naturally stops re-offering something it's already turned into a
+  /// build spec. Not a terminal state in any strict sense -- nothing currently reverts it, but nor
+  /// is there a reason to: a re-rated or re-reinforced pitch can still be read/rated normally, it
+  /// just won't be picked up by Taylor again automatically.
+  status String @default("open")
+
+  /// Recomputed on every write_pitch upsert and every compile_digest run (scout/ranking.ts) -- not
+  /// read as a precise utility score, just the current sort key.
+  score Decimal @default(0) @db.Decimal(10, 4)
+
+  /// The operator's own 1-5 rating (scout/ranking.ts folds this back into `score`) -- null until
+  /// reviewed. Set via `npm run scout:rate` (backend/scripts/scoutRate.ts), reading the digest.
+  rating     Int?
+  ratingNote String?   @map("rating_note")
+  ratedAt    DateTime? @map("rated_at")
+
+  firstSeenAt DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime @default(now()) @map("last_seen_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+
+  blueprint TailorBlueprint?
+
+  @@index([status, score])
+  @@map("scout_pitches")
+}
+
+/// Taylor (backend/src/taylor/) -- the agent Scout itself recommended (pitch "pitch-to-agent
+/// auto-provisioner", 2026-09-03): reads pitches the OPERATOR has approved (rated >=
+/// TAYLOR_APPROVAL_MIN_RATING, default 4 -- see core/config.ts) and turns each one into a
+/// detailed build blueprint. Deliberately scoped to writing a BLUEPRINT DOCUMENT, not generating
+/// or committing runtime code -- see backend/src/taylor/systemPrompt.ts's header comment for why.
+/// One row per pitch (pitchId unique): a pitch is blueprinted once, then ScoutPitch.status flips
+/// to "blueprinted" so it isn't re-offered to Taylor on a later tick.
+model TailorBlueprint {
+  id      Int    @id @default(autoincrement())
+  pitchId Int    @unique @map("pitch_id")
+  content String
+
+  /// The rating the source pitch had AT THE MOMENT this blueprint was generated -- an audit trail
+  /// entry, since the pitch's own `rating` can still change later (a re-review) without this row
+  /// updating to match.
+  pitchRatingAtGeneration Int @map("pitch_rating_at_generation")
+
+  /// Auto-Provisioner (backend/src/autoProvisioner/, pitch #2's own build) state -- "pending"
+  /// (default, not yet picked up) | "staged" (scaffolded + written to provisionedPath for human
+  /// review, tsc/lint results in provisioningNotes) | "lint_failed" (scaffolded but tsc/eslint
+  /// failed -- provisioningNotes has the errors) | "error" (the LLM turn itself failed). Never
+  /// "merged"/"deployed" -- this repo's own convention is that commits/pushes only happen when a
+  /// human asks, so the Auto-Provisioner has no tool that could reach that state; a human moving
+  /// staged files into src/ happens outside this column entirely.
+  provisioningStatus String    @default("pending") @map("provisioning_status")
+  /// Repo-relative path to the staged scaffold directory once provisioningStatus is "staged" or
+  /// "lint_failed", e.g. ".scout-state/provisioner/12-some-pitch/". Null while "pending".
+  provisionedPath    String?   @map("provisioned_path")
+  /// tsc/eslint output, or the generation error, for whatever provisioningStatus currently says.
+  provisioningNotes  String?   @map("provisioning_notes")
+  provisionedAt      DateTime? @map("provisioned_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  pitch ScoutPitch @relation(fields: [pitchId], references: [id])
+  /// Back-reference for ArtificeVerdict's own blueprintId relation below -- Prisma requires both
+  /// sides declared. Optional: most blueprints have no verdict yet until Artifice reviews them.
+  artificeVerdict ArtificeVerdict?
+
+  @@index([provisioningStatus])
+  @@map("tailor_blueprints")
+}
+
+/// Artifice's own output (backend/src/artifice/) -- the triage step between Taylor writing a
+/// blueprint and a human (or the Auto-Provisioner) deciding to actually build it: is this real,
+/// is it the same idea as another pending blueprint, is it safe to automate at all for a system
+/// that places live orders. One row per blueprint, at most -- re-running Artifice on an
+/// already-triaged blueprint updates this row rather than creating a duplicate.
+model ArtificeVerdict {
+  id          Int    @id @default(autoincrement())
+  blueprintId Int    @unique @map("blueprint_id")
+
+  /// "build" | "merge" | "low_priority" | "skip" -- see artifice/systemPrompt.ts for what each means.
+  verdict String
+
+  /// Set only when verdict is "merge": the blueprintId whose build already covers this one. Plain
+  /// scalar, not a Prisma relation -- nothing needs relational traversal here, just a lookup by id,
+  /// and a second named relation on TailorBlueprint isn't worth adding for a field only this model
+  /// reads.
+  mergeIntoBlueprintId Int? @map("merge_into_blueprint_id")
+
+  reasoning String
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  blueprint TailorBlueprint @relation(fields: [blueprintId], references: [id])
+
+  @@index([verdict])
+  @@map("artifice_verdicts")
+}
+
+/// One row per day Scout's digest scheduler actually ran (scout/scheduler.ts, once at end of day --
+/// see SCOUT_DIGEST_HOUR) -- `content` is the exact rendered markdown shown that day, kept verbatim
+/// so a past digest reads the same later even though ScoutPitch.score keeps moving. The same
+/// content is also written to disk under backend/.scout-state/digests/ for quick reading without a
+/// DB client; this row is the durable copy.
+model ScoutDigest {
+  id            Int      @id @default(autoincrement())
+  digestDate    DateTime @unique @map("digest_date") @db.Date
+  content       String
+  /// [{pitchId, rank, score}] snapshot of what was actually included and in what order -- see this
+  /// model's header comment for why `content` alone isn't enough to answer "what ranked #1 that day"
+  /// programmatically.
+  pitchSnapshot Json     @map("pitch_snapshot")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("scout_digests")
 }

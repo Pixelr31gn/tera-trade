@@ -50,6 +50,7 @@ function features(overrides: Partial<SetupFeatures> = {}): SetupFeatures {
     orderFlowSnapshot: null,
     dailyEma20Trend: { ema: null, slope: null, label: "neutral" },
     intraday5mEmaDistanceAtr: null,
+    ema20Ema200Regime: null,
     ...overrides,
   };
 }
@@ -71,6 +72,34 @@ describe("scoreSetup", () => {
     const aligned = scoreSetup(features({ side: "long", dailyTrendLabel: "up", dailyTrendConfidence: 0.8 }));
     const counter = scoreSetup(features({ side: "long", dailyTrendLabel: "down", dailyTrendConfidence: 0.8 }));
     expect(aligned.probability).toBeGreaterThan(counter.probability);
+  });
+
+  // Regression coverage for the 2026-08-11 daily-trend-factor retune (see
+  // ruleScorer.ts's dailyTrendAlignment comment for the backtest evidence).
+  it("caps the daily-trend agreement reward past 0.5 confidence, instead of scaling it unbounded", () => {
+    const atCap = scoreSetup(features({ side: "long", dailyTrendLabel: "up", dailyTrendConfidence: 0.5 }));
+    const pastCap = scoreSetup(features({ side: "long", dailyTrendLabel: "up", dailyTrendConfidence: 0.95 }));
+    expect(pastCap.probability).toBe(atCap.probability);
+  });
+
+  it("no longer flatly penalizes 'no clear daily trend' as harshly as fighting a confident one", () => {
+    const none = scoreSetup(features({ side: "long", dailyTrendLabel: "none" }));
+    const fighting = scoreSetup(features({ side: "long", dailyTrendLabel: "down", dailyTrendConfidence: 0.8 }));
+    expect(none.probability).toBeGreaterThan(fighting.probability);
+  });
+
+  it("scores a setup agreeing with the 20/200 EMA crossover regime higher than one fighting it", () => {
+    const aligned = scoreSetup(features({ side: "long", ema20Ema200Regime: "bullish" }));
+    const counter = scoreSetup(features({ side: "long", ema20Ema200Regime: "bearish" }));
+    expect(aligned.probability).toBeGreaterThan(counter.probability);
+  });
+
+  it("scores a null 20/200 EMA regime (not enough bars) as neutral -- between agreeing and fighting", () => {
+    const aligned = scoreSetup(features({ side: "long", ema20Ema200Regime: "bullish" }));
+    const neutral = scoreSetup(features({ side: "long", ema20Ema200Regime: null }));
+    const counter = scoreSetup(features({ side: "long", ema20Ema200Regime: "bearish" }));
+    expect(neutral.probability).toBeLessThan(aligned.probability);
+    expect(neutral.probability).toBeGreaterThan(counter.probability);
   });
 
   it("v1 ignores marketStructureLabel/liquidityLabel entirely -- v2 and v1 agree when both labels are neutral-ish", () => {

@@ -35,7 +35,6 @@ Known hand-set constants as of this build, and what they gate:
 | ~~`MAX_ENTRY_DISTANCE_ATR`/`MIN_ENTRY_DISTANCE_ATR`~~ | `risk/engine.ts` | **Removed entirely 2026-07-28** (operator request) after being reactively loosened four times with no backtested basis -- `risk/engine.ts` now only requires a real, validated (2+ touch) S/R level to exist nearby, not any particular distance to it |
 | `MIN_DIRECTIONAL_MARGIN_POINTS` | `scoring/gate.ts` | v3's long-vs-short conviction margin |
 | `CONTINUOUS_SCAN_STANDOUT_THRESHOLD` / `CONTINUOUS_SCAN_FLOOR_THRESHOLD` | `engine/loop.ts` | Continuous-scan consensus (standout + floor across versions) |
-| `MIN_ENTRY_QUALITY_THRESHOLD` | `execution/executionDecisionEngine.ts` | EDE's resting-order ladder-rung acceptance bar |
 | `MIN_LONG_TARGET_WIN_RATE` / `MIN_LONG_TARGET_SAMPLE_SIZE` | `engine/fixedTargetEdgeCache.ts` | Long-setup fixed-target historical-edge gate |
 | `minScoreThreshold` | DB-persisted system state, not a source constant | Per-version taken/skipped threshold -- adjust via `/api/system`, not a code edit |
 

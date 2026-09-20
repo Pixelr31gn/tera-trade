@@ -73,11 +73,12 @@ proximity gate or circuit breaker blocked it, `reason` field has the exact math)
 + `trade_opened` (it executed) -- or `order_rejected` (broker-side failure, e.g. a blocking modal
 or a DOM timeout).
 
-**If nothing appears at all after `consensus_reached`**: don't assume a hang. Check
-`/api/execution/opportunities` first -- if the Execution Decision Engine is enabled, a signal that
-reaches consensus+risk can go silent for many ticks while EDE's `building_entry` state re-scores
-the price ladder every tick without logging anything (only placement/fill/cancellation log). A
-"waiting, not executed yet" opportunity there is not a bug.
+**If nothing appears at all after `consensus_reached`**: don't assume a hang -- check
+`risk_rejected`/`order_rejected`/`trade_opened` more carefully first; a matching bar time with none
+of those tags usually means a targeted grep missed it (see the encoding gotcha below), not that the
+signal is silently stuck somewhere. (The Execution Decision Engine, which used to have its own
+silent `building_entry` re-scoring state here, was removed 2026-08-09 -- every live signal now goes
+through the plain market/limit-order path in `execution/engine.ts`, which always logs.)
 
 **Log encoding gotcha**: this file has mixed encoding (parts of it were written by different
 process launches) -- plain `grep`/`tail` sometimes silently returns nothing even when a line

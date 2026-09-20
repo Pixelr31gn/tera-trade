@@ -39,8 +39,44 @@ export interface ExecutionResult {
 // returns "pending" (it fills immediately regardless of orderType -- see
 // simulatedBroker.ts's placeOrder), so this polling path only ever runs
 // live; paper mode is unaffected.
-const LIMIT_FILL_CONFIRMATION_RETRIES = 4;
-const LIMIT_FILL_CONFIRMATION_DELAY_MS = 750;
+//
+// Widened to a 60-second window (2026-08-10, operator request: "count down
+// on limit order should be 60 seconds") -- the original ~3s window is
+// superseded, not the underlying design (still cancel-and-skip, never fall
+// back to a market order). Poll cadence moved off the 750ms
+// browserControlBroker.ts-consistency value to a flat 1s: at a 60s total
+// window the original consistency rationale no longer carries much weight,
+// and 61 retries * 1000ms gives an exact, easy-to-reason-about 60.000s
+// rather than a 750ms-derived fraction.
+//
+// Widened again to a 10-minute window (2026-08-12, operator request: "add a
+// new timer to resting order of 10 minutes before expiration") -- same
+// design, still cancel-and-skip on expiry, never a market-order fallback.
+// 601 retries * 1000ms = exactly 600.000s (10:00) for the same reason 61 was
+// chosen for 60s above: (RETRIES - 1) * DELAY_MS is what the expiry log
+// message and the reason string both compute from, so the retry count is the
+// one number that has to change to retarget the window.
+//
+// Limit-only entries REVERTED back to market orders (2026-08-13, operator
+// request: "whatever paper trading is doing right now when it comes to
+// executions thats exactly how live trading should be executing" --
+// confirmed explicitly after being shown the concrete tradeoff, i.e. that
+// this reintroduces slippage risk). Paper's SimulatedBroker has always
+// filled every order instantly regardless of orderType; live's resting
+// limit order could sit unfilled and get cancelled after this window,
+// meaning a setup paper "took" could go unexecuted live. Orders are placed
+// as OrderType.MARKET below now, so browserControlBroker.placeOrder's
+// market-order path (its own, separate, already-hardened
+// confirmPositionOpened check -- 4 attempts, 750ms apart) is what confirms
+// the fill, and it never returns "pending" -- only "filled" or "rejected".
+// This block (and LIMIT_FILL_CONFIRMATION_RETRIES/_DELAY_MS below) is left
+// in place, not deleted, as a defensive no-op: harmless if unreached, and a
+// one-line revert (orderType: OrderType.LIMIT below) is all a future
+// switch back would need. Exported for tests/executionEngine.test.ts, which
+// drives these with fake timers rather than hardcoding a second, drifting
+// copy of the numbers.
+export const LIMIT_FILL_CONFIRMATION_RETRIES = 601;
+export const LIMIT_FILL_CONFIRMATION_DELAY_MS = 1000;
 
 export async function executeIfApproved(
   broker: BrokerClient,
@@ -88,8 +124,7 @@ export async function executeIfApproved(
     accountId: brokerAccountId,
     symbol: signal.symbol,
     side,
-    orderType: OrderType.LIMIT,
-    limitPrice: entryPrice,
+    orderType: OrderType.MARKET,
     quantity: assessment.quantity,
     stopLossPrice: assessment.stopPrice ?? undefined,
     takeProfitPrice: assessment.takeProfitPrice ?? undefined,
@@ -103,12 +138,14 @@ export async function executeIfApproved(
     return { executed: false, tradeId: null, reason: `broker rejected the order: ${result.error}` };
   }
 
-  // A limit order rests on the book (status "pending") instead of filling
-  // immediately -- poll for a real fill via isPositionFlat becoming false
-  // (same confirmation signal browserControlBroker.ts's own market-order
-  // path already trusts), and cancel + skip the trade if it doesn't fill in
-  // time. SimulatedBroker always returns "filled" directly, so this block
-  // never runs in paper mode.
+  // Defensive fallback, not the normal path since the 2026-08-13 revert to
+  // market orders above (see LIMIT_FILL_CONFIRMATION_RETRIES's comment) --
+  // browserControlBroker's market-order path already confirms the fill
+  // itself and only ever returns "filled" or "rejected", never "pending".
+  // Kept in case a future broker/order-type combination legitimately rests
+  // an order: poll for a real fill via isPositionFlat becoming false, and
+  // cancel + skip the trade if it doesn't fill in time. SimulatedBroker
+  // always returns "filled" directly, so this block never runs in paper mode.
   if (result.status === "pending") {
     let filled = false;
     for (let attempt = 0; attempt < LIMIT_FILL_CONFIRMATION_RETRIES; attempt++) {
@@ -133,6 +170,38 @@ export async function executeIfApproved(
   }
 
   const fillPrice = result.filledPrice ?? entryPrice;
+
+  // Shift stop/target to the real fill (2026-08-17, operator request): the
+  // risk engine sizes both around the theoretical `entryPrice` it scored the
+  // setup at, but a real fill can land at a different price (see
+  // BrowserControlBroker.readRealFillPrice). Shifting both by the same
+  // signed offset the fill differed from the theoretical price preserves
+  // the exact entry-to-stop/target DISTANCE the risk engine sized, just
+  // anchored to what was actually filled instead of what was scored.
+  // Operator's own example: theoretical entry 30000, SL 29995, TP 30010; a
+  // real fill at 30003 (+3 offset) becomes SL 29998, TP 30013 -- same 5pt/
+  // 10pt distances, anchored to the real fill. A zero offset (SimulatedBroker,
+  // or a real fill that happened to land exactly on the theoretical price)
+  // is a no-op below.
+  const fillOffset = fillPrice.minus(entryPrice);
+  const shiftedStopPrice = assessment.stopPrice ? assessment.stopPrice.plus(fillOffset) : null;
+  const shiftedTakeProfitPrice = assessment.takeProfitPrice ? assessment.takeProfitPrice.plus(fillOffset) : null;
+  if (!fillOffset.isZero()) {
+    logger.info(
+      {
+        symbol: signal.symbol,
+        entryPrice: entryPrice.toString(),
+        fillPrice: fillPrice.toString(),
+        fillOffset: fillOffset.toString(),
+        originalStopPrice: assessment.stopPrice?.toString(),
+        shiftedStopPrice: shiftedStopPrice?.toString(),
+        originalTakeProfitPrice: assessment.takeProfitPrice?.toString(),
+        shiftedTakeProfitPrice: shiftedTakeProfitPrice?.toString(),
+      },
+      "stop_target_shifted_to_real_fill"
+    );
+  }
+
   const trade = await prisma.trade.create({
     data: {
       accountId,
@@ -142,8 +211,8 @@ export async function executeIfApproved(
       quantity: assessment.quantity,
       entryTime,
       entryPrice: fillPrice.toString(),
-      stopPrice: assessment.stopPrice!.toString(),
-      takeProfitPrice: assessment.takeProfitPrice?.toString(),
+      stopPrice: shiftedStopPrice!.toString(),
+      takeProfitPrice: shiftedTakeProfitPrice?.toString(),
       score: gated.probability.toString(),
       regimeTrendAtEntry: regimeTrend,
       regimeVolAtEntry: regimeVol,
@@ -160,7 +229,7 @@ export async function executeIfApproved(
       brokerOrderId: result.brokerOrderId,
       accountId,
       symbol: signal.symbol,
-      orderType: "limit",
+      orderType: orderRequest.orderType,
       side: signal.side,
       quantity: assessment.quantity,
       price: fillPrice.toString(),

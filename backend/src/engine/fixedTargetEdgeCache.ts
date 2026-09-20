@@ -113,8 +113,3 @@ export async function getFixedTargetEdge(symbol: string, session: TradingSession
   cache.set(key, { stats, computedAt: Date.now() });
   return stats;
 }
-
-/** Test-only: clear the cache so tests don't see another test's stale state. */
-export function _resetFixedTargetEdgeCacheForTests(): void {
-  cache.clear();
-}

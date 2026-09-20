@@ -118,6 +118,22 @@ describe("explainTradeExit", () => {
     expect(stopText).toContain("loss");
     expect(targetText).toContain("gain");
   });
+
+  // 2026-08-12 regression: confirmed live (trade #344) that a genuinely
+  // profitable trailing-stop exit was reading "Closed long ES @ 7769.5 for
+  // a gain of 45.00 -- the stop-loss was hit" -- reporting a real gain
+  // while using loss-sounding language, because engine/loop.ts's
+  // manageLiveOpenTrade always passed exitReason "stop" for a trailing-stop
+  // close instead of the dedicated "trailing_stop" reason this function
+  // already had a proper message for.
+  it("describes a trailing-stop exit as locking in a favorable move, not as a stop-loss, even when the outcome is a real gain", () => {
+    const text = explainTradeExit("ES", "long", "trailing_stop", new Decimal(7769.5), new Decimal(45));
+    expect(text).toContain("trailing stop");
+    expect(text).toContain("locking in a favorable move");
+    expect(text).not.toContain("stop-loss");
+    expect(text).toContain("gain");
+    expect(text).toContain("45.00");
+  });
 });
 
 describe("explainNewsPause / explainKillSwitch", () => {

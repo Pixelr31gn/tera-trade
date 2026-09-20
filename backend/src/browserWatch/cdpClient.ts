@@ -25,17 +25,38 @@ const logger = childLogger("cdpClient");
 // the manual-trade endpoint failing this way when testing a symbol switch).
 // Caching and reusing one connection per cdpUrl is strictly safer than what
 // every caller was already doing.
-let cachedBrowser: Browser | null = null;
-let cachedCdpUrl: string | null = null;
+// Keyed by cdpUrl (not a single slot) since the Tradesea second-broker
+// integration connects to a genuinely different CDP endpoint (a separate
+// Chrome debug profile/port) concurrently with the existing TopstepX one --
+// a single shared slot would have each broker's getPage() continually evict
+// and reconnect the other's cached connection every call, which is exactly
+// the thrashing/hang risk this cache exists to prevent in the first place
+// (see the module header comment above). Same per-URL in-flight-promise
+// protection as before, just keyed the same way.
+const cachedBrowserByUrl = new Map<string, Browser>();
+const connectingPromiseByUrl = new Map<string, Promise<Browser>>();
 
 export async function connectToChrome(cdpUrl: string): Promise<Browser> {
-  if (cachedBrowser && cachedCdpUrl === cdpUrl && cachedBrowser.isConnected()) {
-    return cachedBrowser;
+  const cached = cachedBrowserByUrl.get(cdpUrl);
+  if (cached && cached.isConnected()) {
+    return cached;
   }
+
+  const inFlight = connectingPromiseByUrl.get(cdpUrl);
+  if (inFlight) return inFlight;
+
   logger.info({ cdpUrl }, "opening_new_cdp_connection");
-  cachedBrowser = await chromium.connectOverCDP(cdpUrl);
-  cachedCdpUrl = cdpUrl;
-  return cachedBrowser;
+  const connecting = (async () => {
+    try {
+      const browser = await chromium.connectOverCDP(cdpUrl);
+      cachedBrowserByUrl.set(cdpUrl, browser);
+      return browser;
+    } finally {
+      connectingPromiseByUrl.delete(cdpUrl);
+    }
+  })();
+  connectingPromiseByUrl.set(cdpUrl, connecting);
+  return connecting;
 }
 
 // Without an explicit application-level dialog listener, Playwright's own
@@ -88,6 +109,9 @@ function ensureDialogHandler(page: Page): void {
 // account/trading dashboard (never present on a login screen); reusing that
 // same proven marker here instead of the URL settles which real page this
 // is, independent of whatever the address bar happens to say.
+// Default marker for TopstepX specifically -- findPage's contentMarker
+// param (below) lets a second platform (e.g. Tradesea, whose HUD never
+// renders this exact "bal:" string) supply its own.
 const AUTHENTICATED_PAGE_CONTENT_MARKER = "bal:";
 
 // 2026-07-28 (later same day): the content check above added a
@@ -125,8 +149,12 @@ async function readBodyTextWithRetry(page: Page): Promise<string | null> {
   return null;
 }
 
-/** Finds the open tab that's on `urlMatch`'s (e.g. "topstepx.com") genuine, authenticated trading dashboard -- not just any tab whose URL happens to contain the domain, which also matches a login screen or a redirect-in-progress page. Distinguishes by page *content* (see AUTHENTICATED_PAGE_CONTENT_MARKER), not URL path, since TopstepX's client-side router doesn't reliably reflect page state in the URL. */
-export async function findPage(browser: Browser, urlMatch: string): Promise<Page | null> {
+/** Finds the open tab that's on `urlMatch`'s (e.g. "topstepx.com") genuine, authenticated trading dashboard -- not just any tab whose URL happens to contain the domain, which also matches a login screen or a redirect-in-progress page. Distinguishes by page *content* (see contentMarker, default AUTHENTICATED_PAGE_CONTENT_MARKER), not URL path, since a client-side router doesn't reliably reflect page state in the URL. */
+export async function findPage(
+  browser: Browser,
+  urlMatch: string,
+  contentMarker: string = AUTHENTICATED_PAGE_CONTENT_MARKER
+): Promise<Page | null> {
   let domainSeenButNotAuthenticated = false;
   for (const context of browser.contexts()) {
     for (const page of context.pages()) {
@@ -134,7 +162,7 @@ export async function findPage(browser: Browser, urlMatch: string): Promise<Page
       if (!url.includes(urlMatch)) continue;
       const text = await readBodyTextWithRetry(page);
       if (text === null) continue; // couldn't read this candidate even after retries -- try the next one
-      if (!text.toLowerCase().includes(AUTHENTICATED_PAGE_CONTENT_MARKER)) {
+      if (!text.toLowerCase().includes(contentMarker.toLowerCase())) {
         domainSeenButNotAuthenticated = true;
         continue;
       }

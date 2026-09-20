@@ -31,6 +31,16 @@ export interface BrowserWatcherOptions {
   symbols: string[];
   symbolAliases?: Record<string, string[]>;
   selectorsPath?: string;
+  /**
+   * Passed through to cdpClient.findPage's contentMarker -- omitted, that
+   * function defaults to TopstepX's own "bal:" marker. A second platform
+   * (Tradesea) whose HUD never renders that exact string needs its own
+   * (found live, 2026-08-28: without this, TradeseaBrowserControlBroker's
+   * own findPage call -- which DOES pass a contentMarker explicitly -- could
+   * find the tab fine while this watcher, polling the same tab on its own
+   * timer, kept reporting "no matching tab" indefinitely).
+   */
+  contentMarker?: string;
 }
 
 function loadSelectors(path: string | undefined): CalibratedSelectors | null {
@@ -94,7 +104,7 @@ export class BrowserWatcher {
     if (!this.browser) {
       this.browser = await connectToChrome(this.options.cdpUrl);
     }
-    const page = await findPage(this.browser, this.options.urlMatch);
+    const page = await findPage(this.browser, this.options.urlMatch, this.options.contentMarker);
     if (!page) {
       throw new Error(
         `No open Chrome tab matching "${this.options.urlMatch}" -- is Chrome running with --remote-debugging-port and TopstepX open?`

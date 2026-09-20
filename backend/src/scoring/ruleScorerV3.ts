@@ -22,7 +22,7 @@
  */
 import type { OhlcBar } from "../regime/indicators.js";
 import { atr } from "../regime/indicators.js";
-import type { EmaTrend } from "../analytics/emaTrend.js";
+import type { EmaTrend, Ema20Ema200Regime } from "../analytics/emaTrend.js";
 import { lastRsi } from "../analytics/rsi.js";
 import type { MarketStructureLabel } from "../analytics/priceAction.js";
 import { fibDirectionSignal } from "../analytics/fibonacci.js";
@@ -390,6 +390,26 @@ export function computeEmaProximityAdjustment(distanceInAtr: number | null, side
   return {
     adjustmentPoints,
     description: `price is ${absDistance.toFixed(2)}x ATR ${sideLabel} the intraday 20-EMA (5m) -- ${adjustmentPoints >= 0 ? "+" : ""}${adjustmentPoints.toFixed(1)} pt adjustment`,
+  };
+}
+
+// Same bounded-adjustment pattern as computeEmaProximityAdjustment above --
+// a distinct signal (two EMAs crossing vs. proximity to a single fast one),
+// not one of the six core 100-pt factors, and not yet validated against real
+// outcomes as a standalone factor -- see analytics/emaTrend.ts's
+// computeEma20Ema200Regime header for the backtest this came from and why it
+// doesn't directly back this specific weight. 2026-08-12, operator request.
+const MAX_EMA_20_200_REGIME_ADJUSTMENT = 8;
+
+export function computeEma20Ema200RegimeAdjustment(regime: Ema20Ema200Regime, side: "long" | "short"): DirectionAdjustmentResult {
+  if (regime === null) {
+    return { adjustmentPoints: 0, description: "not enough bars yet for a 200-period EMA -- no 20/200 crossover reading, no adjustment" };
+  }
+  const agrees = (regime === "bullish" && side === "long") || (regime === "bearish" && side === "short");
+  const adjustmentPoints = agrees ? MAX_EMA_20_200_REGIME_ADJUSTMENT : -MAX_EMA_20_200_REGIME_ADJUSTMENT;
+  return {
+    adjustmentPoints,
+    description: `20/200 EMA crossover regime is ${regime} -- ${agrees ? "agrees with" : "fights"} this ${side} setup -- ${adjustmentPoints >= 0 ? "+" : ""}${adjustmentPoints.toFixed(1)} pt adjustment`,
   };
 }
 

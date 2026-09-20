@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker exec *)",
+      "Bash(docker exec teratrade-postgres psql -U teratrade -d teratrade -c ' *)",
+      "Bash(curl -s -m 5 http://localhost:9223/json/version)"
+    ]
+  }
+}

@@ -35,12 +35,14 @@ Already pure — replay these unchanged, do not refactor:
 `scoreSetup` / `scoreSetupV3Directional` / `scoreSetupV5` ·
 `RiskEngine.assessNewTrade` · `evaluateHypotheticalOutcome`
 
-Impure — these eight are the entire injection surface, and every one takes an
+Impure — these are the entire injection surface, and every one takes an
 `at: Date` in `DecisionContext`:
 `loadRecentBars` · `prisma.trade.findFirst({status:"open"})` ·
 `getNewsRiskStatus` · `getOpeningRangeStats` · `getDailyTrend` ·
 `getDailyEma20Trend` · `getFixedTargetEdge` · `getLatestOrderFlowSnapshot` ·
-`computeAccountRiskState`
+`computeAccountRiskState` · `getBanditVersionSelection` (live) /
+`computeBanditSelection` (replay, uncached -- see
+`scoring/consensusBandit.ts` and `engine/consensusBanditCache.ts`)
 
 Live implementations ignore `at` and keep their existing TTL caches, so live
 behaviour is unchanged by the extraction. Prove that before moving on.
@@ -62,6 +64,14 @@ behaviour is unchanged by the extraction. Prove that before moving on.
 5. **Costs are not optional.** Subtract Topstep round-turn commission and one
    tick of slippage per side. At this trade frequency, omitting them is the
    difference between a strategy and a spreadsheet.
+6. **`scoring/consensusBandit.ts`'s `computeBucketVersionStats`** — same
+   shape as #1/#2 above: filters `Score` rows on resolved `outcomeLabel` by
+   `(strategyVersion, contextBucket)`, bounded by `time: { lt: at }`. The
+   bound is load-bearing here specifically because it feeds a live
+   *execution* decision (which version gates the v1/v2/v3/v6/v7 leg of
+   `determineConsensus`), not just a scoring nudge like #1 -- a look-ahead
+   bug here would mean replay silently picks a different version than live
+   ever could have, for every bar in the run.
 
 ## Fidelity limits — report, don't hide
 

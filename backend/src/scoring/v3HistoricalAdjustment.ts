@@ -21,8 +21,15 @@ const MAX_ADJUSTMENT_POINTS = 15;
 // that example, not fitted.
 const ADJUSTMENT_SCALE = 30;
 
-const RESOLVED_OUTCOME_LABELS = ["executed_win", "executed_loss", "missed_win", "missed_loss"];
-const POSITIVE_OUTCOME_LABELS = new Set(["executed_win", "missed_win"]);
+// Exported for scoring/consensusBandit.ts and scoring/sessionPerformance.ts,
+// both of which need the identical "has this row been walked forward to a
+// resolved outcome" filter (the same four labels outcomeEvaluator.ts ever
+// writes) -- a second, drifting copy of this list is exactly the kind of
+// divergence .claude/rules/replay-harness.md warns about.
+export const RESOLVED_OUTCOME_LABELS = ["executed_win", "executed_loss", "missed_win", "missed_loss"];
+// Exported for scoring/sessionPerformance.ts's win-rate computation -- same
+// "would this have won" definition used here.
+export const POSITIVE_OUTCOME_LABELS = new Set(["executed_win", "missed_win"]);
 
 export interface HistoricalAdjustment {
   adjustmentPoints: number;

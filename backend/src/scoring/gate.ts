@@ -15,7 +15,7 @@ import { getSettings } from "../core/config.js";
 import type { TradingSession } from "../analytics/session.js";
 import type { SetupFeatures } from "./features.js";
 import { scoreSetup, type FactorContribution, type StrategyVersion } from "./ruleScorer.js";
-import { computeBreakoutStrengthAdjustment, computeEmaProximityAdjustment, computeFibAdjustment, computeOrderFlowAdjustment, computePpmAdjustment, computeRiskRewardAdjustment, computeV3Bucket, scoreSetupV3Directional } from "./ruleScorerV3.js";
+import { computeBreakoutStrengthAdjustment, computeEma20Ema200RegimeAdjustment, computeEmaProximityAdjustment, computeFibAdjustment, computeOrderFlowAdjustment, computePpmAdjustment, computeRiskRewardAdjustment, computeV3Bucket, scoreSetupV3Directional } from "./ruleScorerV3.js";
 import { scoreSetupV5 } from "./ruleScorerV5.js";
 import { scoreSetupV6 } from "./ruleScorerV6.js";
 import { scoreSetupV7 } from "./ruleScorerV7.js";
@@ -112,6 +112,7 @@ export async function evaluateSetup(
     const ppm = computePpmAdjustment(features.netPointsPerMinute, features.side);
     const orderFlow = computeOrderFlowAdjustment(features.orderFlowSnapshot, features.side);
     const emaProximity = computeEmaProximityAdjustment(features.intraday5mEmaDistanceAtr, features.side);
+    const emaRegime = computeEma20Ema200RegimeAdjustment(features.ema20Ema200Regime, features.side);
 
     const adjustedScore = Math.max(
       0,
@@ -124,7 +125,8 @@ export async function evaluateSetup(
           fib.adjustmentPoints +
           ppm.adjustmentPoints +
           orderFlow.adjustmentPoints +
-          emaProximity.adjustmentPoints
+          emaProximity.adjustmentPoints +
+          emaRegime.adjustmentPoints
       )
     );
     const probability = Math.round((adjustedScore / 100) * 1e5) / 1e5;
@@ -162,6 +164,7 @@ export async function evaluateSetup(
     factors.push({ name: "ppmAdjustment", contribution: ppm.adjustmentPoints, description: ppm.description });
     factors.push({ name: "orderFlowAdjustment", contribution: orderFlow.adjustmentPoints, description: orderFlow.description });
     factors.push({ name: "emaProximityAdjustment", contribution: emaProximity.adjustmentPoints, description: emaProximity.description });
+    factors.push({ name: "emaRegimeAdjustment", contribution: emaRegime.adjustmentPoints, description: emaRegime.description });
 
     // Hard override: if v1 AND v2 both independently took this exact same
     // setup, v3 takes it too, even if its own score/conviction check

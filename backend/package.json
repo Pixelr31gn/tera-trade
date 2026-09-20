@@ -1,6 +1,6 @@
 {
   "name": "tera-trade-backend",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,11 +12,25 @@
     "prisma:migrate": "prisma migrate deploy",
     "prisma:migrate:dev": "prisma migrate dev",
     "license:generate": "tsx --env-file=.env scripts/generateLicenseKey.ts",
-    "train:v4": "tsx --env-file=.env scripts/trainV4Model.ts"
+    "auth:set-password": "tsx scripts/setPassword.ts",
+    "train:v4": "tsx --env-file=.env scripts/trainV4Model.ts",
+    "scout": "tsx watch src/scout/run.ts",
+    "scout:once": "tsx src/scout/run.ts --once",
+    "scout:rate": "tsx scripts/scoutRate.ts",
+    "taylor": "tsx watch src/taylor/run.ts",
+    "taylor:once": "tsx src/taylor/run.ts --once",
+    "taylor:list": "tsx scripts/taylorList.ts",
+    "cross-regime": "tsx watch src/crossRegimeAnalyzer/run.ts",
+    "cross-regime:once": "tsx src/crossRegimeAnalyzer/run.ts --once",
+    "auto-provisioner": "tsx watch src/autoProvisioner/run.ts",
+    "auto-provisioner:once": "tsx src/autoProvisioner/run.ts --once",
+    "artifice": "tsx watch src/artifice/run.ts",
+    "artifice:once": "tsx src/artifice/run.ts --once"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
     "@fastify/websocket": "^11.0.2",
+    "@google/genai": "^2.19.0",
     "@microsoft/signalr": "^8.0.7",
     "@prisma/client": "^5.22.0",
     "decimal.js": "^10.4.3",

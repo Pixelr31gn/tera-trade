@@ -26,10 +26,14 @@ This does everything except the two things only you can provide:
 
 - Creates `app\.env` from the template.
 - Generates a real API key and database password automatically.
-- Asks you for your **license key** (given to you separately by whoever provided this package) --
-  the only thing it actually prompts you for.
+- Applies a license key that's already built into this package -- nothing to enter.
 - Starts Postgres in Docker and waits for it to report healthy.
 - Applies the database schema.
+- If this package includes a database snapshot (`app\db-seed.dump`), restores it automatically
+  into the fresh database -- your scores, trades, and equity history from the machine this
+  package was built on are already there, no re-collecting data from scratch. Only happens once,
+  against a genuinely empty database; running setup again later never overwrites data that's
+  already there.
 
 When it prints "Setup complete!", you're done -- you won't need to run this again unless you
 delete `app\.env` and want to start fresh.
@@ -54,32 +58,25 @@ driving its own dedicated Chrome window -- not your everyday browser. The first 
 - **Leave that Chrome window open** in the background while `tera-trade.exe` is running --
   closing it stops the app from reading your account or placing orders.
 
-## Safe by default: paper mode
+## This build is live by default -- read this before your first launch
 
-Right out of setup, Tera Trade runs in **paper mode** -- it scores real signals against the
-live market in real time, but never places a real order. Watch it run for a while before
-touching anything below.
+Unlike earlier Tera Trade packages, **this one ships already configured for real trading**:
+`TRADING_MODE=live`, `BROKER_KIND=browser_control`, `LIVE_TRADING_CONFIRMED=true`, and
+`DRY_RUN_ORDERS=false` are all set in `app\.env` from the moment setup finishes. There is no
+separate "going live" step -- the first qualifying signal after you log into TopstepX and
+`tera-trade.exe` starts will click a real Buy/Sell button on your real account.
 
-## Going live (manual and deliberate -- not part of the 2 clicks, on purpose)
+If you'd rather watch it first, close `tera-trade.exe`, open `app\.env` in a text editor
+(Notepad works fine), and either:
 
-When you're ready to risk real money, close `tera-trade.exe`, open `app\.env` in a text editor
-(Notepad works fine), and change:
+- Set `TRADING_MODE=paper` (and `BROKER_KIND=simulated`) to score real signals against the live
+  market without ever placing a real order, or
+- Leave `TRADING_MODE=live` but set `DRY_RUN_ORDERS=true` -- every step short of the final
+  Buy/Sell/Close click still happens for real against your account (the right instrument and
+  quantity are found), but the click itself only highlights the button instead of pressing it.
 
-```
-TRADING_MODE=live
-BROKER_KIND=browser_control
-LIVE_TRADING_CONFIRMED=true
-DRY_RUN_ORDERS=false
-```
-
-Save the file, then double-click `tera-trade.exe` again.
-
-**Leave `DRY_RUN_ORDERS=true` for a while first** (it's the default -- you only need to add the
-other three lines above to go live). With dry-run on, every step short of the final Buy/Sell
-click still happens for real against your account -- the right instrument and quantity are
-found -- but the click itself only highlights the button instead of pressing it, so you can
-confirm it's about to do the right thing before it's ever allowed to actually trade. Only set
-`DRY_RUN_ORDERS=false` once you've watched several of these dry-run signals and trust it.
+Save the file, then double-click `tera-trade.exe` again. Flip the same flags back to go live for
+real once you trust what you're seeing.
 
 ## Troubleshooting
 

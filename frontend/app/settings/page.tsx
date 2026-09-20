@@ -6,7 +6,6 @@ import { apiFetch, fetcher } from "@/lib/api";
 import { AccountSummary, SystemState } from "@/lib/types";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
-import { useConfirm } from "@/components/ConfirmDialog";
 
 const MODES: Array<{ value: "analysis_only" | "paper" | "live"; label: string; description: string }> = [
   { value: "analysis_only", label: "Analysis Only", description: "Scores and regime detection run, but no orders are ever placed." },
@@ -20,7 +19,6 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const account = accounts?.[0];
-  const confirm = useConfirm();
 
   async function changeMode(mode: string) {
     setError(null);
@@ -35,22 +33,6 @@ export default function SettingsPage() {
   async function clearKillSwitch() {
     await apiFetch("/api/system/kill-switch/clear", { method: "POST" });
     mutateState();
-  }
-
-  async function toggleExecutionDecisionEngine(enabled: boolean) {
-    if (enabled) {
-      const ok = await confirm(
-        "Enable the Execution Decision Engine? Once live trading is active on the browser-control broker, this places real resting limit orders on TopstepX instead of immediate market orders. If you haven't watched it against a real fill yet, test with DRY_RUN_ORDERS=true first -- see docs/EXECUTION_DECISION_ENGINE.md."
-      );
-      if (!ok) return;
-    }
-    setError(null);
-    try {
-      await apiFetch("/api/system/execution-decision-engine", { method: "POST", body: JSON.stringify({ enabled }) });
-      mutateState();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update Execution Decision Engine setting");
-    }
   }
 
   function optionalNumber(formData: FormData, name: string): number | null {
@@ -152,46 +134,16 @@ export default function SettingsPage() {
             );
           })}
           {systemState?.killSwitch && (
-            <button onClick={clearKillSwitch} className="rounded-md bg-bad px-4 py-2 text-sm font-medium text-white">
-              Clear kill switch
-            </button>
+            <div className="space-y-2 rounded-md border border-bad/40 bg-bad/10 px-4 py-3">
+              <p className="text-sm text-bad">
+                {systemState.killSwitchReason ?? "Kill switch is active (no reason recorded)."}
+              </p>
+              <button onClick={clearKillSwitch} className="rounded-md bg-bad px-4 py-2 text-sm font-medium text-white">
+                Clear kill switch
+              </button>
+            </div>
           )}
         </div>
-      </Panel>
-
-      <Panel
-        title="Execution Decision Engine"
-        action={<Badge text={systemState?.executionDecisionEngineEnabled ? "enabled" : "disabled"} tone={systemState?.executionDecisionEngineEnabled ? "good" : "bad"} />}
-      >
-        <p className="text-sm text-gray-300">
-          Routes an approved signal through fair-value-map scoring and a resting limit order instead
-          of an immediate market order. Only takes effect once the broker is browser_control (live
-          mode) -- safe to leave on otherwise, since paper/analysis-only always fall back to the
-          existing immediate-market-order path regardless of this toggle.
-        </p>
-        <button
-          onClick={() => toggleExecutionDecisionEngine(!systemState?.executionDecisionEngineEnabled)}
-          role="switch"
-          aria-checked={systemState?.executionDecisionEngineEnabled ?? false}
-          className={`mt-3 flex items-center gap-3 rounded-md border px-4 py-2 transition-colors ${
-            systemState?.executionDecisionEngineEnabled ? "border-accent bg-accent/10" : "border-border"
-          }`}
-        >
-          <span
-            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
-              systemState?.executionDecisionEngineEnabled ? "bg-accent" : "bg-white/10"
-            }`}
-          >
-            <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
-                systemState?.executionDecisionEngineEnabled ? "translate-x-5" : "translate-x-0.5"
-              }`}
-            />
-          </span>
-          <span className="text-sm font-medium text-white">
-            {systemState?.executionDecisionEngineEnabled ? "Enabled" : "Disabled"}
-          </span>
-        </button>
       </Panel>
 
       <Panel title="Risk Limits">
@@ -286,50 +238,75 @@ export default function SettingsPage() {
       </Panel>
 
       <Panel title="Confidence-Tier Position Sizing">
-        <p className="mb-4 text-sm text-gray-300">
+        <p className="mb-2 text-sm text-gray-300">
           Quantity placed is set directly by which of these three cross-version consensus average
-          tiers the setup clears, lowest tier first as the floor (never sized to zero once every other
-          gate has already approved the trade). Thresholds must be strictly ascending.
+          tiers the setup clears, Tier 1&apos;s quantity as the floor (never sized to zero, and
+          never sized to some unrelated fallback number, once every other gate has already approved
+          the trade -- consensus only needs 2 of 3 versions to individually clear the score
+          threshold, not the average, so a cleared setup can still land below Tier 1&apos;s own
+          threshold). Dollar-based risk only shapes the stop/target prices, never the contract
+          count. Thresholds must be strictly ascending, and both threshold and contract count are
+          fully your call -- there's no upper bound enforced here on either one.
         </p>
-        <form action={saveConfidenceTiers} className="space-y-3">
-          {[1, 2, 3].map((n) => {
-            const tier = systemState?.confidenceTiers?.[n - 1];
-            return (
-              <div key={n} className="flex items-end gap-3">
-                <label className="text-xs text-gray-400">
-                  Tier {n} threshold (%)
-                  <input
-                    name={`tier${n}Threshold`}
-                    type="number"
-                    step="1"
-                    min="1"
-                    max="99"
-                    defaultValue={tier ? Math.round(tier.threshold * 100) : [65, 75, 85][n - 1]}
-                    className="mt-1 w-28 rounded border border-border bg-background px-2 py-1.5 text-sm text-white"
-                  />
-                </label>
-                <label className="text-xs text-gray-400">
-                  Contracts
-                  <input
-                    name={`tier${n}Quantity`}
-                    type="number"
-                    step="1"
-                    min="1"
-                    defaultValue={tier?.quantity ?? n}
-                    className="mt-1 w-24 rounded border border-border bg-background px-2 py-1.5 text-sm text-white"
-                  />
-                </label>
-              </div>
-            );
-          })}
-          <button
-            type="submit"
-            disabled={saving}
-            className="w-fit rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-          >
-            {saving ? "Saving..." : "Save confidence tiers"}
-          </button>
-        </form>
+        {account && (
+          <p className="mb-4 text-xs text-gray-500">
+            One real ceiling still applies regardless of what you set below:{" "}
+            <span className="font-medium text-gray-300">Max position size ({account.riskLimits.maxPositionSize} contracts)</span>{" "}
+            in Risk Limits above -- a tier quantity higher than that gets capped down to it at
+            execution time. Raise that limit too if you want a tier to actually place more than it
+            currently allows.
+          </p>
+        )}
+        {systemState ? (
+          <form action={saveConfidenceTiers} className="space-y-3">
+            {[1, 2, 3].map((n) => {
+              const tier = systemState.confidenceTiers[n - 1];
+              const quantity = tier?.quantity ?? n;
+              const capped = account ? quantity > account.riskLimits.maxPositionSize : false;
+              return (
+                <div key={n} className="flex items-end gap-3">
+                  <label className="text-xs text-gray-400">
+                    Tier {n} threshold (%)
+                    <input
+                      name={`tier${n}Threshold`}
+                      type="number"
+                      step="1"
+                      min="1"
+                      max="99"
+                      defaultValue={tier ? Math.round(tier.threshold * 100) : [65, 75, 85][n - 1]}
+                      className="mt-1 w-28 rounded border border-border bg-background px-2 py-1.5 text-sm text-white"
+                    />
+                  </label>
+                  <label className="text-xs text-gray-400">
+                    Contracts
+                    <input
+                      name={`tier${n}Quantity`}
+                      type="number"
+                      step="1"
+                      min="1"
+                      defaultValue={quantity}
+                      className="mt-1 w-24 rounded border border-border bg-background px-2 py-1.5 text-sm text-white"
+                    />
+                  </label>
+                  {capped && (
+                    <span className="pb-2 text-xs text-warn">
+                      capped to {account!.riskLimits.maxPositionSize} by Max position size
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+            <button
+              type="submit"
+              disabled={saving}
+              className="w-fit rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {saving ? "Saving..." : "Save confidence tiers"}
+            </button>
+          </form>
+        ) : (
+          <p className="text-sm text-gray-500">Loading settings...</p>
+        )}
       </Panel>
 
       <Panel title="Scoring Threshold">

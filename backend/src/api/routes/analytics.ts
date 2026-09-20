@@ -24,7 +24,7 @@ function analyticsLookbackSince(): Date {
 // still refreshes daily while cutting that DB load to near zero.
 const ANALYTICS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const analyticsCache = new Map<string, { value: unknown; computedAt: number }>();
-async function cached<T>(key: string, compute: () => Promise<T>): Promise<T> {
+export async function cached<T>(key: string, compute: () => Promise<T>): Promise<T> {
   const hit = analyticsCache.get(key);
   if (hit && Date.now() - hit.computedAt < ANALYTICS_CACHE_TTL_MS) return hit.value as T;
   const value = await compute();
@@ -109,7 +109,7 @@ function emptyBucket(): DivergenceBucket {
   return { n: 0, win: 0, loss: 0, pending: 0, winRate: null };
 }
 
-async function computeVersionDivergence() {
+export async function computeVersionDivergence() {
   // v2 stopped receiving new scores 2026-07-14 but stays in this comparison
   // -- its historical rows are still there and still worth being able to
   // recall/compare against, per the reason it's kept in the DB at all.
@@ -203,6 +203,7 @@ type SessionScoreRow = {
   marketStructureLabel: string | null;
   liquidityLabel: string | null;
   priceActionLabel: string | null;
+  decision?: string;
 };
 
 // Pure aggregation, no DB access -- lets callers fetch once (across every
@@ -217,6 +218,14 @@ function summarizeSessionScores(session: TradingSession, rows: SessionScoreRow[]
   let losses = 0;
   let rSum = 0;
   let rCount = 0;
+  // "Taken-only" mirrors the blended wins/losses/rSum/rCount above but
+  // restricted to decision === "taken" -- see this function's own comment
+  // below for why the blended figures can't actually distinguish one
+  // version's judgment from another's, and why this narrower slice can.
+  let takenWins = 0;
+  let takenLosses = 0;
+  let takenRSum = 0;
+  let takenRCount = 0;
   const marketStructureRows: { label: string; outcomeLabel: string | null; rMultiple: number | null }[] = [];
   const liquidityRows: { label: string; outcomeLabel: string | null; rMultiple: number | null }[] = [];
   const priceActionRows: { label: string; outcomeLabel: string | null; rMultiple: number | null }[] = [];
@@ -226,11 +235,21 @@ function summarizeSessionScores(session: TradingSession, rows: SessionScoreRow[]
     outcomeCounts[key] = (outcomeCounts[key] ?? 0) + 1;
 
     const rMultiple = row.outcomeRMultiple !== null ? Number(row.outcomeRMultiple) : null;
-    if (row.outcomeLabel && POSITIVE_OUTCOME_LABELS.has(row.outcomeLabel)) wins++;
-    if (row.outcomeLabel && NEGATIVE_OUTCOME_LABELS.has(row.outcomeLabel)) losses++;
+    const isWin = row.outcomeLabel !== null && POSITIVE_OUTCOME_LABELS.has(row.outcomeLabel);
+    const isLoss = row.outcomeLabel !== null && NEGATIVE_OUTCOME_LABELS.has(row.outcomeLabel);
+    if (isWin) wins++;
+    if (isLoss) losses++;
     if (rMultiple !== null) {
       rSum += rMultiple;
       rCount++;
+    }
+    if (row.decision === "taken") {
+      if (isWin) takenWins++;
+      if (isLoss) takenLosses++;
+      if (rMultiple !== null) {
+        takenRSum += rMultiple;
+        takenRCount++;
+      }
     }
 
     if (row.marketStructureLabel !== null) marketStructureRows.push({ label: row.marketStructureLabel, outcomeLabel: row.outcomeLabel, rMultiple });
@@ -239,14 +258,36 @@ function summarizeSessionScores(session: TradingSession, rows: SessionScoreRow[]
   }
 
   const resolvedCount = wins + losses;
+  const takenResolvedCount = takenWins + takenLosses;
 
   return {
     session,
     totalScores: rows.length,
     outcomeCounts,
     resolvedCount,
+    // Blended across every scored setup regardless of whether THIS version
+    // said "taken" or "skipped" -- see engine/outcomeEvaluator.ts:
+    // computeInitialStop (the hypothetical stop/target used to grade a
+    // skipped setup) takes only side/entryPrice/atr/structureSwing, none of
+    // which vary by scoring version, so a skipped setup grades identically
+    // no matter which version's row it's attached to. That makes this
+    // number converge across v1..v7 almost regardless of real judgment
+    // quality -- it answers "how did the underlying signals do," not "how
+    // good is this version." Kept for backward compatibility (session
+    // dashboard, ML-training-readiness gate); use takenWinRate below to
+    // actually compare versions. Root-caused 2026-09-03 after the Strategy
+    // Comparison page showed all six versions within ~2 points of each
+    // other.
     winRate: resolvedCount > 0 ? wins / resolvedCount : null,
     avgRMultiple: rCount > 0 ? rSum / rCount : null,
+    // Restricted to this version's own decision === "taken" rows -- the
+    // actual population where different versions' judgment diverges (they
+    // don't all take the same signals), so this is the metric that answers
+    // "how does this version's own judgment actually perform."
+    takenCount: rows.filter((r) => r.decision === "taken").length,
+    takenResolvedCount,
+    takenWinRate: takenResolvedCount > 0 ? takenWins / takenResolvedCount : null,
+    takenAvgRMultiple: takenRCount > 0 ? takenRSum / takenRCount : null,
     modelTrained: MLScorer.isAvailable(session),
     minRowsRequiredForModel: MIN_TRAINING_ROWS_PER_SESSION,
     byMarketStructure: labelBreakdown(marketStructureRows),
@@ -258,7 +299,7 @@ function summarizeSessionScores(session: TradingSession, rows: SessionScoreRow[]
 const ALL_SESSIONS: TradingSession[] = [TradingSession.NEW_YORK, TradingSession.LONDON, TradingSession.ASIAN];
 
 /** One query for every session (optionally scoped to one strategy version), grouped in memory -- see summarizeSessionScores's comment for why this replaces N per-session round trips. */
-async function computeSessionPerformanceForAllSessions(strategyVersion?: "v1" | "v2" | "v3" | "v4" | "v5" | "v6"): Promise<Record<TradingSession, ReturnType<typeof summarizeSessionScores>>> {
+export async function computeSessionPerformanceForAllSessions(strategyVersion?: "v1" | "v2" | "v3" | "v4" | "v5" | "v6"): Promise<Record<TradingSession, ReturnType<typeof summarizeSessionScores>>> {
   const rows = await prisma.score.findMany({
     where: { time: { gte: analyticsLookbackSince() }, ...(strategyVersion ? { strategyVersion } : {}) },
     select: { session: true, outcomeLabel: true, outcomeRMultiple: true, marketStructureLabel: true, liquidityLabel: true, priceActionLabel: true },
@@ -282,7 +323,7 @@ async function computeSessionPerformanceForAllSessions(strategyVersion?: "v1" | 
  * Grouping by that pair before counting is what turns "row count" into
  * "actual signal count" -- without it this would overcount fires by ~4x.
  */
-async function computeStrategyStatus(strategyId: string): Promise<{
+export async function computeStrategyStatus(strategyId: string): Promise<{
   strategyId: string;
   fireCount: number;
   lastFiredAt: string | null;
@@ -314,11 +355,11 @@ async function computeStrategyStatus(strategyId: string): Promise<{
 }
 
 /** One query covering every (version, session) combination, grouped in memory -- replaces what was 9 separate round trips. */
-async function computeStrategyComparison(): Promise<Record<"v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7", Record<TradingSession, ReturnType<typeof summarizeSessionScores>>>> {
+export async function computeStrategyComparison(): Promise<Record<"v1" | "v2" | "v3" | "v4" | "v5" | "v6" | "v7", Record<TradingSession, ReturnType<typeof summarizeSessionScores>>>> {
   const versions = ["v1", "v2", "v3", "v4", "v5", "v6", "v7"] as const;
   const rows = await prisma.score.findMany({
     where: { time: { gte: analyticsLookbackSince() }, strategyVersion: { in: [...versions] } },
-    select: { session: true, strategyVersion: true, outcomeLabel: true, outcomeRMultiple: true, marketStructureLabel: true, liquidityLabel: true, priceActionLabel: true },
+    select: { session: true, strategyVersion: true, outcomeLabel: true, outcomeRMultiple: true, marketStructureLabel: true, liquidityLabel: true, priceActionLabel: true, decision: true },
   });
 
   const byVersionSession = new Map<string, SessionScoreRow[]>();

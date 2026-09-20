@@ -35,12 +35,18 @@
  *      comment for the real shape.
  *
  * probability = totalPoints / 100, same direct mapping v6 uses -- not a
- * logit sum. Note the max achievable total is NOT 100 for both sides: the
- * ADX factor's long-side weight is deliberately half the short-side weight
- * (see scoreAdxRegimeAsymmetry), so a long can reach at most 85 points
- * (85% probability) while a short can reach the full 100 -- an intentional,
- * documented asymmetry reflecting that the mined evidence is much weaker
- * for longs on that one factor, not a bug.
+ * logit sum. Both sides can reach the full 100 points (see
+ * scoreAdxRegimeAsymmetry's 2026-08-17 note): the ADX factor's long-side
+ * weight was originally half the short-side weight (15 vs 30) to reflect
+ * that the mined evidence was much weaker for longs on that one factor, but
+ * since the final probability is just total points / 100 regardless of
+ * side, that gave longs a hard 85-point ceiling no long setup could ever
+ * cross -- a structural bias favoring shorts on every score, not merely a
+ * reflection of the underlying win-rate data it was meant to document.
+ * Equalized 2026-08-17 (operator request) -- the shape of each side's curve
+ * is unchanged (short stays a monotonic ramp across the ADX range; long
+ * stays a flat bonus below a threshold, zero above), only the ceiling both
+ * can reach.
  *
  * Zero live trades behind this version's own weight yet (same
  * caveat as v5/v6 at their own introduction) -- shadow-scored only, see
@@ -89,11 +95,17 @@ export function scoreMaDistanceAsymmetry(distanceFromMa20Atr: number | null, sid
 
 // ---- #2: ADX>=40 regime asymmetry (30 pts) ----
 // Monotonic and strong for shorts (see file header); flat and weak for
-// longs -- long's contribution is capped at half the short side's weight
-// (15 vs 30) to reflect that the evidence backing it is much thinner, not
-// treated as symmetric just because it shares one factor.
+// longs. Weights equalized 2026-08-17 (operator request, see file header) --
+// long's weight was previously capped at half the short side's (15 vs 30) to
+// reflect that the evidence backing it is much thinner, but that gave every
+// long setup a hard sub-100 ceiling on this model regardless of the actual
+// setup, a structural bias rather than a data-driven one. The underlying
+// asymmetry in the evidence is still real and still reflected in each side's
+// curve *shape* below (short ramps monotonically with ADX; long gets only a
+// flat, capped bonus for a weak/developing trend) -- only the two ceilings
+// are now equal.
 const ADX_REGIME_WEIGHT_SHORT = 30;
-const ADX_REGIME_WEIGHT_LONG = 15;
+const ADX_REGIME_WEIGHT_LONG = 30;
 
 export function scoreAdxRegimeAsymmetry(adx: number | null, side: "long" | "short"): { points: number; description: string } {
   if (adx === null) {

@@ -39,8 +39,3 @@ export async function getSupportResistanceLevels(symbol: string): Promise<SrSnap
   cache.set(symbol, { snapshot, computedAt: Date.now() });
   return snapshot;
 }
-
-/** Test-only: clear the cache so tests don't see another test's stale state. */
-export function _resetSupportResistanceCacheForTests(): void {
-  cache.clear();
-}

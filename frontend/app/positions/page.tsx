@@ -25,6 +25,15 @@ export default function PositionsPage() {
     }
   }
 
+  // Short label for each brokerKind -- matters now that positions from more
+  // than one live broker (TopstepX, Tradesea) can appear in the same list.
+  function brokerLabel(brokerKind: string): string {
+    if (brokerKind === "browser_control") return "TopstepX";
+    if (brokerKind === "tradesea_browser_control") return "Tradesea";
+    if (brokerKind === "simulated") return "paper";
+    return brokerKind;
+  }
+
   async function letItRide(tradeId: number, symbol: string) {
     if (
       !(await confirm(
@@ -51,6 +60,7 @@ export default function PositionsPage() {
         <table>
           <thead>
             <tr>
+              <th>Broker</th>
               <th>Symbol</th>
               <th>Side</th>
               <th>Qty</th>
@@ -67,6 +77,9 @@ export default function PositionsPage() {
           <tbody>
             {positions?.map((p) => (
               <tr key={p.tradeId}>
+                <td>
+                  <Badge text={brokerLabel(p.brokerKind)} tone="neutral" />
+                </td>
                 <td className="font-medium text-white">{p.symbol}</td>
                 <td>
                   <Badge text={p.side} tone={p.side === "long" ? "good" : "bad"} />
@@ -80,6 +93,7 @@ export default function PositionsPage() {
                 <td>
                   <div className="flex gap-1">
                     <Badge text={p.trailingStopPlaced ? "trailing" : "hard stop"} tone={p.trailingStopPlaced ? "good" : "neutral"} />
+                    <Badge text={p.takeProfitOrderPlaced ? "TP order live" : "TP: software only"} tone={p.takeProfitOrderPlaced ? "good" : "warn"} />
                     {p.letItRide && <Badge text="riding" tone="warn" />}
                   </div>
                 </td>

@@ -65,16 +65,40 @@ describe("computeConfidenceTierQuantity", () => {
     expect(computeConfidenceTierQuantity(0.95, 10, customTiers)).toBe(5);
   });
 
-  it("never sizes below 1 contract even when average probability is below 65%", () => {
-    // A signal can still reach execution with an average below 65% (e.g. two
-    // versions just over the threshold and a third near 0%, since consensus
-    // only requires 2/3 to individually clear it) -- a trade that already
-    // cleared every other gate is never sized to zero for landing here.
+  it("never sizes below the lowest tier's quantity when average probability lands below every tier", () => {
+    // A signal can still reach execution with an average below the lowest
+    // tier (e.g. two versions just over the threshold and a third near 0%,
+    // or a v7-solo execution, since consensus doesn't require the AVERAGE
+    // to clear any tier -- see engine/loop.ts's determineConsensus) -- a
+    // trade that already cleared every other gate is never sized to zero
+    // for landing here. With the default tiers, the lowest tier's quantity
+    // happens to be 1 (65% -> 1 contract), so this doesn't distinguish "floor
+    // = lowest tier's quantity" from "floor = hardcoded 1" -- see the
+    // dedicated test below with a custom tiers array where the lowest
+    // tier's quantity is NOT 1 for that.
     expect(computeConfidenceTierQuantity(0.5, 10)).toBe(1);
     expect(computeConfidenceTierQuantity(0, 10)).toBe(1);
   });
 
+  it("floors to the LOWEST configured tier's own quantity, not a hardcoded 1, when average lands below every tier", () => {
+    // 2026-08-11 regression: matches a real live SystemState config (29%/2,
+    // 76%/3, 85%/4) where the lowest tier's quantity is 2, not 1 -- quantity
+    // must still trace back to the operator's own certainty-tier
+    // configuration in the below-every-tier gap, not an unrelated constant.
+    const liveTiers: [number, number][] = [[0.29, 2], [0.76, 3], [0.85, 4]];
+    expect(computeConfidenceTierQuantity(0.2, 10, liveTiers)).toBe(2);
+    expect(computeConfidenceTierQuantity(0, 10, liveTiers)).toBe(2);
+    expect(computeConfidenceTierQuantity(0.29, 10, liveTiers)).toBe(2); // inclusive at the tier's own threshold
+    expect(computeConfidenceTierQuantity(0.76, 10, liveTiers)).toBe(3);
+    expect(computeConfidenceTierQuantity(0.85, 10, liveTiers)).toBe(4);
+  });
+
   it("respects maxPositionSize even at the highest confidence tier", () => {
     expect(computeConfidenceTierQuantity(0.95, 2)).toBe(2);
+  });
+
+  it("respects maxPositionSize even at the below-every-tier floor", () => {
+    const liveTiers: [number, number][] = [[0.29, 2], [0.76, 3], [0.85, 4]];
+    expect(computeConfidenceTierQuantity(0.1, 1, liveTiers)).toBe(1);
   });
 });

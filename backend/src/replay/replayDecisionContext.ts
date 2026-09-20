@@ -19,12 +19,15 @@ import { classifyRegime, type RegimeResult } from "../regime/classifier.js";
 import { classifyEmaTrend, type EmaTrend } from "../analytics/emaTrend.js";
 import { computeOpeningRangeStats, type OpeningRangeStats } from "../analytics/openingRange.js";
 import { getNewsRiskStatus, type NewsRiskStatus } from "../news/risk.js";
-import { getInstrument } from "../marketData/instruments.js";
+import { getConflictingPartnerSymbol, getInstrument } from "../marketData/instruments.js";
 import { computeFixedTargetEdge } from "../engine/fixedTargetEdgeCache.js";
+import { computeBanditSelection, CONSENSUS_BANDIT_ARMS, type BanditSelectionResult } from "../scoring/consensusBandit.js";
+import { computeSessionPerformanceSelection, SESSION_PERFORMANCE_ARMS, type SessionPerformanceSelection } from "../scoring/sessionPerformance.js";
+import type { DealerLevelResult } from "../marketData/dealerGex.js";
 import type { OhlcBar } from "../regime/indicators.js";
-import type { TradingSession } from "../analytics/session.js";
+import { getSessionStart, type TradingSession } from "../analytics/session.js";
 import { DEFAULT_CONFIDENCE_TIERS } from "../risk/sizing.js";
-import type { AccountRiskState, RiskLimitsConfig } from "../risk/index.js";
+import type { AccountRiskState, DailyPlanZone, RiskLimitsConfig } from "../risk/index.js";
 import type { DecisionContext, ExecutionSettings } from "./types.js";
 
 // Mirrors risk/engine.ts's real hardcoded-turned-operator-adjustable default
@@ -65,6 +68,20 @@ interface OpenPositionMarker {
   pointValue: Decimal;
 }
 
+/** The sweep knobs for scripts/replayBanditEval.ts -- overrides scoring/consensusBandit.ts's own defaults. `forceColdStart` runs the A/B baseline leg (today's plain hasV1V2V3MajorityAgreement rule, exercised via hasBanditSelectedVersionAgreement's own coldStart fallback) without needing a second set of DB queries. */
+export interface BanditConfigOverride {
+  explorationConstant?: number;
+  minBucketSamples?: number;
+  minPerArmSamples?: number;
+  forceColdStart?: boolean;
+}
+
+/** Same sweep-knob shape as BanditConfigOverride above, for the session-performance gate that superseded the bandit leg (scoring/sessionPerformance.ts). */
+export interface SessionPerformanceConfigOverride {
+  minSamplesPerVersion?: number;
+  forceColdStart?: boolean;
+}
+
 export class ReplayDecisionContext implements DecisionContext {
   private openPositions = new Map<string, OpenPositionMarker>();
   /** Latest known close per symbol, for mark-to-market -- updated every bar regardless of whether that symbol has a position open. */
@@ -82,6 +99,10 @@ export class ReplayDecisionContext implements DecisionContext {
     private limits: RiskLimitsConfig,
     /** Optional -- the sweep knob for testing a different reward:risk/confidence-tier configuration against historical data. Defaults to live's own current defaults, not stops.ts's generic fallback (see DEFAULT_EXECUTION_SETTINGS above). */
     private settings: ExecutionSettings = DEFAULT_EXECUTION_SETTINGS,
+    /** Optional -- scripts/replayBanditEval.ts's A/B sweep knob for the consensus bandit's own constants. Undefined means "use scoring/consensusBandit.ts's live defaults." */
+    private banditConfig?: BanditConfigOverride,
+    /** Optional -- the equivalent sweep knob for the session-performance gate that superseded the bandit leg. Undefined means "use scoring/sessionPerformance.ts's live defaults." */
+    private sessionPerformanceConfig?: SessionPerformanceConfigOverride,
   ) {
     this.equity = new Decimal(startingEquity);
     this.peakEquity = this.equity;
@@ -304,5 +325,70 @@ export class ReplayDecisionContext implements DecisionContext {
 
   async hasOpenPosition(symbol: string): Promise<boolean> {
     return this.openPositions.has(symbol);
+  }
+
+  async hasConflictingPosition(symbol: string, side: "long" | "short"): Promise<boolean> {
+    const partnerSymbol = getConflictingPartnerSymbol(symbol);
+    if (!partnerSymbol) return false;
+    const partnerPosition = this.openPositions.get(partnerSymbol);
+    return partnerPosition !== undefined && partnerPosition.side !== side;
+  }
+
+  // Calls the UNCACHED core directly, every time -- unlike
+  // LiveDecisionContext, which goes through engine/consensusBanditCache.ts's
+  // wall-clock TTL cache. A cache keyed only by bucket (ignoring `at` for
+  // cache-hit purposes) is correct for live, where callers only ever call
+  // "now" -- but a replay run walks many distinct `at` values across a
+  // historical window, and a stale cache hit would silently return a
+  // wrong-`at` selection. Same reasoning as computeFixedTargetEdge's own
+  // export comment.
+  async banditVersionSelection(bucket: string, at: Date): Promise<BanditSelectionResult> {
+    if (this.banditConfig?.forceColdStart) {
+      return { bucket, selectedVersion: CONSENSUS_BANDIT_ARMS[0]!, coldStart: true, armStats: new Map(), armScores: new Map() };
+    }
+    return computeBanditSelection(bucket, at, this.banditConfig?.explorationConstant, this.banditConfig?.minBucketSamples, this.banditConfig?.minPerArmSamples);
+  }
+
+  // Same "calls the uncached core directly" reasoning as banditVersionSelection
+  // above -- a replay run walks many distinct `at` values, so a wall-clock
+  // cache would silently return a wrong-session selection.
+  async sessionPerformanceSelection(at: Date): Promise<SessionPerformanceSelection> {
+    const sessionStart = getSessionStart(at);
+    if (this.sessionPerformanceConfig?.forceColdStart) {
+      return { sessionStart, selectedVersion: SESSION_PERFORMANCE_ARMS[0]!, coldStart: true, statsByVersion: new Map() };
+    }
+    return computeSessionPerformanceSelection(sessionStart, at, this.sessionPerformanceConfig?.minSamplesPerVersion);
+  }
+
+  // CBOE's historical options chain cannot be backfilled -- always null in
+  // replay, same fidelity limit as orderFlow above. risk/engine.ts's
+  // dealer-level gate fails open on null, so this never invents a
+  // rejection replay-vs-live would disagree on; decideOnBar's degraded[]
+  // tracking is what makes this gap visible rather than hidden.
+  async dealerLevels(): Promise<DealerLevelResult | null> {
+    return null;
+  }
+
+  // Always empty -- see DecisionContext.dailyPlanZones's own comment for why
+  // this is a different kind of limitation than dealerLevels/orderFlow
+  // above (not a fidelity gap; an LLM-authored "today's plan" simply has no
+  // meaning for a historical replay date).
+  async dailyPlanZones(): Promise<DailyPlanZone[]> {
+    return [];
+  }
+
+  // Always empty -- see DecisionContext.disabledStrategyIds's own comment.
+  async disabledStrategyIds(): Promise<Set<string>> {
+    return new Set();
+  }
+
+  // Always empty -- see DecisionContext.disabledSymbols's own comment.
+  async disabledSymbols(): Promise<Set<string>> {
+    return new Set();
+  }
+
+  // Always empty -- see DecisionContext.disabledStrategySymbolPairs's own comment.
+  async disabledStrategySymbolPairs(): Promise<Set<string>> {
+    return new Set();
   }
 }

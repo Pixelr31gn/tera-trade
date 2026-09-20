@@ -37,8 +37,3 @@ export async function getPpm(symbol: string): Promise<PpmSnapshot> {
   cache.set(symbol, { snapshot, computedAt: Date.now() });
   return snapshot;
 }
-
-/** Test-only: clear the cache so tests don't see another test's stale state. */
-export function _resetPpmCacheForTests(): void {
-  cache.clear();
-}

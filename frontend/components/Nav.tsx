@@ -2,10 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { logout } from "@/lib/auth";
 
 const LINKS = [
   { href: "/", label: "Dashboard" },
+  { href: "/assistant", label: "Assistant" },
   { href: "/recommendations", label: "Recommendations" },
+  { href: "/journal", label: "Journal" },
   { href: "/analytics", label: "Analytics" },
   { href: "/sessions", label: "Sessions" },
   { href: "/strategy", label: "Strategy" },
@@ -15,6 +18,14 @@ const LINKS = [
 
 export function Nav() {
   const pathname = usePathname();
+
+  async function handleLogout() {
+    await logout();
+    // Full reload, not client-side state, so LoginGate re-runs its mount-time
+    // session check against the now-cleared cookie.
+    window.location.reload();
+  }
+
   return (
     // Solid background instead of backdrop-blur -- a sticky element blurring
     // actively-scrolling content underneath it forces the browser to
@@ -54,6 +65,12 @@ export function Nav() {
           </Link>
         );
       })}
+      <button
+        onClick={handleLogout}
+        className="ml-auto rounded-lg px-3 py-1.5 text-sm text-gray-400 transition-all duration-200 hover:bg-white/[0.03] hover:text-white"
+      >
+        Log out
+      </button>
     </nav>
   );
 }

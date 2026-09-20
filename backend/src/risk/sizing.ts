@@ -92,11 +92,23 @@ export function computeConfidenceTierQuantity(
   // Consensus requires at least 2/3 versions to individually clear the score
   // threshold to reach execution at all (see engine/loop.ts's
   // determineConsensus) -- the *average* can still land below the lowest
-  // tier in that case (e.g. two versions just over 65% and a third near 0%).
-  // A setup that already cleared every other gate is never sized to zero for
-  // landing in that gap -- same "never below 1" floor as the dollar-based
-  // sizing above, just re-anchored to confidence tiers instead of dollars.
+  // tier in that case (e.g. two versions just over 65% and a third near 0%,
+  // or a v7-solo execution where the other five versions score near 0%
+  // while v7 alone clears 65%+). A setup that already cleared every other
+  // gate is never sized to zero for landing in that gap.
+  //
+  // Floor is the LOWEST configured tier's own quantity, not a hardcoded
+  // constant (2026-08-11, operator correction: "dollar based sizing should
+  // only matter for entry and exit points, the amount of contracts taken
+  // should be determined by the certainty % of the recommendations" --
+  // dollar-based sizing's floor-of-1 in computePositionSize above is a
+  // stop-validity gate, not a real fallback quantity, so it was never a
+  // good model for this one; a hardcoded 1 here had nothing to do with
+  // certainty at all, contradicting the whole point of tier-based sizing
+  // and silently undersizing relative to what an operator who set Tier 1's
+  // quantity above 1 actually configured).
   const sortedDescending = [...tiers].sort((a, b) => b[0] - a[0]);
-  const tierQuantity = sortedDescending.find(([min]) => averageProbability >= min)?.[1] ?? 1;
+  const lowestTierQuantity = sortedDescending.at(-1)?.[1] ?? 1; // only reached if `tiers` is empty, which the 3-tier API contract never allows
+  const tierQuantity = sortedDescending.find(([min]) => averageProbability >= min)?.[1] ?? lowestTierQuantity;
   return Math.min(tierQuantity, maxPositionSize);
 }

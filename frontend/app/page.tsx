@@ -20,7 +20,8 @@ import { StatCard } from "@/components/StatCard";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
 import { ActionBanner } from "@/components/ActionBanner";
-import { QuickOrderPanel } from "@/components/QuickOrderPanel";
+import { DailyPlanPanel } from "@/components/DailyPlanPanel";
+import { TradableSymbolsPanel } from "@/components/TradableSymbolsPanel";
 import { PpmSpeedGauge } from "@/components/PpmSpeedGauge";
 import { LiveFeed } from "@/components/LiveFeed";
 import { RecentTrades } from "@/components/RecentTrades";
@@ -31,6 +32,7 @@ const SESSION_ORDER = ["new_york", "london", "asian"];
 export default function DashboardPage() {
   const { data: accounts } = useSWR<AccountSummary[]>("/api/accounts", fetcher, { refreshInterval: 15000 });
   const account = accounts?.[0];
+  const { data: systemState } = useSWR<SystemState>("/api/system/state", fetcher, { refreshInterval: 10000 });
   // Equity-curve history is tracked per real TopstepX account (2026-07-21
   // fix) -- an operator switching between several funded accounts in the
   // browser must not see their histories blended into one curve. Defaults
@@ -40,9 +42,20 @@ export default function DashboardPage() {
   const { data: equityAccounts } = useSWR<EquityAccountOption[]>("/api/accounts/equity-accounts", fetcher, { refreshInterval: 15000 });
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   useEffect(() => {
-    if (selectedAccountId !== null || !equityAccounts || equityAccounts.length === 0) return;
-    setSelectedAccountId(equityAccounts.find((a) => a.isCurrentlyActive)?.id ?? equityAccounts[0]!.id);
-  }, [equityAccounts, selectedAccountId]);
+    if (selectedAccountId !== null || !equityAccounts || equityAccounts.length === 0 || !systemState) return;
+    // Paper/analysis-only trades always record against the shared "default"
+    // account (brokerAccountId === null) -- a real TopstepX account only
+    // ever accrues equity_curve rows while mode is LIVE. Defaulting to
+    // "isCurrentlyActive" regardless of mode meant a paper-mode session
+    // silently pointed this chart at whichever real account happened to be
+    // selected in the browser, which never has any paper equity on it at
+    // all (2026-08-13 operator report: paper trades were recording and
+    // equity was updating correctly under the shared account -- the chart
+    // was just looking at the wrong one).
+    const defaultAccount = equityAccounts.find((a) => a.brokerAccountId === null) ?? equityAccounts[0]!;
+    const preferred = systemState.mode === "live" ? (equityAccounts.find((a) => a.isCurrentlyActive) ?? defaultAccount) : defaultAccount;
+    setSelectedAccountId(preferred.id);
+  }, [equityAccounts, selectedAccountId, systemState]);
   const selectedEquityAccount = equityAccounts?.find((a) => a.id === selectedAccountId);
   const { data: equityCurve } = useSWR<EquityPoint[]>(
     selectedAccountId !== null ? `/api/accounts/${selectedAccountId}/equity-curve?days=30` : null,
@@ -52,7 +65,6 @@ export default function DashboardPage() {
   const { data: positions } = useSWR<Position[]>("/api/positions", fetcher, { refreshInterval: 10000 });
   const { data: regimes } = useSWR<Record<string, RegimeInfo>>("/api/regime/current", fetcher, { refreshInterval: 15000 });
   const { data: newsStatus } = useSWR<NewsRiskStatus>("/api/news/risk-status", fetcher, { refreshInterval: 15000 });
-  const { data: systemState } = useSWR<SystemState>("/api/system/state", fetcher, { refreshInterval: 10000 });
   const { data: performance } = useSWR<PerformanceSummary>("/api/performance/summary", fetcher, { refreshInterval: 20000 });
   const { data: sessionPerf } = useSWR<Record<string, SessionPerformance>>("/api/analytics/session-performance", fetcher, {
     refreshInterval: 3600000, // backend caches this for 24h -- polling faster than that just re-requests the same cached response
@@ -204,7 +216,9 @@ export default function DashboardPage() {
         <div className="space-y-6">
           <PpmSpeedGauge />
 
-          <QuickOrderPanel />
+          <DailyPlanPanel />
+
+          <TradableSymbolsPanel />
 
           <Panel title="Current Regime">
             <div className="space-y-2">

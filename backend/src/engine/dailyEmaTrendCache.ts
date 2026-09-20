@@ -7,9 +7,8 @@
  * from bars_daily, the same table engine/dailyTrendCache.ts uses for the
  * (separately-purposed) v1/v2 daily-trend-alignment factor.
  */
-import { prisma } from "../db/client.js";
+import { loadDailyBars } from "../marketData/dailyBars.js";
 import { classifyEmaTrend, type EmaTrend } from "../analytics/emaTrend.js";
-import type { OhlcBar } from "../regime/indicators.js";
 
 const CACHE_TTL_MS = 60 * 60 * 1000; // a daily EMA barely moves intraday -- no need to recompute every tick
 const EMA_PERIOD = 20;
@@ -21,24 +20,13 @@ const LOOKBACK_DAYS = 90;
 
 const cache = new Map<string, { trend: EmaTrend; computedAt: number }>();
 
-async function loadDailyBars(symbol: string): Promise<OhlcBar[]> {
-  const since = new Date(Date.now() - LOOKBACK_DAYS * 86_400_000);
-  const rows = await prisma.dailyBar.findMany({ where: { symbol, date: { gte: since } }, orderBy: { date: "asc" } });
-  return rows.map((r) => ({ time: r.date, open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close), volume: Number(r.volume) }));
-}
-
 export async function getDailyEma20Trend(symbol: string): Promise<EmaTrend> {
   const cached = cache.get(symbol);
   if (cached && Date.now() - cached.computedAt < CACHE_TTL_MS) return cached.trend;
 
-  const bars = await loadDailyBars(symbol);
+  const bars = await loadDailyBars(symbol, LOOKBACK_DAYS);
   const trend = classifyEmaTrend(bars, EMA_PERIOD);
 
   cache.set(symbol, { trend, computedAt: Date.now() });
   return trend;
-}
-
-/** Test-only: clear the cache so tests don't see another test's stale state. */
-export function _resetDailyEma20TrendCacheForTests(): void {
-  cache.clear();
 }

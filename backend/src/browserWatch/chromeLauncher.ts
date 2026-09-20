@@ -31,19 +31,56 @@ const READY_TIMEOUT_MS = 20_000;
 // during a normal cold start. Polling for it here (rather than giving up on
 // the first failed request) is what makes "always open a dashboard tab"
 // true in practice instead of only on a lucky-timing restart.
+//
+// Widened 60_000 -> 180_000 (2026-08-11, operator request: "every time the
+// debug menu is opened another tab is opened with the frontend"): confirmed
+// live that this was silently giving up ("dashboard_not_reachable_skipping_tab")
+// even though the frontend WAS already serving 200s moments earlier -- this
+// call fires fire-and-forget at the very start of index.ts's main(), racing
+// the rest of a cold backend startup (broker.connect() retries, daily
+// backfill DB writes, instrument seeding) for the same single-threaded event
+// loop, so a busy startup can starve/delay both the poll ticks below AND
+// each individual fetch's own abort timer. Since this never blocks anything
+// else (fire-and-forget, see ensureDashboardTabOpen's own comment), a longer
+// budget costs nothing -- worst case the tab opens a little later instead of
+// never.
 const DASHBOARD_READY_POLL_INTERVAL_MS = 1000;
-const DASHBOARD_READY_TIMEOUT_MS = 60_000;
+const DASHBOARD_READY_TIMEOUT_MS = 180_000;
+// Widened 2000 -> 8000 same day/reason as above -- a 2s abort budget on a
+// single fetch is exactly the kind of margin that startup-time event-loop
+// jitter eats first, producing a spurious "not reachable" read against a
+// server that was actually fine.
+const DASHBOARD_FETCH_TIMEOUT_MS = 8000;
 
-async function isCdpResponding(cdpUrl: string): Promise<boolean> {
+// Edge is Chromium too and answers the identical CDP /json/version endpoint,
+// so a plain "did something respond" check can't tell the two apart -- if
+// the user (or some other tool) ever had Edge sitting on this same debug
+// port for an unrelated reason, this app would silently treat Edge as "our
+// Chrome" and drive TopstepX/the dashboard through it instead, with no
+// visible sign anything was wrong beyond the window that opened. The
+// `Browser` field in the /json/version response is how each Chromium browser
+// self-identifies ("Chrome/128.0.6613.120" vs Edge's "Edg/128.0.2739.67") --
+// checking it here is what actually confirms this is Chrome.
+async function getCdpBrowserString(cdpUrl: string): Promise<string | null> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
     const res = await fetch(`${cdpUrl}/json/version`, { signal: controller.signal });
     clearTimeout(timeout);
-    return res.ok;
+    if (!res.ok) return null;
+    const body = (await res.json()) as { Browser?: string };
+    return body.Browser ?? null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function isChromeBrowserString(browser: string | null): boolean {
+  return browser !== null && browser.toLowerCase().startsWith("chrome/");
+}
+
+async function isCdpRespondingAsChrome(cdpUrl: string): Promise<boolean> {
+  return isChromeBrowserString(await getCdpBrowserString(cdpUrl));
 }
 
 // Common install locations across Windows, macOS, and Linux -- checked in
@@ -77,7 +114,7 @@ async function waitForDashboardReachable(dashboardUrl: string): Promise<boolean>
   while (Date.now() < deadline) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2000);
+      const timeout = setTimeout(() => controller.abort(), DASHBOARD_FETCH_TIMEOUT_MS);
       const res = await fetch(dashboardUrl, { signal: controller.signal });
       clearTimeout(timeout);
       if (res.ok) return true;
@@ -149,8 +186,21 @@ export async function ensureDebugChromeRunning(opts: {
     void ensureDashboardTabOpen(opts.cdpUrl, opts.dashboardUrl).catch(() => {});
   }
 
-  if (await isCdpResponding(opts.cdpUrl)) {
-    logger.info({ cdpUrl: opts.cdpUrl }, "debug_chrome_already_running");
+  const existingBrowser = await getCdpBrowserString(opts.cdpUrl);
+  if (existingBrowser !== null) {
+    if (isChromeBrowserString(existingBrowser)) {
+      logger.info({ cdpUrl: opts.cdpUrl, browser: existingBrowser }, "debug_chrome_already_running");
+      return;
+    }
+    // Something else (most commonly Edge) already owns this port -- launching
+    // our own Chrome with the same --remote-debugging-port would either fail
+    // to bind or produce a second, unmanaged Chrome with no CDP endpoint of
+    // its own. Refusing and saying so clearly beats silently driving the
+    // wrong browser or silently doing nothing.
+    logger.warn(
+      { cdpUrl: opts.cdpUrl, browser: existingBrowser },
+      "cdp_port_occupied_by_non_chrome_browser -- close it (e.g. quit Edge) so Tera Trade can launch its own Chrome here, or change BROWSER_CDP_URL to an unused port"
+    );
     return;
   }
 
@@ -201,7 +251,7 @@ export async function ensureDebugChromeRunning(opts: {
 
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await isCdpResponding(opts.cdpUrl)) {
+    if (await isCdpRespondingAsChrome(opts.cdpUrl)) {
       logger.info({ cdpUrl: opts.cdpUrl }, "debug_chrome_ready");
       return;
     }

@@ -53,5 +53,29 @@ export function getInstrument(symbol: string): InstrumentSpec {
 // read-only endpoints (market snapshot, performance history, regime display)
 // still use the full list so past data remains visible if anyone looks it up.
 // (2026-07-15: narrowed to NQ only -- "I don't trade ES". 2026-07-20:
-// re-added ES.)
-export const ACTIVE_INSTRUMENTS: InstrumentSpec[] = DEFAULT_INSTRUMENTS.filter((i) => i.symbol === "NQ" || i.symbol === "ES");
+// re-added ES. 2026-09-03: re-added GC, traded as MGC -- its pointValue (10)
+// and brokerContractPrefix (MGC) above were already sized for the micro
+// contract, same pattern as ES/NQ's MES/MNQ, so no economics changed here.
+// Added disabled-by-default via DisabledSymbol (see
+// engine/symbolEnablementCache.ts and the new per-instrument dashboard
+// toggle) -- MGC's order-entry DOM automation has never been exercised
+// against the real account, unlike MES/MNQ's, which were calibrated live
+// (see docs/BUILD_HISTORY.md). Flip it on from the dashboard once verified.)
+export const ACTIVE_INSTRUMENTS: InstrumentSpec[] = DEFAULT_INSTRUMENTS.filter((i) => i.symbol === "NQ" || i.symbol === "ES" || i.symbol === "GC");
+
+// ES/NQ cross-symbol conflict check (2026-09-01, operator request: "ES and
+// NQ should never enter into conflicting trades"). Both are broad US equity
+// index futures, ~90%+ correlated intraday -- a long on one held alongside a
+// short on the other isn't diversification, it's betting against yourself on
+// the same underlying move. Confirmed live the same day: NQ long open
+// simultaneously with ES short (trades #177/#178/#179), and earlier the same
+// session (#151 ES short overlapping #170 NQ long). A plain symbol->symbol
+// map, not a general "correlation group" concept -- CL/GC aren't currently
+// traded (see ACTIVE_INSTRUMENTS above) and aren't meaningfully correlated
+// with ES/NQ or each other anyway, so there's nothing to generalize to yet.
+const CONFLICTING_PARTNER_SYMBOL: Partial<Record<string, string>> = { ES: "NQ", NQ: "ES" };
+
+/** The symbol whose opposite-direction open position would conflict with a new trade on `symbol` -- null for any symbol with no defined partner (see CONFLICTING_PARTNER_SYMBOL above). */
+export function getConflictingPartnerSymbol(symbol: string): string | null {
+  return CONFLICTING_PARTNER_SYMBOL[symbol] ?? null;
+}
