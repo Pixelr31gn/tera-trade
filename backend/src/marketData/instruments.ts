@@ -29,11 +29,16 @@ export interface InstrumentSpec {
    */
   brokerContractPrefix: string;
   /**
-   * Largest gap, in price POINTS, between a market order's theoretical price and a
-   * fill price scraped back off the broker's DOM that is still believable as real
-   * slippage rather than a misread (see brokers/browserControlBroker.ts's
-   * readRealFillPrice). Beyond this the reading is discarded and the theoretical
-   * price is used instead.
+   * FLOOR, in price points, under the plausibility band that guards a fill price
+   * scraped back off the broker's DOM (see brokers/browserControlBroker.ts's
+   * readRealFillPrice). The effective tolerance is
+   * `max(this, FILL_PLAUSIBILITY_FRACTION x theoreticalPrice)`; this exists only
+   * so a hypothetical low-priced instrument still gets a usable absolute band.
+   *
+   * 2026-09-21, LATER THE SAME DAY: these values were briefly the tolerance
+   * ITSELF, and that was wrong -- see FILL_PLAUSIBILITY_FRACTION below for the
+   * live regression that showed why. Kept as a floor rather than deleted so the
+   * band can never collapse toward zero on a cheap instrument.
    *
    * 2026-09-21: replaces a flat 5% RELATIVE guard that was inert on a five-figure
    * index -- 5% of NQ at 30,000 is +/-1500 points, so every misread this guard
@@ -71,6 +76,44 @@ export interface InstrumentSpec {
    */
   trailingStopTickBand?: { minTicks: number; maxTicks: number };
 }
+
+/**
+ * Fraction of the theoretical price that a scraped-back fill may deviate by and
+ * still be believed (brokers/browserControlBroker.ts's readRealFillPrice).
+ *
+ * History, because this reversed twice in one day and the second version is the
+ * one that matters:
+ *
+ * Until 2026-09-21 this was a flat 5%. That was described as catching DOM
+ * misreads, and on a five-figure index 5% is +/-1500 points, so it never
+ * rejected anything.
+ *
+ * It was then replaced with tight absolute per-instrument point tolerances
+ * (ES 3, NQ 10) on the theory that a large deviation means a misread. That
+ * theory is false and it caused a real regression within hours: ES trade 32
+ * filled at 7843.50 against a theoretical 7837.00 -- 6.50 points of GENUINE
+ * slippage, rejected by the 3-point tolerance. execution/engine.ts then
+ * anchored the bracket to the stale theoretical price, so a correctly-sized
+ * 4.50/13.50 (1:3) plan became 11.00 points of real risk against 7.00 points
+ * of real reward on the actual position -- the stop WIDER than the target,
+ * which is exactly what the 1:3 rule exists to prevent. Confirmed off the
+ * broker's own DOM: $172 at the stop, $105 at the target.
+ *
+ * The lesson: deviation MAGNITUDE cannot separate a bad read from a fast fill.
+ * NQ moves 22 points/minute in the tape this was tuned against, so real
+ * slippage and a plausible-looking misread occupy the same range. What a
+ * misread actually looks like here is a wrong KIND of number -- 201.84 scraped
+ * for ES (2026-09-21, a zero-volume feed corruption), or a timestamp fragment
+ * like 0.991 (2026-07-28) -- i.e. off by 97%+, not by points.
+ *
+ * So this is a plausibility check, not a slippage check, and it is deliberately
+ * generous: 1% is ES +/-78, NQ +/-305, GC +/-44, CL +/-0.8. Genuine slippage
+ * never approaches that; every misread class actually observed in this codebase
+ * blows straight through it. Anything that needs to reason about slippage size
+ * belongs downstream of the fill, not in the guard that decides whether the
+ * fill was read correctly at all.
+ */
+export const FILL_PLAUSIBILITY_FRACTION = new Decimal("0.01");
 
 export const DEFAULT_INSTRUMENTS: InstrumentSpec[] = [
   { symbol: "ES", dataSymbol: "ES=F", exchange: "CME", tickSize: new Decimal("0.25"), pointValue: new Decimal(5), rthOpenHourET: 9, rthOpenMinuteET: 30, brokerContractPrefix: "MES", maxFillDeviationPoints: new Decimal("3") },

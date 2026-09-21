@@ -263,99 +263,91 @@ describe("RiskEngine.assessNewTrade -- hardTakeProfitDollars stop is derived fro
     });
   }
 
-  it("falls back to the NO_STOP_LOSS_SENTINEL_POINTS stop when no daily-plan range exists (100pt sentinel as of 2026-09-03, cut from 100,000 after it produced negative/invalid stop prices)", () => {
+  // 2026-09-21, operator instruction stated as an absolute: "the risk has to
+  // be smaller than what we are trying to win at all times no exceptions."
+  // This branch is now entered ONLY when a real per-session likely-move read
+  // exists. Without one there is nothing honest to size a target from, so the
+  // trade falls through to the ordinary ATR/structure/swing pipeline instead
+  // of pairing a placeholder target with either a 1.75pt stop or a 100pt
+  // sentinel. See risk/engine.ts's comment on the branch condition for both
+  // real failures that motivated this.
+  it("no longer pairs a sentinel stop with a flat target when no likely-move read exists -- falls through to the real pipeline", () => {
     const assessment = assessHardTarget("long", undefined);
     expect(assessment.approved).toBe(true);
-    expect(assessment.stopDistancePoints?.toNumber()).toBe(100);
-    expect(assessment.stopPrice?.toNumber()).toBeGreaterThan(0); // must always be a valid, positive price
-    expect(assessment.reason).toContain("no real stop-loss");
+    // The retired path produced exactly 100pt of risk against a 5pt target.
+    expect(assessment.stopDistancePoints!.toNumber()).not.toBe(100);
+    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).not.toBeCloseTo(5, 1);
+    expect(assessment.reason).not.toContain("no real stop-loss");
+    const risk = new Decimal(20000).minus(assessment.stopPrice!).abs();
+    const reward = assessment.takeProfitPrice!.minus(20000).abs();
+    expect(reward.gt(risk)).toBe(true);
   });
 
-  it("a long's stop is derived from 1/3 of the take-profit distance, not the support boundary, when a daily-plan range exists", () => {
-    const assessment = assessHardTarget("long", RANGE_ZONES);
+  it("a long's stop is derived from 1/3 of the take-profit distance, not the support boundary", () => {
+    const assessment = assessHardTarget("long", RANGE_ZONES, new Decimal(60));
     expect(assessment.approved).toBe(true);
-    // No assistant cap set here -> take-profit falls back to the flat $5 hard-dollar distance;
-    // stop is exactly a third of that, nowhere near the support boundary (19980-19990).
-    const targetDistance = assessment.takeProfitPrice!.minus(20000).abs().toNumber();
-    expect(targetDistance).toBeCloseTo(5, 1);
-    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(targetDistance / 3, 1);
-    expect(assessment.stopPrice?.toNumber()).toBeGreaterThan(19990); // nowhere near the 19980 support boundary
+    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(60, 1);
+    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(20, 1);
+    expect(assessment.stopPrice?.toNumber()).toBeGreaterThan(19970);
     expect(assessment.reason).toContain("stop derived at 1/3 of that distance");
   });
 
-  it("a short's stop is derived from 1/3 of the take-profit distance, not the resistance boundary, when a daily-plan range exists", () => {
-    const assessment = assessHardTarget("short", RANGE_ZONES);
+  it("a short's stop is derived from 1/3 of the take-profit distance, not the resistance boundary", () => {
+    const assessment = assessHardTarget("short", RANGE_ZONES, new Decimal(60));
     expect(assessment.approved).toBe(true);
-    const targetDistance = assessment.takeProfitPrice!.minus(20000).abs().toNumber();
-    expect(targetDistance).toBeCloseTo(5, 1);
-    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(targetDistance / 3, 1);
-    expect(assessment.stopPrice?.toNumber()).toBeLessThan(20010); // nowhere near the 20020 resistance boundary
+    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(60, 1);
+    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(20, 1);
+    expect(assessment.stopPrice?.toNumber()).toBeLessThan(20030);
     expect(assessment.reason).toContain("stop derived at 1/3 of that distance");
   });
 
-  it("with no daily-plan range yet, the take-profit stays the flat hard-dollar distance (nothing to scale an R-multiple off of)", () => {
-    const withoutRange = assessHardTarget("long", undefined);
-    // stop is the 100pt sentinel; target must stay the flat 5pt distance,
-    // not 2x that sentinel -- there's no real stop to scale a target off of.
-    expect(withoutRange.takeProfitPrice?.minus(20000).abs().toNumber()).toBeCloseTo(5, 4);
-  });
-
-  // 2026-09-09, operator instruction: "the stop loss is supposed to be set
-  // based on the tp ... sl need to be adjusted based on 1/3rd of how many
-  // points the tp is set to" -- take-profit no longer scales off the stop at
-  // all; it's the other way around now (see the describe block's own
-  // comment for the real incident that motivated this).
-  it("take-profit is primary and no longer scales off a zone-anchored stop via takeProfitRMultiple", () => {
-    const assessment = assessHardTarget("long", RANGE_ZONES); // no assistant cap set
-    const targetDistance = assessment.takeProfitPrice!.minus(20000).abs().toNumber();
-    expect(targetDistance).toBeCloseTo(5, 1); // flat $5 fallback, unaffected by takeProfitRMultiple=4.0
-    expect(assessment.reason).toContain("flat take-profit $5 from entry");
+  // The zones only ever gated WHICH trades may run, never how far the stop
+  // sat, so their absence must not change the stop/target relationship. It
+  // used to: no range meant the sentinel/flat pairing instead.
+  it("uses the same target/3 geometry whether or not a daily-plan range exists", () => {
+    const cap = new Decimal(60);
+    const withRange = assessHardTarget("long", RANGE_ZONES, cap);
+    const withoutRange = assessHardTarget("long", undefined, cap);
+    expect(withoutRange.approved).toBe(true);
+    expect(withoutRange.takeProfitPrice!.toNumber()).toBe(withRange.takeProfitPrice!.toNumber());
+    expect(withoutRange.stopDistancePoints!.toNumber()).toBeCloseTo(withRange.stopDistancePoints!.toNumber(), 4);
   });
 
   it("when the assistant has set a likely-move read this session, it becomes the take-profit target directly", () => {
-    const cap = new Decimal(70);
-    const assessment = assessHardTarget("long", RANGE_ZONES, cap);
-    const targetDistance = assessment.takeProfitPrice!.minus(20000).abs();
-    expect(targetDistance.toNumber()).toBeCloseTo(cap.toNumber(), 1);
-    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(cap.dividedBy(3).toNumber(), 1);
+    const assessment = assessHardTarget("long", RANGE_ZONES, new Decimal(70));
+    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(70, 1);
+    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(70 / 3, 1);
     expect(assessment.reason).toContain("assistant's session likely-move read");
   });
 
-  // 2026-09-09: the rejection scenario the old test here covered (a stop/
-  // target pairing that violated the reward:risk floor) is now structurally
-  // impossible in this branch -- the stop is always derived as exactly
-  // target/MIN_REWARD_RISK_RATIO, so it satisfies the floor by construction
-  // no matter what the assistant's cap is set to. See stops.ts's
-  // MIN_REWARD_RISK_RATIO comment ("generic case ... satisfied by
-  // construction, nothing to check").
-  it("a looser assistant likely-move read also becomes the target directly (no longer just a ceiling on an R-multiple-derived value)", () => {
-    const looseCap = new Decimal(500);
-    const assessment = assessHardTarget("long", RANGE_ZONES, looseCap);
+  it("a looser assistant likely-move read also becomes the target directly", () => {
+    const assessment = assessHardTarget("long", RANGE_ZONES, new Decimal(500));
     expect(assessment.approved).toBe(true);
     expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(500, 1);
     expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(500 / 3, 1);
   });
 
-  it("a null assistant cap (nothing set this session) behaves the same as no cap at all", () => {
+  it("a null assistant cap behaves the same as no cap at all -- both leave this branch entirely", () => {
     const withUndefined = assessHardTarget("long", RANGE_ZONES, undefined);
     const withNull = assessHardTarget("long", RANGE_ZONES, null);
     expect(withNull.takeProfitPrice?.toNumber()).toBe(withUndefined.takeProfitPrice?.toNumber());
+    expect(withNull.reason).not.toContain("likely-move read");
   });
 });
 
-// 2026-09-09, operator instruction: "the stop loss is supposed to be set
-// based on the tp not where the daily-plan resistance boundary sits so that
-// gate is not needed" -- the zone-boundary stop width cap this block used to
-// test (stops.ts's since-removed MAX_DAILY_PLAN_RANGE_STOP_POINTS, 35pt) is
-// retired along with the zone-boundary-anchored stop itself: a wide zone no
-// longer produces an oversized stop at all (the stop is always target/3,
-// unrelated to zone width), so there's nothing left here to reject.
-describe("RiskEngine.assessNewTrade -- wide daily-plan zones no longer produce an oversized stop", () => {
+// 2026-09-21: the standing invariant, tested through the public surface
+// rather than against any one branch -- an approved trade must always stand
+// to make more than it risks, and its stop/target must be on the correct
+// sides of entry. Swept across both sides, a wide span of likely-move reads,
+// and with/without a daily-plan range, because the two real violations this
+// session each came from a DIFFERENT branch believing itself exempt from the
+// ratio.
+describe("RiskEngine.assessNewTrade -- every approved trade risks less than it stands to make", () => {
   const WIDE_SUPPORT: DailyPlanZone = { priceLow: new Decimal(19960), priceHigh: new Decimal(19970), enforcement: "hard", label: "wide support boundary" };
   const WIDE_RESISTANCE: DailyPlanZone = { priceLow: new Decimal(20030), priceHigh: new Decimal(20040), enforcement: "hard", label: "wide resistance boundary" };
   const WIDE_RANGE_ZONES: DailyPlanZone[] = [WIDE_SUPPORT, WIDE_RESISTANCE];
 
-  function assessHardTarget(side: "long" | "short", dailyPlanZones: DailyPlanZone[]) {
+  function assess(side: "long" | "short", dailyPlanZones: DailyPlanZone[] | undefined, cap: Decimal | null) {
     return new RiskEngine().assessNewTrade({
       side,
       entryPrice: new Decimal(20000),
@@ -370,29 +362,40 @@ describe("RiskEngine.assessNewTrade -- wide daily-plan zones no longer produce a
       newsStatus: NO_NEWS,
       bars: barsWithPivotLowNear(19990),
       averageProbability: 0.75,
-      takeProfitRMultiple: new Decimal("3.0"), // unused by this branch -- see the describe block above
+      takeProfitRMultiple: new Decimal("3.0"),
       confidenceTiers: DEFAULT_CONFIDENCE_TIERS,
       srGateBypass: true,
       hardTakeProfitDollars: 5,
+      assistantTakeProfitCapPoints: cap,
       dailyPlanZones,
     });
   }
 
-  it("approves a long even with a very wide zone -- stop is 1/3 of the flat $5 take-profit distance, unrelated to zone width", () => {
-    const assessment = assessHardTarget("long", WIDE_RANGE_ZONES);
-    expect(assessment.approved).toBe(true);
-    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(5 / 3, 1);
-  });
-
-  it("approves a short even with a very wide zone -- stop is 1/3 of the flat $5 take-profit distance, unrelated to zone width", () => {
-    const assessment = assessHardTarget("short", WIDE_RANGE_ZONES);
-    expect(assessment.approved).toBe(true);
-    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(5 / 3, 1);
-  });
-
-  it("does not affect the no-daily-plan-range sentinel path at all", () => {
-    const assessment = assessHardTarget("long", undefined as unknown as DailyPlanZone[]);
-    expect(assessment.approved).toBe(true);
-    expect(assessment.stopDistancePoints!.toNumber()).toBe(100); // NO_STOP_LOSS_SENTINEL_POINTS, unaffected
+  it("holds across sides, likely-move reads, and zone presence", () => {
+    const entry = new Decimal(20000);
+    let approvedCount = 0;
+    for (const side of ["long", "short"] as const) {
+      for (const zones of [undefined, WIDE_RANGE_ZONES]) {
+        for (const capPoints of [null, 1, 2, 5, 12, 30, 60, 120, 500]) {
+          const cap = capPoints === null ? null : new Decimal(capPoints);
+          const a = assess(side, zones, cap);
+          if (!a.approved) continue;
+          approvedCount++;
+          const risk = entry.minus(a.stopPrice!).abs();
+          const reward = a.takeProfitPrice!.minus(entry).abs();
+          const label = side + " cap=" + String(capPoints) + " zones=" + (zones ? "wide" : "none");
+          if (side === "long") {
+            expect(a.takeProfitPrice!.gt(entry), label).toBe(true);
+            expect(a.stopPrice!.lt(entry), label).toBe(true);
+          } else {
+            expect(a.takeProfitPrice!.lt(entry), label).toBe(true);
+            expect(a.stopPrice!.gt(entry), label).toBe(true);
+          }
+          expect(reward.gt(risk), label + ": risk " + risk.toString() + " vs reward " + reward.toString()).toBe(true);
+        }
+      }
+    }
+    // Guard against the sweep silently approving nothing and passing.
+    expect(approvedCount).toBeGreaterThan(10);
   });
 });

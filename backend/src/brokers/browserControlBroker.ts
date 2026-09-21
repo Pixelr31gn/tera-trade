@@ -45,7 +45,7 @@ import { readClosedTradeHistoryForContract } from "../browserControl/tradeHistor
 import { getSettings } from "../core/config.js";
 import { childLogger } from "../core/logger.js";
 import { getLatestBrowserAccountSnapshot } from "../engine/liveAccountOverride.js";
-import { getInstrument } from "../marketData/instruments.js";
+import { FILL_PLAUSIBILITY_FRACTION, getInstrument } from "../marketData/instruments.js";
 import type { BrokerAccount, BrokerClient, BrokerOrder, BrokerPosition, ClosedTradeHistoryEntry, HistoricalBar, OrderRequest, OrderResult } from "./types.js";
 import { OrderSide, OrderType } from "./types.js";
 
@@ -262,19 +262,17 @@ export class BrowserControlBroker implements BrokerClient {
   // either way, rather than ever return null to a caller with no fallback
   // of its own.
   //
-  // 2026-09-21: that tolerance was a flat 5% RELATIVE until today, which on a
-  // five-figure index is +/-1500 points -- so the guard never rejected
-  // anything and this whole method was, in practice, "trust the DOM". Three
-  // live NQ trades the same session (5, 10, 12) had their stop and target
-  // anchored 22-64 points away from the real fill, which for a long put both
-  // BELOW entry and made the standalone take-profit LIMIT immediately
-  // fillable; each closed within seconds of opening. An absolute per-point
-  // tolerance is the only form of this check that means anything across
-  // instruments priced from 80 (CL) to 30,000 (NQ). See
-  // maxFillDeviationPoints' own comment for why it is per-instrument and not
-  // a tick multiple.
+  // The tolerance is a PLAUSIBILITY band -- "is this even this instrument's
+  // price?" -- not a slippage band. It is deliberately generous, and
+  // rejecting a reading is NOT the safe default: a rejected reading leaves
+  // execution/engine.ts anchoring the stop and target to a possibly-stale
+  // theoretical price, which is its own way of producing a wrong bracket.
+  // See marketData/instruments.ts's FILL_PLAUSIBILITY_FRACTION for the full
+  // history, including the live ES regression that proved a tight absolute
+  // tolerance does real damage.
   private async readRealFillPrice(symbol: string, theoreticalPrice: Decimal): Promise<Decimal> {
     const instrument = getInstrument(symbol);
+    const tolerance = Decimal.max(instrument.maxFillDeviationPoints, theoreticalPrice.abs().times(FILL_PLAUSIBILITY_FRACTION));
     let lastDeviationPoints: string | null = null;
     for (let attempt = 0; attempt < FILL_CONFIRMATION_RETRIES; attempt++) {
       if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, FILL_CONFIRMATION_DELAY_MS));
@@ -284,7 +282,10 @@ export class BrowserControlBroker implements BrokerClient {
       if (raw === null) continue;
       const real = new Decimal(raw);
       const deviationPoints = real.minus(theoreticalPrice).abs();
-      if (deviationPoints.lte(instrument.maxFillDeviationPoints)) {
+      if (deviationPoints.lte(tolerance)) {
+        // Logged at info with the deviation so real slippage is visible in
+        // its own right -- a fill several points off the scored price is
+        // worth seeing even when it is correctly believed.
         logger.info(
           { symbol, theoreticalPrice: theoreticalPrice.toString(), realPrice: real.toString(), deviationPoints: deviationPoints.toString() },
           "real_fill_price_used"
@@ -292,24 +293,21 @@ export class BrowserControlBroker implements BrokerClient {
         return real;
       }
       lastDeviationPoints = deviationPoints.toString();
-      // Logged per rejected attempt, not just once at the end: a DOM misread
-      // this large is the failure mode above, and it is worth seeing every
-      // reading that was thrown away rather than only the last one.
       logger.warn(
         {
           symbol,
           theoreticalPrice: theoreticalPrice.toString(),
           rejectedPrice: real.toString(),
           deviationPoints: deviationPoints.toString(),
-          maxFillDeviationPoints: instrument.maxFillDeviationPoints.toString(),
+          tolerance: tolerance.toString(),
           attempt: attempt + 1,
         },
-        "real_fill_price_rejected_too_far_from_theoretical"
+        "real_fill_price_rejected_implausible_for_instrument"
       );
     }
     logger.warn(
-      { symbol, theoreticalPrice: theoreticalPrice.toString(), lastDeviationPoints, maxFillDeviationPoints: instrument.maxFillDeviationPoints.toString() },
-      "real_fill_price_unavailable_or_too_far_from_theoretical_using_theoretical"
+      { symbol, theoreticalPrice: theoreticalPrice.toString(), lastDeviationPoints, tolerance: tolerance.toString() },
+      "real_fill_price_unavailable_or_implausible_using_theoretical -- stop/target will be anchored to the theoretical price, which may not be where this filled"
     );
     return theoreticalPrice;
   }

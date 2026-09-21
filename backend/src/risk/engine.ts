@@ -64,7 +64,13 @@ import type { NewsRiskStatus } from "../news/risk.js";
 import type { OhlcBar } from "../regime/indicators.js";
 import { checkCircuitBreakers, type AccountRiskState, type RiskLimitsConfig } from "./circuitBreakers.js";
 import { computeConfidenceTierQuantity } from "./sizing.js";
-import { MIN_REWARD_RISK_RATIO, NO_STOP_LOSS_SENTINEL_POINTS, resolveHardTakeProfitDistance, roundAwayFromEntry } from "./stops.js";
+// NO_STOP_LOSS_SENTINEL_POINTS and resolveHardTakeProfitDistance are no
+// longer imported here: as of 2026-09-21 no path in this file produces a
+// sentinel stop or a flat placeholder target (see the hardTakeProfitDollars
+// branch's own comment). Both remain exported from stops.ts as the record of
+// what that branch used to do, and as what to restore if the reward:risk
+// floor is ever relaxed.
+import { MIN_REWARD_RISK_RATIO, roundAwayFromEntry } from "./stops.js";
 import { computeTradePlan } from "./tradePlan.js";
 
 /**
@@ -80,6 +86,42 @@ function rewardRiskFloorViolation(stopDistancePoints: Decimal, takeProfitPrice: 
   const minTakeProfitDistance = stopDistancePoints.times(MIN_REWARD_RISK_RATIO);
   if (takeProfitDistancePoints.gte(minTakeProfitDistance)) return null;
   return `stop (${stopDistancePoints.toFixed(2)} pts) is more than 1/${MIN_REWARD_RISK_RATIO.toString()} of the take-profit distance (${takeProfitDistancePoints.toFixed(2)} pts) -- needs at least ${MIN_REWARD_RISK_RATIO.toString()}:1 reward:risk`;
+}
+
+/**
+ * Null when this stop/target risks strictly LESS than it stands to make;
+ * otherwise the rejection reason.
+ *
+ * 2026-09-21, operator instruction stated as an absolute: "the risk has to be
+ * smaller than what we are trying to win at all times no exceptions." This is
+ * the last line rather than the main one -- rewardRiskFloorViolation above
+ * enforces the real 3:1 policy, and every branch that derives one side from
+ * the other satisfies that by construction. This exists because "by
+ * construction" had quietly stopped being true on two paths at once, and a
+ * ratio invariant that only holds where someone remembered to check it is not
+ * an invariant.
+ *
+ * Deliberately 1:1, not MIN_REWARD_RISK_RATIO: it must never false-reject a
+ * trade that construction already made compliant. roundAwayFromEntry widens
+ * both the stop and the target to their own ticks independently, so a
+ * correctly-built 3:1 plan can land a hair under 3.00 after rounding; it can
+ * never land at or under 1.00. Also checks SIDE, since a target on the wrong
+ * side of entry (a long whose take-profit sits below its fill -- seen on five
+ * real trades this session) is the degenerate case of the same fault.
+ */
+function rewardBelowRiskViolation(entryPrice: Decimal, stopPrice: Decimal, takeProfitPrice: Decimal, side: "long" | "short"): string | null {
+  const wrongSideTarget = side === "long" ? takeProfitPrice.lte(entryPrice) : takeProfitPrice.gte(entryPrice);
+  if (wrongSideTarget) {
+    return `take-profit (${takeProfitPrice.toFixed(2)}) is on the wrong side of entry (${entryPrice.toFixed(2)}) for a ${side}`;
+  }
+  const wrongSideStop = side === "long" ? stopPrice.gte(entryPrice) : stopPrice.lte(entryPrice);
+  if (wrongSideStop) {
+    return `stop (${stopPrice.toFixed(2)}) is on the wrong side of entry (${entryPrice.toFixed(2)}) for a ${side}`;
+  }
+  const risk = entryPrice.minus(stopPrice).abs();
+  const reward = takeProfitPrice.minus(entryPrice).abs();
+  if (reward.gt(risk)) return null;
+  return `risk (${risk.toFixed(2)} pts) is not smaller than reward (${reward.toFixed(2)} pts) -- every trade must stand to make more than it risks`;
 }
 
 /**
@@ -553,7 +595,38 @@ export class RiskEngine {
     // symbol this session (0, 1, or 3+ zones) -- same fail-open posture as
     // every other daily-plan-range case, not a silent behavior change for a
     // session that hasn't had its levels set.
-    if (hardTakeProfitDollars !== undefined) {
+    // 2026-09-21, operator instruction, stated as an absolute: "the risk has
+    // to be smaller than what we are trying to win at all times no
+    // exceptions ... we have been willing to lose more than we are willing
+    // to win." This branch was the only place in the system that violated
+    // that, and it did so in two different ways, both confirmed live the
+    // same day:
+    //
+    //   - With a daily-plan range but no assistant likely-move read, the
+    //     target fell back to HARD_TAKE_PROFIT_DOLLARS (NQ 5, ES 1) and the
+    //     stop was then derived as target/MIN_REWARD_RISK_RATIO -- a 5.00pt
+    //     target against a 1.75pt stop on NQ. Correct 1:3 on paper, an
+    //     untradeable trade in practice; it fired on five real trades.
+    //
+    //   - With NO daily-plan range, the path below used a
+    //     NO_STOP_LOSS_SENTINEL_POINTS (100) stop against that same flat
+    //     5pt target: 100 points of risk for 5 points of reward, 1:0.05.
+    //     That was deliberate (the 2026-08-18 "remove stop loss
+    //     constraints" request, kept because the path measured net +$2497
+    //     across 127 trades) and is exactly the behavior the operator has
+    //     now ruled out. Retired rather than tuned: the instruction above
+    //     admits no ratio below 1:1, let alone 20:1 against us.
+    //
+    // So this branch is now entered ONLY when a real per-session likely-move
+    // read exists to size the target from. Without one there is nothing
+    // honest to scale against, and the trade falls through to the ordinary
+    // ATR/structure/swing pipeline below -- which derives its target as
+    // stopDistance x takeProfitRMultiple and therefore satisfies the ratio
+    // by construction, with real structural distances instead of a
+    // placeholder. HARD_TAKE_PROFIT_DOLLARS and NO_STOP_LOSS_SENTINEL_POINTS
+    // are both left in place, unused by this path, since they are still the
+    // documented record of what this branch used to do.
+    if (hardTakeProfitDollars !== undefined && assistantTakeProfitCapPoints != null) {
       const quantity = computeConfidenceTierQuantity(averageProbability, limits.maxPositionSize, confidenceTiers);
 
       // 2026-09-09, operator instruction: "the stop loss is supposed to be
@@ -576,14 +649,22 @@ export class RiskEngine {
       // derived stop further down this file), so neither a separate width
       // cap nor an end-of-branch floor check is needed here anymore.
       if (hasDailyPlanRange) {
-        const targetDistance = assistantTakeProfitCapPoints ?? resolveHardTakeProfitDistance(hardTakeProfitDollars, tickSize);
+        // No `?? resolveHardTakeProfitDistance(...)` any more -- the branch
+        // condition above guarantees a real read exists, and that fallback
+        // was the 5pt target behind the 1.75pt stop.
+        const targetDistance = assistantTakeProfitCapPoints;
         const takeProfitPrice = roundAwayFromEntry(side === "long" ? entryPrice.plus(targetDistance) : entryPrice.minus(targetDistance), entryPrice, tickSize);
         const stopDistancePoints = targetDistance.dividedBy(MIN_REWARD_RISK_RATIO);
         const stopPrice = roundAwayFromEntry(side === "long" ? entryPrice.minus(stopDistancePoints) : entryPrice.plus(stopDistancePoints), entryPrice, tickSize);
-        const targetReason =
-          assistantTakeProfitCapPoints != null
-            ? `take-profit set to the assistant's session likely-move read (${targetDistance.toFixed(2)} pts)`
-            : `flat take-profit $${hardTakeProfitDollars} from entry (no assistant likely-move read set for this symbol yet)`;
+        const targetReason = `take-profit set to the assistant's session likely-move read (${targetDistance.toFixed(2)} pts)`;
+        const inversion = rewardBelowRiskViolation(entryPrice, stopPrice, takeProfitPrice, side);
+        if (inversion) {
+          return {
+            approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
+            reason: `reward:risk invariant: ${inversion}`,
+            tripKillSwitch: false, nearestSrLevel: nearest?.level ?? null, targetSrLevel: null,
+          };
+        }
         return {
           approved: quantity > 0,
           quantity,
@@ -598,20 +679,35 @@ export class RiskEngine {
         };
       }
 
-      // No daily-plan range set yet this session -- unchanged: sentinel "no
-      // real stop-loss" (NO_STOP_LOSS_SENTINEL_POINTS), flat hard-dollar
-      // take-profit. Real trade data showed this path is net positive on its
-      // own (+$2497 across 127 trades) -- this 2026-09-09 change only
-      // retires the (now-removed) daily-plan-range-anchored stop above,
-      // nothing here needed fixing.
-      const stopPrice = roundAwayFromEntry(
-        side === "long" ? entryPrice.minus(NO_STOP_LOSS_SENTINEL_POINTS) : entryPrice.plus(NO_STOP_LOSS_SENTINEL_POINTS),
-        entryPrice,
-        tickSize
-      );
-      const stopDistancePoints = entryPrice.minus(stopPrice).abs();
-      const targetDistance = resolveHardTakeProfitDistance(hardTakeProfitDollars, tickSize);
+      // No daily-plan range set yet this session, but a real assistant
+      // likely-move read DOES exist (guaranteed by this branch's own
+      // condition) -- so the geometry is identical to the hasDailyPlanRange
+      // case above: target from that read, stop at 1/MIN_REWARD_RISK_RATIO
+      // of it. The zones only ever gated WHICH trades may run, never how
+      // far the stop sat, so there is no reason for their absence to change
+      // the stop/target relationship.
+      //
+      // Replaces the original 2026-08-18 pairing of a
+      // NO_STOP_LOSS_SENTINEL_POINTS (100pt) stop with a flat
+      // HARD_TAKE_PROFIT_DOLLARS target -- 100 points of risk against 5 of
+      // reward. That pairing measured net +$2497 across 127 trades and was
+      // kept for that reason; it is retired here only because the
+      // 2026-09-21 instruction at the top of this branch rules out ANY
+      // trade risking more than it stands to make. If that ratio floor is
+      // ever relaxed, this is the behavior to restore, and both constants
+      // are still exported for it.
+      const targetDistance = assistantTakeProfitCapPoints;
       const takeProfitPrice = roundAwayFromEntry(side === "long" ? entryPrice.plus(targetDistance) : entryPrice.minus(targetDistance), entryPrice, tickSize);
+      const stopDistancePoints = targetDistance.dividedBy(MIN_REWARD_RISK_RATIO);
+      const stopPrice = roundAwayFromEntry(side === "long" ? entryPrice.minus(stopDistancePoints) : entryPrice.plus(stopDistancePoints), entryPrice, tickSize);
+      const inversion = rewardBelowRiskViolation(entryPrice, stopPrice, takeProfitPrice, side);
+      if (inversion) {
+        return {
+          approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
+          reason: `reward:risk invariant: ${inversion}`,
+          tripKillSwitch: false, nearestSrLevel: nearest?.level ?? null, targetSrLevel: null,
+        };
+      }
       return {
         approved: quantity > 0,
         quantity,
@@ -619,7 +715,7 @@ export class RiskEngine {
         takeProfitPrice,
         trailTicks: null,
         stopDistancePoints,
-        reason: `no real stop-loss (operator override, no daily-plan range set for this symbol yet) -- confidence tier: ${Math.round(averageProbability * 100)}% avg -> ${quantity} contract(s); flat take-profit $${hardTakeProfitDollars} from entry (no daily-plan range set for this symbol yet, so nothing to scale a target off of)`,
+        reason: `take-profit set to the assistant's session likely-move read (${targetDistance.toFixed(2)} pts), stop derived at 1/${MIN_REWARD_RISK_RATIO.toString()} of that distance (${stopDistancePoints.toFixed(2)} pts) -- no daily-plan range set for this symbol yet, so the range gate is a no-op, but the stop/target relationship is unchanged -- confidence tier: ${Math.round(averageProbability * 100)}% avg -> ${quantity} contract(s)`,
         tripKillSwitch: false,
         nearestSrLevel: nearest?.level ?? null,
         targetSrLevel: null,

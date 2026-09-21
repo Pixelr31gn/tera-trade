@@ -79,7 +79,7 @@ import { isPositionFlatViaPanel, readOpenPositionFillPrice } from "../browserCon
 import { BrokerKind } from "../core/config.js";
 import { childLogger } from "../core/logger.js";
 import { getLatestBrowserAccountSnapshot } from "../engine/liveAccountOverride.js";
-import { getInstrument } from "../marketData/instruments.js";
+import { FILL_PLAUSIBILITY_FRACTION, getInstrument } from "../marketData/instruments.js";
 import type { BrokerAccount, BrokerClient, BrokerOrder, BrokerPosition, HistoricalBar, OrderRequest, OrderResult } from "./types.js";
 import { OrderSide, OrderType } from "./types.js";
 
@@ -228,15 +228,15 @@ export class TradeseaBrowserControlBroker implements BrokerClient {
     return false;
   }
 
-  // Absolute per-instrument tolerance rather than a percentage, for exactly
-  // the reasons BrowserControlBroker.readRealFillPrice's own comment gives --
-  // the 5% relative guard this replaces was inert on a five-figure index and
-  // let DOM misreads 22-64 points off the real fill become the anchor for a
-  // live stop and target. Kept in step with that method deliberately: both
-  // scrape the same positions-panel cell through the same helper, so a guard
-  // that only held on one of them would just relocate the bug.
+  // Same plausibility band as BrowserControlBroker.readRealFillPrice -- see
+  // that method and marketData/instruments.ts's FILL_PLAUSIBILITY_FRACTION for
+  // why this is a "is this the right instrument's price" check and not a
+  // slippage check. Kept in step with that method deliberately: both scrape
+  // the same positions-panel cell through the same helper, so a guard that
+  // only held on one of them would just relocate the bug.
   private async readRealFillPrice(symbol: string, theoreticalPrice: Decimal): Promise<Decimal> {
     const instrument = getInstrument(symbol);
+    const tolerance = Decimal.max(instrument.maxFillDeviationPoints, theoreticalPrice.abs().times(FILL_PLAUSIBILITY_FRACTION));
     let lastDeviationPoints: string | null = null;
     for (let attempt = 0; attempt < FILL_CONFIRMATION_RETRIES; attempt++) {
       if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, FILL_CONFIRMATION_DELAY_MS));
@@ -246,7 +246,7 @@ export class TradeseaBrowserControlBroker implements BrokerClient {
       if (raw === null) continue;
       const real = new Decimal(raw);
       const deviationPoints = real.minus(theoreticalPrice).abs();
-      if (deviationPoints.lte(instrument.maxFillDeviationPoints)) {
+      if (deviationPoints.lte(tolerance)) {
         logger.info(
           { symbol, theoreticalPrice: theoreticalPrice.toString(), realPrice: real.toString(), deviationPoints: deviationPoints.toString() },
           "tradesea_real_fill_price_used"
@@ -260,15 +260,15 @@ export class TradeseaBrowserControlBroker implements BrokerClient {
           theoreticalPrice: theoreticalPrice.toString(),
           rejectedPrice: real.toString(),
           deviationPoints: deviationPoints.toString(),
-          maxFillDeviationPoints: instrument.maxFillDeviationPoints.toString(),
+          tolerance: tolerance.toString(),
           attempt: attempt + 1,
         },
-        "tradesea_real_fill_price_rejected_too_far_from_theoretical"
+        "tradesea_real_fill_price_rejected_implausible_for_instrument"
       );
     }
     logger.warn(
-      { symbol, theoreticalPrice: theoreticalPrice.toString(), lastDeviationPoints, maxFillDeviationPoints: instrument.maxFillDeviationPoints.toString() },
-      "tradesea_real_fill_price_unavailable_using_theoretical"
+      { symbol, theoreticalPrice: theoreticalPrice.toString(), lastDeviationPoints, tolerance: tolerance.toString() },
+      "tradesea_real_fill_price_unavailable_or_implausible_using_theoretical"
     );
     return theoreticalPrice;
   }
