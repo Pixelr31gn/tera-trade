@@ -101,14 +101,39 @@ async function main(): Promise<void> {
   let liveBroker: BrokerClient | null = null;
   const liveBrokerKind = settings.brokerKind === BrokerKind.PROJECTX || settings.brokerKind === BrokerKind.BROWSER_CONTROL ? settings.brokerKind : null;
   if (liveBrokerKind) {
-    try {
-      liveBroker = await getBroker(liveBrokerKind);
-      await liveBroker.connect();
-      setLiveBrokerConnected(true);
-      logger.info({ brokerKind: liveBrokerKind }, "live_broker_connected");
-    } catch (err) {
-      logger.error({ brokerKind: liveBrokerKind, err: String(err) }, "live_broker_connect_failed -- LIVE mode unavailable until this is resolved (e.g. restart), but PAPER/ANALYSIS_ONLY are unaffected");
-      liveBroker = null;
+    // Bounded retry around the initial connect (2026-09-20, operator request,
+    // after two consecutive clean restarts both lost the same race):
+    // BrowserControlBroker.connect() resolves its page through
+    // cdpClient.findPage, and at startup that call lands ~200ms after
+    // debug_chrome_ready -- before Playwright has finished enumerating pages
+    // over the freshly-opened CDP connection. findPage then reads empty body
+    // text and rejects a genuinely authenticated, fully-rendered tab as
+    // matched_tab_not_authenticated. Confirmed concretely: the identical page
+    // (innerText byte-identical, "bal:" marker present) was accepted by
+    // BrowserWatcher's own findPage call on its 5s poll seconds later, and a
+    // read-only CDP dump found the marker both before and after the failure.
+    // One-shot meant every restart was a coin flip against a ~200ms window.
+    // Same bounded-retry shape readBodyTextWithRetry already uses in
+    // cdpClient.ts for this exact class of CDP flakiness. Deliberately still
+    // non-fatal on total failure -- see the comment above.
+    const CONNECT_ATTEMPTS = 5;
+    const CONNECT_RETRY_DELAY_MS = 3_000;
+    for (let attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt += 1) {
+      try {
+        liveBroker = await getBroker(liveBrokerKind);
+        await liveBroker.connect();
+        setLiveBrokerConnected(true);
+        logger.info({ brokerKind: liveBrokerKind, attempt }, "live_broker_connected");
+        break;
+      } catch (err) {
+        liveBroker = null;
+        if (attempt === CONNECT_ATTEMPTS) {
+          logger.error({ brokerKind: liveBrokerKind, attempts: attempt, err: String(err) }, "live_broker_connect_failed -- LIVE mode unavailable until this is resolved (e.g. restart), but PAPER/ANALYSIS_ONLY are unaffected");
+        } else {
+          logger.warn({ brokerKind: liveBrokerKind, attempt, err: String(err) }, "live_broker_connect_failed_retrying");
+          await new Promise((resolve) => setTimeout(resolve, CONNECT_RETRY_DELAY_MS));
+        }
+      }
     }
   }
 

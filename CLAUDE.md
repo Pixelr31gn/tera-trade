@@ -88,6 +88,24 @@ say so instead of guessing.
   Invariant 3 above still applies in full: this doesn't authorize adding code
   that flips these settings itself, only a human-directed one-line edit in
   response to an explicit request.
+
+  Narrowed again 2026-09-20 (explicit operator direction, while wiring up
+  ProjectX credentials on a fresh clone — the operator had already supplied
+  the value in chat and judged the hand-it-back-as-a-snippet dance pure
+  friction): a *secret* value may now also be written into `.env` when the
+  operator has supplied that exact value and asked for that specific field to
+  be set. Deliberately still out of bounds, because these are what the
+  original rule was actually protecting against:
+    - Never commit `.env`, and never move a secret into a tracked file
+      (`.claude/settings.json` leaked the Postgres password exactly this way
+      on 2026-09-20 — see docs/BUILD_HISTORY.md).
+    - Never echo a secret's *value* back into output, a log line, a commit
+      message, or a test fixture. Report it as set/empty and its length.
+    - Never invent, guess, or auto-generate a credential the operator did
+      not hand over, and never read one out of another account's config.
+  A secret that reaches the assistant through a chat transcript should be
+  treated as exposed and rotated once it has served its purpose; say so
+  rather than assuming the operator has thought about it.
 - Do not add new runtime dependencies without asking.
 - If a request would touch live order placement, stop and confirm first.
 
