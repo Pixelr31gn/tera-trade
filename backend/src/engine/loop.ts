@@ -49,7 +49,7 @@ import {
   computeInitialStop,
   hasReachedTrailingStopActivation,
   RiskEngine,
-  TRAILING_STOP_DISTANCE_TICKS,
+  resolveTrailingStopDistanceTicks,
   REQUIRE_DAILY_PLAN_SYMBOLS,
   type RiskAssessment,
   type RiskLimitsConfig,
@@ -953,10 +953,10 @@ export class TradingEngine {
     const entryPrice = new Decimal(openTrade.entryPrice.toString());
     const side = openTrade.side as "long" | "short";
 
-    // v1.3: once price reaches halfway to the take-profit target, place a
-    // real broker-side Trailing Stop order and stop relying on our own
-    // internal stopPrice check below for this trade going forward -- see
-    // risk/stops.ts's hasReachedTrailingStopActivation/activateTrailingStop.
+    // v1.3: once price reaches TRAILING_STOP_ACTIVATION_FRACTION of the way to
+    // the take-profit target (65% as of 2026-09-21), place a real
+    // broker-side Trailing Stop order and stop relying on our own internal
+    // stopPrice check for this trade -- see risk/stops.ts's hasReachedTrailingStopActivation/activateTrailingStop.
     //
     // Was DISABLED 2026-08-13 (operator request: "make sure live mode is
     // exactly as paper mode currently is which means we have to disable the
@@ -972,7 +972,7 @@ export class TradingEngine {
     // reverted after the operator gave a concrete counter-example (entry 10,
     // target 6, trailing should start at 8 -- exactly entry + 0.5 x (target -
     // entry)) -- final state is every instrument on the plain
-    // halfway-to-take-profit fraction below, no per-instrument branching at
+    // activation fraction below, no per-instrument branching at
     // all.
     //
     // DISABLED AGAIN 2026-08-18 (operator request: "turn off the trailing
@@ -996,9 +996,10 @@ export class TradingEngine {
     // at all, and by the time it recovers, price has already run past the
     // stop. A real broker-side Trailing Stop order, once armed, is enforced
     // server-side and is immune to our own feed going stale, same protection
-    // the take-profit order already gets. Distance is now a flat 5 ticks
-    // (risk/stops.ts's TRAILING_STOP_DISTANCE_TICKS), not the previous
-    // flat-15-point distance -- see that constant's own comment.
+    // the take-profit order already gets. Distance is per-instrument and
+    // ATR-scaled where a band is configured (risk/stops.ts's
+    // resolveTrailingStopDistanceTicks); instruments without a band keep the
+    // flat TRAILING_STOP_DISTANCE_TICKS -- see those for the history.
     const LIVE_TRAILING_STOP_ENABLED = true;
     let trailingStopPlaced = openTrade.trailingStopPlaced;
     if (LIVE_TRAILING_STOP_ENABLED && !trailingStopPlaced && takeProfitPrice !== null && hasReachedTrailingStopActivation(entryPrice, takeProfitPrice, side, h, l)) {
@@ -1038,7 +1039,7 @@ export class TradingEngine {
         const exitPrice = side === "long" ? l : h;
         // exitReason "trailing_stop", not "stop" -- see explain/engine.ts's
         // explainTradeExit (2026-08-12 fix): a real trailing stop only ever
-        // arms after price has already reached halfway to the take-profit
+        // arms after price has already reached most of the way to the take-profit
         // target, so it typically LOCKS IN a favorable move, not a loss --
         // "the stop-loss was hit" read as a loss event even for genuinely
         // profitable trailing-stop exits (confirmed live, e.g. trade #344:
@@ -1046,7 +1047,7 @@ export class TradingEngine {
         // backwards. explainTradeExit already had the correct
         // "trailing_stop" message ("...locking in a favorable move") but
         // this call site had never actually used it.
-        await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason: "trailing_stop", customTag: "estimated_from_trailing_stop" });
+        await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason: "trailing_stop", customTag: "estimated_from_trailing_stop" }, broker);
         logger.info({ symbol, tradeId: openTrade.id }, "live_trade_closed_via_trailing_stop");
       } else if (takeProfitOrderPlaced && takeProfitPrice !== null) {
         // A real take-profit LIMIT order was genuinely resting -- a limit order fills at its
@@ -1054,7 +1055,7 @@ export class TradingEngine {
         // trailing stop's "adverse extreme" guess above (still labeled an estimate, not a
         // confirmed fill, since this app has no way yet to read back the actual fill price for
         // this order type -- see readRealFillPrice's own comment on entry fills for the same gap).
-        await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice: takeProfitPrice, exitReason: "target", customTag: "estimated_from_take_profit_order" });
+        await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice: takeProfitPrice, exitReason: "target", customTag: "estimated_from_take_profit_order" }, broker);
         logger.info({ symbol, tradeId: openTrade.id }, "live_trade_closed_via_take_profit_order");
       } else {
         // No real protective order was ever resting for this trade -- could
@@ -1097,7 +1098,7 @@ export class TradingEngine {
       // (this app has no way yet to read back TopstepX's actual fill price)
       // -- labeled as an estimate in the explanation, same as the manual
       // trade #122 reconciliation this replaces.
-      await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: "estimated_from_bracket" });
+      await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: "estimated_from_bracket" }, broker);
       logger.info({ symbol, tradeId: openTrade.id, exitReason, exitPrice: exitPrice.toString() }, "live_trade_closed_synced_from_broker");
       return;
     }
@@ -1120,7 +1121,7 @@ export class TradingEngine {
       const stillOpen = await broker.isPositionFlat?.(symbol);
       if (stillOpen === true) {
         logger.info({ symbol, tradeId: openTrade.id }, "position_closed_itself_during_close_attempt_skipping_flatten");
-        await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: "estimated_from_bracket" });
+        await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: "estimated_from_bracket" }, broker);
         return;
       }
       logger.warn({ symbol, tradeId: openTrade.id, error: closeResult?.error }, "close_position_failed_falling_back_to_flatten");
@@ -1129,7 +1130,7 @@ export class TradingEngine {
     }
 
     if (closeResult && closeResult.status !== "rejected") {
-      await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: closeTag });
+      await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: closeTag }, broker);
     } else {
       logger.error({ symbol, tradeId: openTrade.id, error: closeResult?.error }, "live_forced_close_failed");
     }
@@ -1147,9 +1148,27 @@ export class TradingEngine {
       return false;
     }
 
-    // Flat distance, same for every symbol (2026-09-09) -- see
-    // risk/stops.ts's TRAILING_STOP_DISTANCE_TICKS.
-    const trailTicks = TRAILING_STOP_DISTANCE_TICKS;
+    // 2026-09-21: per-instrument, ATR-scaled where a band is configured --
+    // see risk/stops.ts's resolveTrailingStopDistanceTicks. ATR is read here
+    // rather than threaded down through manageOpenTrades/manageLiveOpenTrade
+    // (neither of which has bars in scope) because this runs once per trade,
+    // at the single moment the trail arms, not per tick -- so one bar query
+    // costs nothing measurable, and the distance reflects the tape as it is
+    // when the order is actually placed rather than as it was at entry.
+    // A failed/short bar load leaves atrValue null, which the resolver
+    // handles by taking the band minimum; it never throws into the
+    // activation path.
+    const instrument = getInstrument(symbol);
+    let atrValue: Decimal | null = null;
+    try {
+      const bars = await loadRecentBars(symbol, 300);
+      const atrSeries = computeAtr(bars).filter((v) => !Number.isNaN(v));
+      const last = atrSeries[atrSeries.length - 1];
+      if (last !== undefined) atrValue = new Decimal(last);
+    } catch (err) {
+      logger.warn({ symbol, tradeId: openTrade.id, err: String(err) }, "trailing_stop_atr_read_failed_using_band_minimum");
+    }
+    const trailTicks = resolveTrailingStopDistanceTicks(instrument, atrValue);
     const result = await broker.placeTrailingStop(symbol, openTrade.side as "long" | "short", openTrade.quantity, trailTicks);
     if (result.status === "rejected") {
       logger.warn({ symbol, tradeId: openTrade.id, error: result.error }, "trailing_stop_activation_failed");
@@ -1318,7 +1337,64 @@ export class TradingEngine {
     await this.emit({ type: "trade_closed", tradeId: trade.id, symbol: trade.symbol, pnl: "0", explanation: "auto-reconciled: broker confirmed no open position" });
   }
 
-  private async closeTrade(account: Account, closed: ClosedSimTrade): Promise<void> {
+  /**
+   * Cancels whatever is still resting on `symbol` after a live position has
+   * closed. Best-effort: logs and moves on, never throws into the close path.
+   *
+   * 2026-09-20 (operator request, after asking directly whether closing a
+   * trade cancels resting orders -- it did not). TopstepX's own bracket is
+   * normally OCO, so a stop fill cancels its paired target server-side. What
+   * that pairing does NOT cover is activateTakeProfitOrder's standalone
+   * take-profit LIMIT (tracked by Trade.takeProfitOrderPlaced): if the
+   * position then exits any other way -- stop, real trailing stop, manual or
+   * assistant close, or manageLiveOpenTrade's forced close -- that limit is
+   * still working against a now-flat account, and filling it OPENS a new
+   * untracked position on the opposite side with no stop and no Trade row
+   * behind it. That's the mirror image of the 2026-07-19 phantom-position
+   * incident (DB said open, broker was flat); this one is DB closed, broker
+   * still working. api/routes/positions.ts's letItRide path already cancels
+   * for exactly this reason -- "a real resting order doesn't know about that
+   * flag at all" -- it just wasn't wired into the ordinary close path.
+   *
+   * Two guards, both deliberate, both for reasons this file already has scar
+   * tissue about:
+   *  - Only fires on a CONFIRMED-flat readback. `isPositionFlat` returning
+   *    null means "couldn't read it", and cancelling the bracket of a
+   *    still-open position would strip its stop -- so null is treated as
+   *    "don't touch it", the same don't-act-on-an-assumption posture
+   *    manageLiveOpenTrade's own flatten path documents.
+   *  - Skips if any other trade on this symbol is still open, since
+   *    "Cancel Orders" is symbol-scoped, not per-order (see
+   *    browserControl/orderTicket.ts's cancelOrdersButton) and would take
+   *    that trade's protection with it.
+   */
+  private async cancelRestingOrdersAfterClose(broker: BrokerClient, tradeId: number, symbol: string, accountId: number): Promise<void> {
+    if (!broker.cancelRestingOrder || !broker.isPositionFlat) return;
+    try {
+      const stillOpenElsewhere = await prisma.trade.findFirst({ where: { accountId, symbol, status: "open" } });
+      if (stillOpenElsewhere) {
+        logger.info({ symbol, tradeId, otherTradeId: stillOpenElsewhere.id }, "skipping_resting_order_cancel_other_trade_still_open");
+        return;
+      }
+
+      const isFlat = await broker.isPositionFlat(symbol);
+      if (isFlat !== true) {
+        logger.warn({ symbol, tradeId, isFlat }, "skipping_resting_order_cancel_position_not_confirmed_flat");
+        return;
+      }
+
+      const result = await broker.cancelRestingOrder(symbol);
+      if (result.status === "rejected") {
+        logger.warn({ symbol, tradeId, error: result.error }, "cancel_resting_orders_after_close_rejected");
+      } else {
+        logger.info({ symbol, tradeId }, "cancel_resting_orders_after_close_ok");
+      }
+    } catch (err) {
+      logger.warn({ symbol, tradeId, err: String(err) }, "cancel_resting_orders_after_close_failed");
+    }
+  }
+
+  private async closeTrade(account: Account, closed: ClosedSimTrade, liveBroker?: BrokerClient): Promise<void> {
     // Looked up by the specific tradeId the caller already has in hand, not
     // re-derived by (account, symbol) -- see ClosedSimTrade.tradeId's own
     // comment for the bug this fixes. Still guards status === "open" so a
@@ -1351,6 +1427,7 @@ export class TradingEngine {
         },
       });
       await this.emit({ type: "trade_closed", tradeId: trade.id, symbol: trade.symbol, pnl: real.netPnl.toString(), explanation });
+      if (liveBroker) await this.cancelRestingOrdersAfterClose(liveBroker, trade.id, trade.symbol, account.id);
       return;
     }
 
@@ -1390,6 +1467,7 @@ export class TradingEngine {
     });
 
     await this.emit({ type: "trade_closed", tradeId: trade.id, symbol: trade.symbol, pnl: pnl.toString(), explanation });
+    if (liveBroker) await this.cancelRestingOrdersAfterClose(liveBroker, trade.id, trade.symbol, account.id);
   }
 
   // Shared by both the real-signal path (evaluateNewSignals) and continuous

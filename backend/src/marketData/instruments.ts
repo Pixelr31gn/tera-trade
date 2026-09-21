@@ -28,13 +28,55 @@ export interface InstrumentSpec {
    * full-size symbol).
    */
   brokerContractPrefix: string;
+  /**
+   * Largest gap, in price POINTS, between a market order's theoretical price and a
+   * fill price scraped back off the broker's DOM that is still believable as real
+   * slippage rather than a misread (see brokers/browserControlBroker.ts's
+   * readRealFillPrice). Beyond this the reading is discarded and the theoretical
+   * price is used instead.
+   *
+   * 2026-09-21: replaces a flat 5% RELATIVE guard that was inert on a five-figure
+   * index -- 5% of NQ at 30,000 is +/-1500 points, so every misread this guard
+   * existed to catch sailed straight through it. Confirmed live the same day:
+   * readings 22.25, 24.50 and 64.00 points off the real fill were all accepted as
+   * genuine, and execution/engine.ts then anchored the stop and target to them,
+   * putting both on the wrong side of entry for a long (trades 5, 10 and 12) so the
+   * standalone take-profit LIMIT was immediately fillable and closed the position
+   * seconds after it opened.
+   *
+   * Set per instrument rather than derived from tickSize: tick size does not scale
+   * with how far an instrument genuinely moves (ES and NQ share a 0.25 tick but NQ
+   * ranges roughly 4x as far in points), so a tick multiple would be simultaneously
+   * too tight on NQ and too loose on CL. Sized generously -- a few times normal
+   * micro-contract slippage, so a fast-market fill is never thrown away -- while
+   * staying well under the smallest misread observed above.
+   */
+  maxFillDeviationPoints: Decimal;
+  /**
+   * Band, in TICKS, that this instrument's real broker-side trailing-stop
+   * distance is clamped into (see risk/stops.ts's
+   * resolveTrailingStopDistanceTicks, which takes a fraction of current ATR
+   * and clamps it here). Absent = keep the flat
+   * risk/stops.ts TRAILING_STOP_DISTANCE_TICKS that every instrument used
+   * before 2026-09-21.
+   *
+   * Only NQ has one so far, per operator instruction that day ("the trailing
+   * stop loss is way too tight for nq it should be at 20 ticks to 35 at the
+   * least never less than 15"). The flat 5 ticks it replaces is 1.25 points
+   * on NQ -- narrower than routine two-way noise, which is why nearly every
+   * NQ trade that armed a trail that session was closed by it within
+   * moments. ES/GC/CL are very likely mis-served by a flat 5 too, but their
+   * right numbers have not been specified, and guessing at a live risk
+   * parameter is worse than leaving a known-conservative one in place.
+   */
+  trailingStopTickBand?: { minTicks: number; maxTicks: number };
 }
 
 export const DEFAULT_INSTRUMENTS: InstrumentSpec[] = [
-  { symbol: "ES", dataSymbol: "ES=F", exchange: "CME", tickSize: new Decimal("0.25"), pointValue: new Decimal(5), rthOpenHourET: 9, rthOpenMinuteET: 30, brokerContractPrefix: "MES" },
-  { symbol: "NQ", dataSymbol: "NQ=F", exchange: "CME", tickSize: new Decimal("0.25"), pointValue: new Decimal(2), rthOpenHourET: 9, rthOpenMinuteET: 30, brokerContractPrefix: "MNQ" },
-  { symbol: "CL", dataSymbol: "CL=F", exchange: "NYMEX", tickSize: new Decimal("0.01"), pointValue: new Decimal(100), rthOpenHourET: 9, rthOpenMinuteET: 0, brokerContractPrefix: "MCL" },
-  { symbol: "GC", dataSymbol: "GC=F", exchange: "COMEX", tickSize: new Decimal("0.10"), pointValue: new Decimal(10), rthOpenHourET: 8, rthOpenMinuteET: 20, brokerContractPrefix: "MGC" },
+  { symbol: "ES", dataSymbol: "ES=F", exchange: "CME", tickSize: new Decimal("0.25"), pointValue: new Decimal(5), rthOpenHourET: 9, rthOpenMinuteET: 30, brokerContractPrefix: "MES", maxFillDeviationPoints: new Decimal("3") },
+  { symbol: "NQ", dataSymbol: "NQ=F", exchange: "CME", tickSize: new Decimal("0.25"), pointValue: new Decimal(2), rthOpenHourET: 9, rthOpenMinuteET: 30, brokerContractPrefix: "MNQ", maxFillDeviationPoints: new Decimal("10"), trailingStopTickBand: { minTicks: 20, maxTicks: 35 } },
+  { symbol: "CL", dataSymbol: "CL=F", exchange: "NYMEX", tickSize: new Decimal("0.01"), pointValue: new Decimal(100), rthOpenHourET: 9, rthOpenMinuteET: 0, brokerContractPrefix: "MCL", maxFillDeviationPoints: new Decimal("0.15") },
+  { symbol: "GC", dataSymbol: "GC=F", exchange: "COMEX", tickSize: new Decimal("0.10"), pointValue: new Decimal(10), rthOpenHourET: 8, rthOpenMinuteET: 20, brokerContractPrefix: "MGC", maxFillDeviationPoints: new Decimal("2") },
 ];
 
 const bySymbol = new Map(DEFAULT_INSTRUMENTS.map((i) => [i.symbol, i]));

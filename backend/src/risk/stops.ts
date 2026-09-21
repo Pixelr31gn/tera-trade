@@ -229,22 +229,89 @@ export function computeInitialStop(
 // v1.3: fixed trailing-stop distance and activation threshold for the real
 // (browser-controlled) broker -- a separate, simpler mechanism from the
 // chandelier ATR trail above (which stays simulated-broker-only). Hand-set
-// per operator request, not fitted/ATR-derived: activation is halfway from
-// entry to the take-profit target; once reached, a real broker-side
-// Trailing Stop order (see brokers/types.ts's placeTrailingStop) takes over
-// as the trade's downside protection, replacing the internal stop-price
-// check in engine/loop.ts's manageLiveOpenTrade.
-export const TRAILING_STOP_ACTIVATION_FRACTION = 0.5;
+// per operator request, not fitted/ATR-derived; once reached, a real
+// broker-side Trailing Stop order (see brokers/types.ts's placeTrailingStop)
+// takes over as the trade's downside protection, replacing the internal
+// stop-price check in engine/loop.ts's manageLiveOpenTrade.
+//
+// 2026-09-21 (operator instruction: "the trailing stop loss should be set
+// when the trade hits 65% of its tp goal"): raised from 0.5 to 0.65, so the
+// real trailing order arms later and a trade has to earn more of its target
+// before its structural stop is handed over to a trail.
+export const TRAILING_STOP_ACTIVATION_FRACTION = 0.65;
 
-// Flat trailing-stop distance, in TICKS, for every instrument (2026-09-09,
-// operator instruction: "a trailing stop loss with 5 ticks should be applied
-// when an execution hits half way to the target tp") -- supersedes the
-// previous flat-15-POINT distance (2026-08-18, converted to ticks per
-// instrument via a since-removed helper), which is gone, not left dormant.
-// Already in ticks, so no per-instrument conversion (and no tickSize-zero
-// fallback) is needed at all: every symbol (ES, NQ, CL, GC, ...) trails the
-// same 5 ticks, used directly by engine/loop.ts's activateTrailingStop.
+// Fallback trailing-stop distance, in TICKS, for instruments with no
+// trailingStopTickBand of their own (2026-09-09, operator instruction: "a
+// trailing stop loss with 5 ticks should be applied when an execution hits
+// half way to the target tp") -- superseded the previous flat-15-POINT
+// distance (2026-08-18, converted to ticks per instrument via a
+// since-removed helper).
+//
+// 2026-09-21: no longer used for NQ. A flat 5 ticks is 1.25 points on NQ,
+// which is inside the bid/ask-and-noise band -- confirmed live the same day,
+// when essentially every trade on the book exited `trailing_stop` almost
+// immediately after arming, including one that gave back 36 points of an
+// open winner and another that closed -$204. Instruments that DO still use
+// this value keep the exact prior behavior; see
+// resolveTrailingStopDistanceTicks.
 export const TRAILING_STOP_DISTANCE_TICKS = 5;
+
+// Fraction of current ATR used as the trailing distance for instruments with
+// a trailingStopTickBand (marketData/instruments.ts). Half of ATR is a
+// deliberately ordinary choice -- wide enough to sit outside routine
+// two-way noise, tight enough to still be a trail rather than a second
+// initial stop. The band does the real work of keeping the result sane.
+export const TRAILING_STOP_ATR_FRACTION = new Decimal("0.5");
+
+// Absolute floor, in ticks, for any banded trailing distance -- 2026-09-21
+// operator instruction: NQ "should be at 20 ticks to 35 at the least never
+// less than 15". Every current band's own minimum already clears this, so
+// this is a standing invariant rather than an active clamp: it exists so
+// that lowering a band minimum later cannot silently reintroduce a
+// sub-noise trail. Deliberately NOT applied to TRAILING_STOP_DISTANCE_TICKS
+// above, which is a different (smaller) regime for instruments the operator
+// has not re-specified.
+export const TRAILING_STOP_MIN_TICKS = 15;
+
+/**
+ * Trailing distance in ticks for `instrument` given the current `atrValue`
+ * (in price points, from regime/indicators.ts's atr).
+ *
+ * Instruments with a `trailingStopTickBand` get TRAILING_STOP_ATR_FRACTION of
+ * ATR converted to ticks and clamped into that band, then floored at
+ * TRAILING_STOP_MIN_TICKS -- so a quiet tape trails at the band minimum, a
+ * fast tape at its maximum, and neither can produce a distance that is
+ * meaningless for the instrument. Everything else keeps the flat
+ * TRAILING_STOP_DISTANCE_TICKS it already used.
+ *
+ * `atrValue` null (or non-positive, or a zero tickSize) means ATR could not
+ * be computed -- resolves to the band MINIMUM rather than the flat fallback,
+ * since for a banded instrument the fallback is the very value the band
+ * exists to replace. Failing toward "a real trail we know is too wide" beats
+ * failing toward "a trail we know is too tight": too wide gives back some
+ * open profit, too tight closes the trade outright.
+ */
+export function resolveTrailingStopDistanceTicks(
+  instrument: { tickSize: Decimal; trailingStopTickBand?: { minTicks: number; maxTicks: number } },
+  atrValue: Decimal | null
+): number {
+  const band = instrument.trailingStopTickBand;
+  if (!band) return TRAILING_STOP_DISTANCE_TICKS;
+
+  if (atrValue === null || atrValue.lte(0) || instrument.tickSize.lte(0)) {
+    return Math.max(band.minTicks, TRAILING_STOP_MIN_TICKS);
+  }
+
+  const atrTicks = atrValue.times(TRAILING_STOP_ATR_FRACTION).dividedBy(instrument.tickSize).round().toNumber();
+  const withinBand = Math.min(Math.max(atrTicks, band.minTicks), band.maxTicks);
+  // TRAILING_STOP_MIN_TICKS is applied LAST, deliberately: it outranks the
+  // band's own ceiling, so a band configured entirely below the floor still
+  // cannot produce a sub-floor trail. Folding it into the lower bound before
+  // the maxTicks clamp instead let the clamp undo it -- caught by
+  // tests/trailingStop.test.ts's floor-invariant case, which is the only
+  // reason to write the two steps in this order rather than the obvious one.
+  return Math.max(withinBand, TRAILING_STOP_MIN_TICKS);
+}
 
 // Flat take-profit override, per symbol, in raw PRICE POINTS -- not real P&L
 // dollars via the instrument's point-value multiplier (2026-08-18, operator
@@ -383,7 +450,7 @@ export function roundAwayFromEntry(price: Decimal, entryPrice: Decimal, tickSize
   return price.gte(entryPrice) ? price.toNearest(tickSize, Decimal.ROUND_CEIL) : price.toNearest(tickSize, Decimal.ROUND_FLOOR);
 }
 
-/** Has price reached the halfway point from entry to the take-profit target, in the trade's favor? */
+/** Has price reached TRAILING_STOP_ACTIVATION_FRACTION of the way from entry to the take-profit target, in the trade's favor? */
 export function hasReachedTrailingStopActivation(
   entryPrice: Decimal,
   takeProfitPrice: Decimal,

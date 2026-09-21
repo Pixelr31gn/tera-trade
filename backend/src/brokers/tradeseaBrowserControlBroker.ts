@@ -228,9 +228,16 @@ export class TradeseaBrowserControlBroker implements BrokerClient {
     return false;
   }
 
+  // Absolute per-instrument tolerance rather than a percentage, for exactly
+  // the reasons BrowserControlBroker.readRealFillPrice's own comment gives --
+  // the 5% relative guard this replaces was inert on a five-figure index and
+  // let DOM misreads 22-64 points off the real fill become the anchor for a
+  // live stop and target. Kept in step with that method deliberately: both
+  // scrape the same positions-panel cell through the same helper, so a guard
+  // that only held on one of them would just relocate the bug.
   private async readRealFillPrice(symbol: string, theoreticalPrice: Decimal): Promise<Decimal> {
     const instrument = getInstrument(symbol);
-    let lastDeviationPct: string | null = null;
+    let lastDeviationPoints: string | null = null;
     for (let attempt = 0; attempt < FILL_CONFIRMATION_RETRIES; attempt++) {
       if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, FILL_CONFIRMATION_DELAY_MS));
       const page = await this.getPage().catch(() => null);
@@ -238,14 +245,31 @@ export class TradeseaBrowserControlBroker implements BrokerClient {
       const raw = await readOpenPositionFillPrice(page, instrument.brokerContractPrefix).catch(() => null);
       if (raw === null) continue;
       const real = new Decimal(raw);
-      const deviation = real.minus(theoreticalPrice).abs().dividedBy(theoreticalPrice);
-      if (deviation.lte("0.05")) {
-        logger.info({ symbol, theoreticalPrice: theoreticalPrice.toString(), realPrice: real.toString() }, "tradesea_real_fill_price_used");
+      const deviationPoints = real.minus(theoreticalPrice).abs();
+      if (deviationPoints.lte(instrument.maxFillDeviationPoints)) {
+        logger.info(
+          { symbol, theoreticalPrice: theoreticalPrice.toString(), realPrice: real.toString(), deviationPoints: deviationPoints.toString() },
+          "tradesea_real_fill_price_used"
+        );
         return real;
       }
-      lastDeviationPct = deviation.times(100).toFixed(2);
+      lastDeviationPoints = deviationPoints.toString();
+      logger.warn(
+        {
+          symbol,
+          theoreticalPrice: theoreticalPrice.toString(),
+          rejectedPrice: real.toString(),
+          deviationPoints: deviationPoints.toString(),
+          maxFillDeviationPoints: instrument.maxFillDeviationPoints.toString(),
+          attempt: attempt + 1,
+        },
+        "tradesea_real_fill_price_rejected_too_far_from_theoretical"
+      );
     }
-    logger.warn({ symbol, theoreticalPrice: theoreticalPrice.toString(), lastDeviationPct }, "tradesea_real_fill_price_unavailable_using_theoretical");
+    logger.warn(
+      { symbol, theoreticalPrice: theoreticalPrice.toString(), lastDeviationPoints, maxFillDeviationPoints: instrument.maxFillDeviationPoints.toString() },
+      "tradesea_real_fill_price_unavailable_using_theoretical"
+    );
     return theoreticalPrice;
   }
 

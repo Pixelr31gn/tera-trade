@@ -251,7 +251,8 @@ export class BrowserControlBroker implements BrokerClient {
   // price straight back (see this class's header comment). Polls the same
   // FILL_CONFIRMATION_RETRIES/_DELAY_MS cadence as confirmPositionOpened,
   // since the row's price cell can take the same moment to populate as the
-  // row itself takes to appear. A reading is only trusted within 5% of the
+  // row itself takes to appear. A reading is only trusted within the
+  // instrument's own maxFillDeviationPoints (marketData/instruments.ts) of the
   // theoretical price -- a misread (wrong row, stale DOM, a mid-scroll
   // partial render) must never feed a real stop-loss (see
   // execution/engine.ts's shift-by-fill-offset logic, which is exactly what
@@ -260,9 +261,21 @@ export class BrowserControlBroker implements BrokerClient {
   // value; falls back to the theoretical price, logging which happened
   // either way, rather than ever return null to a caller with no fallback
   // of its own.
+  //
+  // 2026-09-21: that tolerance was a flat 5% RELATIVE until today, which on a
+  // five-figure index is +/-1500 points -- so the guard never rejected
+  // anything and this whole method was, in practice, "trust the DOM". Three
+  // live NQ trades the same session (5, 10, 12) had their stop and target
+  // anchored 22-64 points away from the real fill, which for a long put both
+  // BELOW entry and made the standalone take-profit LIMIT immediately
+  // fillable; each closed within seconds of opening. An absolute per-point
+  // tolerance is the only form of this check that means anything across
+  // instruments priced from 80 (CL) to 30,000 (NQ). See
+  // maxFillDeviationPoints' own comment for why it is per-instrument and not
+  // a tick multiple.
   private async readRealFillPrice(symbol: string, theoreticalPrice: Decimal): Promise<Decimal> {
     const instrument = getInstrument(symbol);
-    let lastDeviationPct: string | null = null;
+    let lastDeviationPoints: string | null = null;
     for (let attempt = 0; attempt < FILL_CONFIRMATION_RETRIES; attempt++) {
       if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, FILL_CONFIRMATION_DELAY_MS));
       const page = await this.getPage().catch(() => null);
@@ -270,14 +283,34 @@ export class BrowserControlBroker implements BrokerClient {
       const raw = await readOpenPositionFillPrice(page, instrument.brokerContractPrefix).catch(() => null);
       if (raw === null) continue;
       const real = new Decimal(raw);
-      const deviation = real.minus(theoreticalPrice).abs().dividedBy(theoreticalPrice);
-      if (deviation.lte("0.05")) {
-        logger.info({ symbol, theoreticalPrice: theoreticalPrice.toString(), realPrice: real.toString() }, "real_fill_price_used");
+      const deviationPoints = real.minus(theoreticalPrice).abs();
+      if (deviationPoints.lte(instrument.maxFillDeviationPoints)) {
+        logger.info(
+          { symbol, theoreticalPrice: theoreticalPrice.toString(), realPrice: real.toString(), deviationPoints: deviationPoints.toString() },
+          "real_fill_price_used"
+        );
         return real;
       }
-      lastDeviationPct = deviation.times(100).toFixed(2);
+      lastDeviationPoints = deviationPoints.toString();
+      // Logged per rejected attempt, not just once at the end: a DOM misread
+      // this large is the failure mode above, and it is worth seeing every
+      // reading that was thrown away rather than only the last one.
+      logger.warn(
+        {
+          symbol,
+          theoreticalPrice: theoreticalPrice.toString(),
+          rejectedPrice: real.toString(),
+          deviationPoints: deviationPoints.toString(),
+          maxFillDeviationPoints: instrument.maxFillDeviationPoints.toString(),
+          attempt: attempt + 1,
+        },
+        "real_fill_price_rejected_too_far_from_theoretical"
+      );
     }
-    logger.warn({ symbol, theoreticalPrice: theoreticalPrice.toString(), lastDeviationPct }, "real_fill_price_unavailable_or_too_far_from_theoretical_using_theoretical");
+    logger.warn(
+      { symbol, theoreticalPrice: theoreticalPrice.toString(), lastDeviationPoints, maxFillDeviationPoints: instrument.maxFillDeviationPoints.toString() },
+      "real_fill_price_unavailable_or_too_far_from_theoretical_using_theoretical"
+    );
     return theoreticalPrice;
   }
 
