@@ -52,6 +52,13 @@ const EnvSchema = z.object({
   APP_NAME: z.string().default("Tera Trade"),
   ENVIRONMENT: z.string().default("development"),
   LOG_LEVEL: z.string().default("info"),
+  // Where the backend also writes its logs as newline-delimited JSON, on top of
+  // the pretty stdout stream (see core/logger.ts). Empty disables the file.
+  // Default matches the path .gitignore and .claude/skills/daily-plan-fallback
+  // have both assumed existed since long before it actually did -- 2026-09-21,
+  // operator permission, after a whole debugging session spent inferring from
+  // the database because no log line was readable anywhere.
+  LOG_FILE: z.string().default("backend-dev.log"),
   API_KEY: z.string().default("change-me-dev-key"),
 
   // --- Dashboard login (see core/auth.ts) ---
@@ -342,6 +349,7 @@ export interface Settings {
   appName: string;
   environment: string;
   logLevel: string;
+  logFile: string;
   apiKey: string;
   authPasswordHash: string;
   sessionSecret: string;
@@ -443,6 +451,7 @@ export function getSettings(): Settings {
     appName: env.APP_NAME,
     environment: env.ENVIRONMENT,
     logLevel: env.LOG_LEVEL,
+    logFile: env.LOG_FILE,
     apiKey: env.API_KEY,
     authPasswordHash: env.AUTH_PASSWORD_HASH,
     sessionSecret: env.SESSION_SECRET,
