@@ -49,6 +49,7 @@ import {
   computeInitialStop,
   hasReachedTrailingStopActivation,
   RiskEngine,
+  reanchorBracketToRealEntry,
   resolveTrailingStopDistanceTicks,
   REQUIRE_DAILY_PLAN_SYMBOLS,
   type RiskAssessment,
@@ -1298,10 +1299,35 @@ export class TradingEngine {
 
     if (real) {
       const explanation = explainTradeExit(trade.symbol, trade.side, "auto_reconciled", real.exitPrice, real.netPnl);
+      // Correcting entryPrice without moving the bracket with it left the
+      // stored risk and reward disagreeing with the distances the risk engine
+      // actually sized -- see risk/stops.ts's reanchorBracketToRealEntry.
+      const reanchored = reanchorBracketToRealEntry(
+        new Decimal(trade.entryPrice.toString()),
+        real.entryPrice,
+        new Decimal(trade.stopPrice.toString()),
+        trade.takeProfitPrice ? new Decimal(trade.takeProfitPrice.toString()) : null
+      );
+      if (!reanchored.offset.isZero()) {
+        logger.info(
+          {
+            symbol: trade.symbol,
+            tradeId: trade.id,
+            recordedEntry: trade.entryPrice.toString(),
+            realEntry: real.entryPrice.toString(),
+            offset: reanchored.offset.toString(),
+            stopPrice: reanchored.stopPrice.toString(),
+            takeProfitPrice: reanchored.takeProfitPrice?.toString() ?? null,
+          },
+          "bracket_reanchored_to_real_entry"
+        );
+      }
       await prisma.trade.update({
         where: { id: trade.id },
         data: {
           entryPrice: real.entryPrice.toString(),
+          stopPrice: reanchored.stopPrice.toString(),
+          takeProfitPrice: reanchored.takeProfitPrice?.toString() ?? null,
           exitTime: real.exitTime,
           exitPrice: real.exitPrice.toString(),
           exitReason: "auto_reconciled",
@@ -1410,10 +1436,36 @@ export class TradingEngine {
     if (real) {
       const explanation = explainTradeExit(trade.symbol, trade.side, closed.exitReason, real.exitPrice, real.netPnl);
       const tagNote = ` [entry/exit/pnl corrected from TopstepX's own Trade History (order ${real.brokerTradeId}) -- a real confirmed fill, not this app's estimate]`;
+      // Same re-anchor as reconcileBrokerFlatTrade above -- both correct
+      // entryPrice from real broker history, so both must move the bracket by
+      // the same offset or the stored risk:reward stops describing the trade
+      // that actually ran. See risk/stops.ts's reanchorBracketToRealEntry.
+      const reanchored = reanchorBracketToRealEntry(
+        new Decimal(trade.entryPrice.toString()),
+        real.entryPrice,
+        new Decimal(trade.stopPrice.toString()),
+        trade.takeProfitPrice ? new Decimal(trade.takeProfitPrice.toString()) : null
+      );
+      if (!reanchored.offset.isZero()) {
+        logger.info(
+          {
+            symbol: trade.symbol,
+            tradeId: trade.id,
+            recordedEntry: trade.entryPrice.toString(),
+            realEntry: real.entryPrice.toString(),
+            offset: reanchored.offset.toString(),
+            stopPrice: reanchored.stopPrice.toString(),
+            takeProfitPrice: reanchored.takeProfitPrice?.toString() ?? null,
+          },
+          "bracket_reanchored_to_real_entry"
+        );
+      }
       await prisma.trade.update({
         where: { id: trade.id },
         data: {
           entryPrice: real.entryPrice.toString(),
+          stopPrice: reanchored.stopPrice.toString(),
+          takeProfitPrice: reanchored.takeProfitPrice?.toString() ?? null,
           exitTime: real.exitTime,
           exitPrice: real.exitPrice.toString(),
           exitReason: closed.exitReason,

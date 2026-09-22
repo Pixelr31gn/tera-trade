@@ -417,6 +417,46 @@ export function resolveHardTakeProfitDistance(points: number, tickSize: Decimal)
 // invalid price for any instrument this system trades.
 export const NO_STOP_LOSS_SENTINEL_POINTS = new Decimal("100");
 
+/**
+ * Re-anchors a stop/target pair onto a corrected entry price, preserving both
+ * DISTANCES exactly. Same operation execution/engine.ts performs at entry with
+ * its fillOffset, factored out here so the other place that corrects an entry
+ * price can't forget it.
+ *
+ * 2026-09-21, operator instruction: "defently fix the stop_price and
+ * take_profit_price issue until its resolved." engine/loop.ts corrects
+ * Trade.entryPrice from TopstepX's own Trade History in two places (closeTrade
+ * and reconcileBrokerFlatTrade, both via tryReadRealClosedTrade) and neither
+ * touched stopPrice or takeProfitPrice. The entry moved and the bracket did
+ * not, so the stored row's risk and reward silently drifted apart from the
+ * distances the risk engine actually sized -- in proportion to the slippage.
+ * Confirmed live the same session: closed trades reading 11.50/11.50 (1.00),
+ * 33.00/32.25 (0.98) and 60.50/51.00 (0.84) risk:reward, while the one trade
+ * still open and therefore un-rewritten read a clean 28.00/83.50 (2.98).
+ *
+ * Why this matters after the trade is already closed: these rows are what
+ * every win-rate, expectancy and R-multiple number in the system is computed
+ * from, including the per-version session stats that pick which scoring
+ * version is allowed to trade (engine/loop.ts's session-best-version gate). A
+ * row claiming a trade risked more than it could win misprices every one of
+ * those, and it is also simply not what happened.
+ *
+ * Pure and total: a zero offset is a no-op, and a null target stays null.
+ */
+export function reanchorBracketToRealEntry(
+  recordedEntryPrice: Decimal,
+  realEntryPrice: Decimal,
+  stopPrice: Decimal,
+  takeProfitPrice: Decimal | null
+): { stopPrice: Decimal; takeProfitPrice: Decimal | null; offset: Decimal } {
+  const offset = realEntryPrice.minus(recordedEntryPrice);
+  return {
+    stopPrice: stopPrice.plus(offset),
+    takeProfitPrice: takeProfitPrice === null ? null : takeProfitPrice.plus(offset),
+    offset,
+  };
+}
+
 // Rounds a computed stop/target price to a valid tick, away from entry
 // (2026-08-29). Every stop/target price up to this point is built from
 // Decimal arithmetic over ATR/structure/swing distances -- none of those

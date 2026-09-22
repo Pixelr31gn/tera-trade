@@ -6,8 +6,10 @@
  * request: "is the daily plan going to be timer based activated? by
  * session times"). Pre-triggered PRE_TRIGGER_WINDOW_MS ahead of the actual
  * boundary (2026-08-31 operator request: "better to trigger 5 minutes
- * before the session") so the new session's plan is already in effect the
- * instant it begins -- the original design waited for the crossing and then
+ * before the session"; widened to 10 on 2026-09-21, "10 minutes before each
+ * session a daily trading plan is made then set") so the new session's plan
+ * is already in effect the instant it begins -- the original design waited
+ * for the crossing and then
  * refreshed, leaving a real gap (up to POLL_INTERVAL_MS) where a brand-new
  * session traded with zero zones. Falls back to catching up an already-active
  * session that's still missing its plan (pre-trigger was missed -- backend
@@ -71,9 +73,24 @@ import { childLogger } from "../core/logger.js";
 
 const logger = childLogger("dailyPlanScheduler");
 
-// Session boundaries are hours apart -- no need to poll tighter than this to
-// catch a crossing promptly.
-const POLL_INTERVAL_MS = 5 * 60 * 1000;
+// Session boundaries are hours apart, so this was 5 minutes for most of this
+// scheduler's life -- "no need to poll tighter than this to catch a crossing
+// promptly," which was true while PRE_TRIGGER_WINDOW_MS matched it.
+//
+// 2026-09-21 (operator request: "10 minutes before each session a daily
+// trading plan is made then set"): tightened to 1 minute. The poll interval,
+// not the window, is what actually determines WHEN inside the window the
+// refresh lands -- the first tick to fall inside PRE_TRIGGER_WINDOW_MS wins,
+// so a 5-minute poll against a 10-minute window would fire anywhere from 10
+// to 5 minutes out, i.e. "10 minutes before" only by luck. At 1 minute the
+// refresh reliably lands in [10:00, 9:00) before the boundary.
+//
+// Costs nothing real: a tick is one getSettings, one getSystemState and (only
+// inside the window, or when the current session has no plan) one indexed
+// zone lookup. It does NOT multiply Gemini usage -- lastHandledSessionStart
+// is set the moment a refresh is attempted, so exactly one refresh happens
+// per session regardless of how often this ticks.
+export const POLL_INTERVAL_MS = 60 * 1000;
 // One retry after a Gemini failure, matching the transient "high demand"
 // 503s confirmed live (2026-08-29): failed twice, succeeded on the very
 // next attempt, same session, no code change needed -- just a retry. (The
@@ -180,10 +197,21 @@ ${digest}`;
 // effect the instant it begins, instead of leaving a gap right at the
 // boundary where the new session has zero zones until the first
 // post-boundary poll catches it (up to POLL_INTERVAL_MS late under the old
-// "wait for the crossing, then refresh" design). Matches POLL_INTERVAL_MS so
-// a tick landing anywhere in [0, 5min) before the boundary always catches it
-// -- widening the window buys nothing since ticks are already this frequent.
-const PRE_TRIGGER_WINDOW_MS = 5 * 60 * 1000;
+// "wait for the crossing, then refresh" design).
+//
+// 2026-09-21 (operator request: "10 minutes before each session a daily
+// trading plan is made then set"): widened from 5 to 10 minutes. This is the
+// EARLIEST the refresh may start, not when it lands -- POLL_INTERVAL_MS
+// (now 1 minute) is what pins it to the top of the window; see that
+// constant's own comment for why the two have to be chosen together. The
+// previous note here said "widening the window buys nothing since ticks are
+// already this frequent," which was only true while the two were equal.
+//
+// 10 minutes is also the more useful number on its own terms: the digest
+// (buildContextDigest) plus two Gemini round-trips took ~40s on a good run
+// and over 2 minutes across the retry path on 2026-09-21, so a 5-minute
+// window left little margin before the boundary it exists to beat.
+export const PRE_TRIGGER_WINDOW_MS = 10 * 60 * 1000;
 
 // Only set once a session has actually been handled (zones already existed,
 // or a refresh was attempted, success or failure) -- deliberately NOT set
