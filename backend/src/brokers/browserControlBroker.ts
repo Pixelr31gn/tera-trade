@@ -312,6 +312,24 @@ export class BrowserControlBroker implements BrokerClient {
     return theoreticalPrice;
   }
 
+  /**
+   * Public, no-sanity-check read of the open position's own entry price --
+   * see BrokerClient.readOpenPositionEntryPrice for why this exists separately
+   * from readRealFillPrice above. Returns null rather than throwing or
+   * guessing on any unreadable state, so a caller can tell "the broker says X"
+   * apart from "we couldn't ask." All judgement about whether X is believable,
+   * and whether it is different enough to act on, belongs to the caller
+   * (engine/loop.ts's maybeReanchorToRealEntry), which is the only thing that
+   * knows what a given trade's bracket currently looks like.
+   */
+  async readOpenPositionEntryPrice(symbol: string): Promise<Decimal | null> {
+    const instrument = getInstrument(symbol);
+    const page = await this.getPage().catch(() => null);
+    if (!page) return null;
+    const raw = await readOpenPositionFillPrice(page, instrument.brokerContractPrefix).catch(() => null);
+    return raw === null ? null : new Decimal(raw);
+  }
+
   // Prefers the dedicated Positions panel (a single table of every open
   // position at once, no per-symbol widget contention at all -- see
   // browserControl/positionsPanel.ts) -- falls back to the order-entry

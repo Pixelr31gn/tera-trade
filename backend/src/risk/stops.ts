@@ -418,6 +418,19 @@ export function resolveHardTakeProfitDistance(points: number, tickSize: Decimal)
 export const NO_STOP_LOSS_SENTINEL_POINTS = new Decimal("100");
 
 /**
+ * Minimum disagreement, in TICKS, between our recorded entry price and the
+ * broker's own, before a live bracket is re-anchored mid-trade
+ * (engine/loop.ts's maybeReanchorToRealEntry).
+ *
+ * 2026-09-21, operator decision: "trigger threshold 2 ticks or more to
+ * reancor." Below that the difference is indistinguishable from this app's
+ * own tick rounding (roundAwayFromEntry moves the stop and target to their
+ * own ticks independently), and re-anchoring on it would mean cancelling and
+ * re-placing a real resting order to chase noise.
+ */
+export const ENTRY_REANCHOR_MIN_TICKS = 2;
+
+/**
  * Re-anchors a stop/target pair onto a corrected entry price, preserving both
  * DISTANCES exactly. Same operation execution/engine.ts performs at entry with
  * its fillOffset, factored out here so the other place that corrects an entry

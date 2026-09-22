@@ -139,6 +139,27 @@ export interface BrokerClient {
    */
   isPositionFlat?(symbol: string): Promise<boolean | null>;
   /**
+   * Read-only: the entry/average price the broker itself reports for the
+   * CURRENTLY-OPEN position in `symbol`, or null when it genuinely can't be
+   * read (same "don't guess" contract as isPositionFlat above).
+   *
+   * 2026-09-21. placeOrder already reads a fill price once, immediately after
+   * entry, to anchor the stop and target (see BrowserControlBroker's private
+   * readRealFillPrice). When that read comes back unreadable it falls back to
+   * the theoretical signal price, and until now nothing ever looked again --
+   * so a trade whose real fill differed from the price it was scored at kept
+   * a bracket offset from its own position for its entire life, and
+   * engine/loop.ts's manageLiveOpenTrade enforced stop/target levels that
+   * were not where it thought they were. This exists so that gap can be
+   * closed mid-trade rather than only noticed at reconciliation.
+   *
+   * Deliberately separate from placeOrder's own read rather than a refactor
+   * of it: this one has no theoretical price to sanity-check against and no
+   * retry budget tied to a fill confirmation, and its caller applies its own
+   * plausibility and minimum-movement rules before touching a live bracket.
+   */
+  readOpenPositionEntryPrice?(symbol: string): Promise<Decimal | null>;
+  /**
    * Closes a position by placing a plain opposite-side order of `quantity`
    * (flattening a long means selling, flattening a short means buying) --
    * no new stop/target bracket is configured, since this is a closing trade,

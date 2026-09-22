@@ -40,7 +40,7 @@ import { getOpeningRangeStats } from "./openingRangeCache.js";
 import { explainKillSwitch, explainRiskRejection, explainScore, explainTradeExit } from "../explain/engine.js";
 import { executeIfApproved } from "../execution/engine.js";
 import { getExecutionSettings, getSystemState, tripKillSwitch } from "../execution/mode.js";
-import { getInstrument, type InstrumentSpec } from "../marketData/instruments.js";
+import { FILL_PLAUSIBILITY_FRACTION, getInstrument, type InstrumentSpec } from "../marketData/instruments.js";
 import { getNewsRiskStatus } from "../news/risk.js";
 import { classifyRegime } from "../regime/classifier.js";
 import type { RegimeResult } from "../regime/classifier.js";
@@ -49,6 +49,7 @@ import {
   computeInitialStop,
   hasReachedTrailingStopActivation,
   RiskEngine,
+  ENTRY_REANCHOR_MIN_TICKS,
   reanchorBracketToRealEntry,
   resolveTrailingStopDistanceTicks,
   REQUIRE_DAILY_PLAN_SYMBOLS,
@@ -600,6 +601,13 @@ export const CONTINUOUS_SCAN_STRATEGY_IDS = ["continuous_v3_scan_long", "continu
 // persist a running high/low alongside the trade row on every bar.
 const tradeExcursion = new Map<number, { mfe: Decimal; mae: Decimal }>();
 
+// Trade ids whose entry price has already been checked against the broker's
+// own (see TradingEngine.maybeReanchorToRealEntry). In-memory on purpose: the
+// check is a single cheap DOM read whose only cost on a restart is doing it
+// once more, and a persisted flag would need a schema column to express
+// something that is only ever "have we looked yet, this process."
+const entryReanchorChecked = new Set<number>();
+
 // Price ticks land every ~5-10s (browser watch), and onNewBar used to write
 // an equity_curve row on every single one -- the paper account alone
 // accumulated 7,500+ rows in about a day, which is far more resolution than
@@ -949,6 +957,14 @@ export class TradingEngine {
   private async manageLiveOpenTrade(account: Account, openTrade: Trade, symbol: string, barTime: Date, h: Decimal, l: Decimal): Promise<void> {
     const broker = await this.brokerForTrade(openTrade);
     const brokerAccountId = (await broker.getAccounts())[0]!.accountId;
+
+    // Before reading this trade's levels: make sure they're anchored to the
+    // position the broker actually holds, not to the price we scored it at
+    // (see maybeReanchorToRealEntry). Runs at most once per trade, and returns
+    // the corrected row so the stop/target checks below act on the new levels
+    // this same tick instead of one tick late.
+    openTrade = await this.maybeReanchorToRealEntry(openTrade, symbol, broker);
+
     const stopPrice = new Decimal(openTrade.stopPrice.toString());
     const takeProfitPrice = openTrade.takeProfitPrice ? new Decimal(openTrade.takeProfitPrice.toString()) : null;
     const entryPrice = new Decimal(openTrade.entryPrice.toString());
@@ -1198,6 +1214,142 @@ export class TradingEngine {
   // placeTakeProfitOrder's own doc comment for why this exists). Returns false (and leaves
   // takeProfitOrderPlaced unset) on any failure -- the caller retries on the next tick rather than
   // silently leaving the target unprotected, same shape as activateTrailingStop above.
+  /**
+   * One-shot, per trade: ask the broker what entry price it actually holds for
+   * this position and, if it disagrees with our record by
+   * ENTRY_REANCHOR_MIN_TICKS or more, move the whole bracket onto it --
+   * including the real resting take-profit order.
+   *
+   * 2026-09-21, operator decision (threshold "2 ticks or more", and explicit
+   * yes to re-placing the resting order rather than only fixing our own
+   * record). Closes the last of the three ways a bracket could end up offset
+   * from its own position: readRealFillPrice believing a bad DOM read (fixed
+   * by the plausibility band), an entry corrected at close without the bracket
+   * following (fixed by reanchorBracketToRealEntry's two call sites), and this
+   * one -- readRealFillPrice being unable to read at all, falling back to the
+   * theoretical signal price, and nothing ever looking again. Left open until
+   * now because it had not been observed; it is the only one of the three that
+   * needs a broker write to fix properly.
+   *
+   * Returns the trade to carry on with -- the updated row when it re-anchored,
+   * the original otherwise -- so the caller's stop/target checks on this very
+   * tick use the corrected levels rather than waiting a tick.
+   *
+   * Four guards, each for a specific way this could do harm:
+   *  - Plausibility: the reading must be within the same band placeOrder uses
+   *    (marketData/instruments.ts's FILL_PLAUSIBILITY_FRACTION). Re-anchoring
+   *    a LIVE bracket onto a 201.84-class misread would be strictly worse than
+   *    the offset it is fixing.
+   *  - Minimum movement: below 2 ticks it is our own rounding, not slippage.
+   *  - No armed trailing stop: "Cancel Orders" is symbol-scoped (see
+   *    browserControl/orderTicket.ts's submitCancelOrders), so cancelling to
+   *    re-place the take-profit would take a real trailing stop with it. In
+   *    practice this never collides -- the trail arms at 65% of target, long
+   *    after the first tick -- so the internal-only re-anchor is the correct
+   *    fallback rather than a compromise.
+   *  - No other open trade on the symbol: same symbol-scoped-cancel reason,
+   *    and the same guard cancelRestingOrdersAfterClose already applies.
+   */
+  private async maybeReanchorToRealEntry(openTrade: Trade, symbol: string, broker: BrokerClient): Promise<Trade> {
+    if (entryReanchorChecked.has(openTrade.id)) return openTrade;
+    // Marked before the first await so two ticks racing the same trade can't
+    // both issue a broker read (and worse, both cancel/re-place).
+    entryReanchorChecked.add(openTrade.id);
+    if (!broker.readOpenPositionEntryPrice) return openTrade;
+
+    const instrument = getInstrument(symbol);
+    const recordedEntry = new Decimal(openTrade.entryPrice.toString());
+    const realEntry = await broker.readOpenPositionEntryPrice(symbol).catch(() => null);
+    if (realEntry === null) {
+      logger.info({ symbol, tradeId: openTrade.id }, "entry_reanchor_skipped_broker_entry_unreadable");
+      return openTrade;
+    }
+
+    const deviation = realEntry.minus(recordedEntry).abs();
+    const tolerance = Decimal.max(instrument.maxFillDeviationPoints, recordedEntry.abs().times(FILL_PLAUSIBILITY_FRACTION));
+    if (deviation.gt(tolerance)) {
+      logger.warn(
+        { symbol, tradeId: openTrade.id, recordedEntry: recordedEntry.toString(), rejectedEntry: realEntry.toString(), deviation: deviation.toString(), tolerance: tolerance.toString() },
+        "entry_reanchor_skipped_broker_entry_implausible"
+      );
+      return openTrade;
+    }
+    if (deviation.lt(instrument.tickSize.times(ENTRY_REANCHOR_MIN_TICKS))) {
+      // Logged even though nothing changed: silence here is ambiguous between
+      // "checked, the broker agreed" and "never ran at all," and the second is
+      // the failure this method exists to rule out. One line per trade.
+      logger.info(
+        { symbol, tradeId: openTrade.id, recordedEntry: recordedEntry.toString(), realEntry: realEntry.toString(), deviation: deviation.toString() },
+        "entry_reanchor_checked_within_tolerance"
+      );
+      return openTrade;
+    }
+
+    const reanchored = reanchorBracketToRealEntry(
+      recordedEntry,
+      realEntry,
+      new Decimal(openTrade.stopPrice.toString()),
+      openTrade.takeProfitPrice ? new Decimal(openTrade.takeProfitPrice.toString()) : null
+    );
+    logger.warn(
+      {
+        symbol,
+        tradeId: openTrade.id,
+        recordedEntry: recordedEntry.toString(),
+        realEntry: realEntry.toString(),
+        offset: reanchored.offset.toString(),
+        newStopPrice: reanchored.stopPrice.toString(),
+        newTakeProfitPrice: reanchored.takeProfitPrice?.toString() ?? null,
+      },
+      "entry_reanchor_bracket_offset_from_real_position"
+    );
+
+    // Move the real resting take-profit order before touching the row, so the
+    // flag we persist always describes what is actually at the broker.
+    let takeProfitOrderPlaced = openTrade.takeProfitOrderPlaced;
+    const newTakeProfit = reanchored.takeProfitPrice;
+    if (takeProfitOrderPlaced && newTakeProfit !== null && !openTrade.trailingStopPlaced && broker.cancelRestingOrder) {
+      const otherOpen = await prisma.trade.findFirst({ where: { accountId: openTrade.accountId, symbol, status: "open", id: { not: openTrade.id } } });
+      if (otherOpen) {
+        logger.warn({ symbol, tradeId: openTrade.id, otherTradeId: otherOpen.id }, "entry_reanchor_resting_order_left_in_place_other_trade_open");
+      } else {
+        const cancelled = await broker.cancelRestingOrder(symbol).catch((err: unknown) => ({ status: "rejected" as const, error: String(err), brokerOrderId: "" }));
+        if (cancelled.status === "rejected") {
+          // The old order is still working at the old price. Do NOT re-place
+          // (that would leave two), and keep the flag true so we don't also
+          // start closing at the new target ourselves -- one mispriced real
+          // exit beats two exits fighting each other.
+          logger.error({ symbol, tradeId: openTrade.id, error: cancelled.error }, "entry_reanchor_cancel_failed_resting_order_still_at_old_price");
+        } else {
+          const replaced = await this.activateTakeProfitOrder(openTrade, symbol, newTakeProfit);
+          if (!replaced) {
+            // Cancelled but not re-placed: nothing is resting any more, so the
+            // flag MUST go false or manageLiveOpenTrade would stand its own
+            // take-profit check down (see Trade.takeProfitOrderPlaced's schema
+            // comment) and this trade would have no target enforcement at all.
+            takeProfitOrderPlaced = false;
+            logger.error({ symbol, tradeId: openTrade.id }, "entry_reanchor_replace_failed_falling_back_to_internal_take_profit_check");
+          }
+        }
+      }
+    }
+
+    const updated = await prisma.trade.update({
+      where: { id: openTrade.id },
+      data: {
+        entryPrice: realEntry.toString(),
+        stopPrice: reanchored.stopPrice.toString(),
+        takeProfitPrice: newTakeProfit?.toString() ?? null,
+        takeProfitOrderPlaced,
+        explanation:
+          `${openTrade.explanation} [BRACKET RE-ANCHORED: the broker reported this position's entry as ${realEntry.toString()}, ` +
+          `${reanchored.offset.toString()} from the ${recordedEntry.toString()} it was sized around -- stop/target moved by the same ` +
+          `offset so both distances are unchanged.]`,
+      },
+    });
+    return updated;
+  }
+
   private async activateTakeProfitOrder(openTrade: Trade, symbol: string, takeProfitPrice: Decimal): Promise<boolean> {
     const broker = await this.brokerForTrade(openTrade);
     if (!broker.placeTakeProfitOrder) {
