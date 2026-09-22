@@ -17,6 +17,7 @@
  */
 import type { Browser, CDPSession, Page } from "playwright-core";
 import { childLogger } from "../core/logger.js";
+import { DEFAULT_INSTRUMENTS } from "../marketData/instruments.js";
 import { connectToChrome, findPage } from "./cdpClient.js";
 
 const logger = childLogger("orderFlowListener");
@@ -27,13 +28,40 @@ const RECORD_SEPARATOR = "\x1e";
 
 // Maps the "F.US.<ROOT>" (or "CON.F.US.<ROOT>.<MMYY>") contract identifiers
 // used by RealTimeDom/RealTimeContractQuote/RealTimeTradeLogWithSpeed/
-// RealTimeContractBar to our canonical symbol. Confirmed from live traffic
-// for ES/NQ; CL/GC aren't in the account's watchlist yet so no traffic for
-// them has been observed -- add their roots here once seen (see the
-// unmapped_contract_root warning below).
+// RealTimeContractBar to our canonical symbol.
+//
+// 2026-09-21: this silently covered NOTHING the account actually trades.
+// "F.US.EP"/"F.US.ENQ" are the FULL-SIZE E-mini roots, confirmed from live
+// traffic back when those were the tracked instruments; the account moved to
+// the micro contracts on 2026-07-06 (see docs/BUILD_HISTORY.md, "Switched
+// tracked instruments to the actual micro contracts") and this map was never
+// updated with them. Every RealTimeDom and RealTimeTradeLogWithSpeed frame
+// for MES/MNQ therefore resolved to null and was dropped, so
+// getLatestOrderFlowSnapshot returned nothing on every signal and v3's
+// order-flow adjustment plus v5 have been scoring without a factor they are
+// built around -- for over two months, with no symptom beyond a single
+// unmapped_contract_root warning per root per process. It took writing logs
+// to a file (core/logger.ts, same day) for that warning to be readable at
+// all.
+//
+// The micro half is now DERIVED from the instrument registry rather than
+// hand-listed, because hand-listing is precisely what failed: every
+// instrument already declares the broker contract code it trades under
+// (brokerContractPrefix -- MES/MNQ/MCL/MGC), and TopstepX's root for a micro
+// is that same code. Adding or re-activating an instrument now carries its
+// order-flow mapping with it automatically. Built from DEFAULT_INSTRUMENTS
+// rather than ACTIVE_INSTRUMENTS on purpose: mapping a root we receive but
+// don't currently trade costs nothing, while missing one costs this.
+//
+// The full-size roots stay hand-written -- "EP" and "ENQ" are CME clearing
+// codes with no relationship to anything in the registry, so they cannot be
+// derived. They are kept rather than deleted because the account can be
+// switched back to full-size contracts, and traffic for both shapes is
+// harmless.
 const CONTRACT_ROOT_TO_SYMBOL: Record<string, string> = {
   "F.US.EP": "ES",
   "F.US.ENQ": "NQ",
+  ...Object.fromEntries(DEFAULT_INSTRUMENTS.map((i) => [`F.US.${i.brokerContractPrefix}`, i.symbol])),
 };
 
 // TopstepX's "Tilt" feed instead uses bare Globex-style codes (e.g. "ESU6",
@@ -55,13 +83,27 @@ function contractRootToSymbol(idOrRoot: string): string | null {
   return null;
 }
 
-const knownSymbols = new Set(["ES", "NQ", "CL", "GC"]);
+// Same fault as CONTRACT_ROOT_TO_SYMBOL had, in the Tilt path: this was a
+// hardcoded set of the FULL-SIZE symbols, so a micro code ("MESU6" -> root
+// "MES") matched the pattern above and was then dropped for not being a known
+// root. Now derived from the registry both ways -- a full-size root maps to
+// itself, a broker contract prefix maps back to its canonical symbol -- so
+// both contract shapes resolve and adding an instrument covers itself.
+//
+// Tilt is captured but deliberately not scored (see docs/BUILD_HISTORY.md:
+// whether to follow or fade crowd positioning isn't established for this
+// account), so this half was costing data collection rather than live
+// decisions -- fixed together anyway, since leaving one shape of the same bug
+// in place is how the first one survived two months.
+const GLOBEX_ROOT_TO_SYMBOL: Record<string, string> = {
+  ...Object.fromEntries(DEFAULT_INSTRUMENTS.map((i) => [i.symbol, i.symbol])),
+  ...Object.fromEntries(DEFAULT_INSTRUMENTS.map((i) => [i.brokerContractPrefix, i.symbol])),
+};
 
 function globexCodeToSymbol(code: string): string | null {
   const match = code.match(GLOBEX_CODE_PATTERN);
   if (!match) return null;
-  const root = match[1]!;
-  return knownSymbols.has(root) ? root : null;
+  return GLOBEX_ROOT_TO_SYMBOL[match[1]!] ?? null;
 }
 
 interface SymbolState {
@@ -313,3 +355,11 @@ export class OrderFlowListener {
     }
   }
 }
+
+/**
+ * Exported for tests only. The mapping is the part of this file with a real
+ * failure history (see CONTRACT_ROOT_TO_SYMBOL's comment) and it is pure, so
+ * it is worth asserting directly rather than only through a live SignalR
+ * frame, which a test cannot produce.
+ */
+export const __orderFlowMappingInternals = { contractRootToSymbol, globexCodeToSymbol };

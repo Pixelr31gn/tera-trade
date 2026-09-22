@@ -49,9 +49,18 @@ const fileTarget = {
   level: settings.logLevel,
 };
 
+// Never write the shared log file from a test run. Caught immediately after
+// adding the file target: `vitest` imports this module like any other, so the
+// suite's own fixtures started appending to the same file the live engine
+// writes to -- including deliberately-thrown strings like "simulated
+// transient CDP contention", which read exactly like a real CDP failure when
+// grepping after the fact. A diagnosis log that mixes in synthetic failures
+// is worse than no log, because it is actively misleading.
+const isTestRun = process.env.VITEST !== undefined || process.env.NODE_ENV === "test";
+
 const targets = [
   ...(isDevelopment ? [prettyTarget] : []),
-  ...(settings.logFile ? [fileTarget] : []),
+  ...(settings.logFile && !isTestRun ? [fileTarget] : []),
 ];
 
 export const logger = pino({
