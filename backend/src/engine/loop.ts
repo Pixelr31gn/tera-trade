@@ -97,24 +97,45 @@ export function isSrProximityGateSuspended(at: Date): boolean {
 // invokes it for any version. v3 runs last so v1/v2's results are already
 // available for its own internal v1v2Override (see gate.ts) -- unrelated to
 // the aggregate consensus rule below, which reads all three independently.
-const STRATEGY_VERSIONS: StrategyVersion[] = ["v1", "v2", "v3"];
+// v5 PROMOTED out of shadow mode 2026-09-23 (operator request: "turn v5
+// shadow mode to false"), after leading the corrected session-best ranking
+// (31.99% on its own taken calls -- see scoring/sessionPerformance.ts's
+// computeSessionVersionStats comment for why that ranking was meaningless
+// until the same day). It had been shadow-scored since 2026-07-21 under the
+// bar its own comment set: "shadow-scored only ... until the operator decides
+// it's ready to vote on consensus."
+//
+// Order matters: v5 must stay ahead of v6 in the combined scoring sequence
+// (scoreAllVersions iterates STRATEGY_VERSIONS then SHADOW_ONLY_VERSIONS),
+// because v6's ensemble reads v5's own result. Appending v5 last here keeps
+// that true -- v1, v2, v3, v5, then v6, v7.
+//
+// What this actually changes, given v5 was ALREADY eligible to gate a trade
+// alone through the session-best-version gate (it is in
+// SESSION_PERFORMANCE_ARMS): v5 now also counts toward averageProbability and
+// toward the cold-start majority vote below. See hasMajorityVoteAgreement for
+// the one consequence worth watching.
+const STRATEGY_VERSIONS: StrategyVersion[] = ["v1", "v2", "v3", "v5"];
 
 // Scored on every signal alongside STRATEGY_VERSIONS (visible in the
 // Recommendation Feed, directly comparable) but deliberately excluded from
 // both consensus functions below, which only ever read from
 // STRATEGY_VERSIONS -- shadow-only until the operator decides a version here
-// is ready to actually vote. v5 (2026-07-21, see ruleScorerV5.ts) starts
-// here; move a version to STRATEGY_VERSIONS instead once it's promoted.
-// v6 (2026-08-02, see ruleScorerV6.ts) joins the same way -- order matters
-// here: it must come after v5, since v6's ensemble needs v5's own result
-// (see scoreAllVersions below and gate.ts's evaluateSetup 'v6' branch).
+// is ready to actually vote. v5 (2026-07-21, see ruleScorerV5.ts) started
+// here and was promoted to STRATEGY_VERSIONS on 2026-09-23 (see that list's
+// own comment) -- which is the intended path out of this list.
+// v6 (2026-08-02, see ruleScorerV6.ts) joins the same way -- order still
+// matters: it must be scored after v5, since v6's ensemble needs v5's own
+// result (see scoreAllVersions below and gate.ts's evaluateSetup 'v6'
+// branch). That holds while v5 sits at the end of STRATEGY_VERSIONS, since
+// scoreAllVersions iterates STRATEGY_VERSIONS before this list.
 // v7 (2026-08-07, see scoring/ruleScorerV7.ts) joins the same way -- pattern-
 // mined from real resolved outcomes, zero live trades behind its own weight
 // yet, shadow-only until it earns promotion on a real track record. Unlike
 // v6, it needs no other version's results (plain features in, points out --
 // see gate.ts's "v7" branch), so ordering relative to v5/v6 here doesn't
 // matter.
-const SHADOW_ONLY_VERSIONS: StrategyVersion[] = ["v5", "v6", "v7"];
+const SHADOW_ONLY_VERSIONS: StrategyVersion[] = ["v6", "v7"];
 
 // Both paper AND live take a trade when at least 2 of the 3 versions'
 // probabilities individually clear the score threshold (65%, see
@@ -176,10 +197,17 @@ function hasMutualAgreement(probabilities: number[], v5Probability: number): boo
   return probabilities.some((p) => p >= MUTUAL_AGREEMENT_HIGH_THRESHOLD) && v5Probability >= V5_EXECUTION_GATE_THRESHOLD;
 }
 
+// Still suspended and unused (see hasMutualAgreement above). Note that with v5
+// promoted into STRATEGY_VERSIONS on 2026-09-23 this string now reports v5
+// twice -- once inside the voter list, once as the separate AND-gate partner --
+// because the suspended rule's whole shape was "v5 is not a voter, it is a
+// gate." Left as-is rather than tidied: the duplication is an accurate signal
+// that reviving this rule needs it rethought against v5's new status, not a
+// cosmetic fix. The denominator is at least no longer hardcoded to 3.
 function mutualAgreementSummary(gatedByVersion: Map<StrategyVersion, GatedScore>, averageProbability: number): string {
   const agreeCount = STRATEGY_VERSIONS.filter((v) => gatedByVersion.get(v)!.probability >= MUTUAL_AGREEMENT_HIGH_THRESHOLD).length;
   const v5Probability = gatedByVersion.get("v5")!.probability;
-  return `${agreeCount}/3 at ${Math.round(MUTUAL_AGREEMENT_HIGH_THRESHOLD * 100)}%+ (at least 1 needed), v5 gate needs ${Math.round(V5_EXECUTION_GATE_THRESHOLD * 100)}%+ (avg=${Math.round(averageProbability * 100)}%): ${STRATEGY_VERSIONS.map((v) => `${v}=${Math.round(gatedByVersion.get(v)!.probability * 100)}%`).join(", ")}, v5=${Math.round(v5Probability * 100)}%`;
+  return `${agreeCount}/${STRATEGY_VERSIONS.length} at ${Math.round(MUTUAL_AGREEMENT_HIGH_THRESHOLD * 100)}%+ (at least 1 needed), v5 gate needs ${Math.round(V5_EXECUTION_GATE_THRESHOLD * 100)}%+ (avg=${Math.round(averageProbability * 100)}%): ${STRATEGY_VERSIONS.map((v) => `${v}=${Math.round(gatedByVersion.get(v)!.probability * 100)}%`).join(", ")}, v5=${Math.round(v5Probability * 100)}%`;
 }
 
 // Any-single-version gate (2026-08-02, operator request): any ONE of
@@ -265,7 +293,7 @@ function v6MandatorySummary(gatedByVersion: Map<StrategyVersion, GatedScore>, av
 // working correctly against the unrounded value. Second hop, same day,
 // operator request: v3's own solo gate (the 29.5% number, see the now-
 // superseded hasV3SoloAgreement below) was retired in favor of v3 going back
-// to the plain v1.2-era majority vote (hasV1V2V3MajorityAgreement below) --
+// to the plain v1.2-era majority vote (hasMajorityVoteAgreement below) --
 // v6 is now the sole owner of "the 29.5% number." No backtested evidence
 // behind 29.5% -- same caveat as the original 30%/29.55% above.
 const V6_SOLO_EXECUTION_THRESHOLD = 0.295;
@@ -289,7 +317,7 @@ function v6SoloSummary(gatedByVersion: Map<StrategyVersion, GatedScore>, average
 // v3-solo gate (2026-08-07, operator request, additive alongside v6-solo
 // above at the time) -- SUPERSEDED the same day, not deleted: the operator
 // asked v3 to go back to the plain "tera trade 1.2" majority-vote rule
-// instead (hasV1V2V3MajorityAgreement below) rather than keep its own solo
+// instead (hasMajorityVoteAgreement below) rather than keep its own solo
 // threshold. Left here, unused, so reverting is a one-line swap back in
 // determineConsensus if the 1.2-rules choice doesn't hold up. Was: v3 alone
 // clearing 29.5% is enough to execute on its own, no confirmation from any
@@ -318,12 +346,27 @@ function hasV3SoloAgreement(gatedByVersion: Map<StrategyVersion, GatedScore>): b
 // scoring/consensusBandit.ts) -- this function itself is unchanged and still
 // the actual enforcement whenever the bandit can't yet make an informed
 // pick.
-function hasV1V2V3MajorityAgreement(gatedByVersion: Map<StrategyVersion, GatedScore>): boolean {
+// Renamed from hasV1V2V3MajorityAgreement on 2026-09-23: it reads
+// STRATEGY_VERSIONS, which gained v5 that day, so the old name named a pool it
+// no longer described. Still the live cold-start fallback for the
+// session-best-version gate (see hasSessionBestVersionAgreement) -- the one
+// path that decides execution before any version has enough resolved samples
+// this session.
+//
+// The `>= 2` is UNCHANGED and is now proportionally looser: it was 2 of 3
+// (67% of voters) and is 2 of 4 (50%) with v5 promoted. That is a real
+// loosening of the cold-start gate, arriving as a side effect of promoting v5
+// rather than as a decision about the threshold itself. Left at 2 deliberately
+// -- raising it to 3 would partly cancel the influence v5 was promoted to
+// have, and that trade is the operator's call, not a silent one. Revisit if
+// cold-start (the first few setups of every session) starts executing
+// noticeably more often.
+function hasMajorityVoteAgreement(gatedByVersion: Map<StrategyVersion, GatedScore>): boolean {
   return STRATEGY_VERSIONS.filter((v) => gatedByVersion.get(v)!.probability >= LOOSE_GATE_THRESHOLD).length >= 2;
 }
 
 // Contextual UCB1 bandit leg (2026-08-09, operator request, replacing
-// hasV1V2V3MajorityAgreement's fixed rule above as one of the three OR'd legs
+// hasMajorityVoteAgreement's fixed rule above as one of the three OR'd legs
 // of determineConsensus): per (session x intraday-trend x intraday-vol)
 // bucket (analytics/contextBucket.ts), picks whichever single one of
 // CONSENSUS_BANDIT_ARMS (v1/v2/v3/v6/v7 -- widened same day from v1/v2/v3
@@ -342,7 +385,7 @@ function hasV1V2V3MajorityAgreement(gatedByVersion: Map<StrategyVersion, GatedSc
 // the bandit's own constants specifically (see scripts/replayBanditEval.ts
 // for the walk-forward evaluation meant to follow, not precede, this).
 function hasBanditSelectedVersionAgreement(gatedByVersion: Map<StrategyVersion, GatedScore>, banditSelection: BanditSelectionResult): boolean {
-  if (banditSelection.coldStart) return hasV1V2V3MajorityAgreement(gatedByVersion);
+  if (banditSelection.coldStart) return hasMajorityVoteAgreement(gatedByVersion);
   return gatedByVersion.get(banditSelection.selectedVersion)!.probability >= LOOSE_GATE_THRESHOLD;
 }
 
@@ -382,12 +425,12 @@ function hasBanditSelectedVersionAgreement(gatedByVersion: Map<StrategyVersion, 
 //
 // Cold-start fallback (fewer than MIN_SESSION_SAMPLES_PER_VERSION resolved
 // samples this session for every version -- true for the first few setups of
-// every session) reuses hasV1V2V3MajorityAgreement verbatim, same safety
+// every session) reuses hasMajorityVoteAgreement verbatim, same safety
 // posture as the bandit leg's own cold-start: with zero session evidence yet,
 // "highest win rate" is meaningless, so this falls back to requiring 2 of 3
 // independent versions to agree rather than crowning an arbitrary winner.
 function hasSessionBestVersionAgreement(gatedByVersion: Map<StrategyVersion, GatedScore>, sessionSelection: SessionPerformanceSelection): boolean {
-  if (sessionSelection.coldStart) return hasV1V2V3MajorityAgreement(gatedByVersion);
+  if (sessionSelection.coldStart) return hasMajorityVoteAgreement(gatedByVersion);
   return gatedByVersion.get(sessionSelection.selectedVersion)!.probability >= LOOSE_GATE_THRESHOLD;
 }
 

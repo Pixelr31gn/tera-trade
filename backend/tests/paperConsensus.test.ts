@@ -376,3 +376,45 @@ describe("isSrProximityGateSuspended", () => {
     expect(isSrProximityGateSuspended(new Date("2026-08-09T00:00:00Z"))).toBe(false);
   });
 });
+
+// v5 PROMOTED out of shadow mode 2026-09-23 (operator request: "turn v5
+// shadow mode to false"). v5 was already able to gate a trade alone through
+// the session-best-version gate, so the only thing promotion changes is that
+// v5 now counts as a VOTER: toward averageProbability, and toward the
+// cold-start majority vote that decides execution before any version has
+// enough resolved samples in a session.
+//
+// Nothing in this file failed when v5 was promoted, which is the reason these
+// exist -- the voting pool was changing with no test pinning it.
+describe.each([
+  ["determineConsensus", unrestricted(determineConsensus)],
+  ["determineContinuousScanConsensus", unrestricted(determineContinuousScanConsensus)],
+] as const)("%s -- v5 votes in the cold-start majority (promoted 2026-09-23)", (_name, fn) => {
+  it("counts v5 toward the cold-start majority -- v1 + v5 alone is enough", () => {
+    // Only v1 and v5 clear LOOSE_GATE_THRESHOLD. Before promotion this was
+    // 1 of 3 (v5 invisible to the vote) and did NOT execute; it is now 2 of 4.
+    const result = fn(
+      map(gated("taken", 0.7), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("taken", 0.7), gated("skipped_score", 0.1)),
+      COLD_START
+    );
+    expect(result.taken).toBe(true);
+  });
+
+  it("does not count v5 when v5 itself fails the threshold -- v1 alone is still not a majority", () => {
+    const result = fn(
+      map(gated("taken", 0.7), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.1)),
+      COLD_START
+    );
+    expect(result.taken).toBe(false);
+  });
+
+  it("folds v5 into the averaged probability", () => {
+    // v1/v2/v3 at 0.2 with v5 at 1.0: a 3-voter average would be 0.2, a
+    // 4-voter average including v5 is 0.4. Pins that v5 is in the mean.
+    const result = fn(
+      map(gated("skipped_score", 0.2), gated("skipped_score", 0.2), gated("skipped_score", 0.2), gated("taken", 1.0), gated("skipped_score", 0.1)),
+      COLD_START
+    );
+    expect(result.averageProbability).toBeCloseTo(0.4, 6);
+  });
+});
