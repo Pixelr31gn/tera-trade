@@ -1,6 +1,6 @@
 import { Decimal } from "decimal.js";
 import { describe, expect, it } from "vitest";
-import { reanchorBracketToRealEntry } from "../src/risk/stops.js";
+import { bracketIsValidAgainstEntry, reanchorBracketToRealEntry } from "../src/risk/stops.js";
 
 function d(n: number | string): Decimal {
   return new Decimal(n);
@@ -99,5 +99,56 @@ describe("reanchorBracketToRealEntry", () => {
       expect(risk.toString()).toBe("28");
       expect(reward.toString()).toBe("83.5");
     }
+  });
+});
+
+/**
+ * 2026-09-24. reanchorBracketToRealEntry preserves DISTANCES, which is correct
+ * when the bracket was derived from the entry price and wrong when the bracket
+ * is a real structural LEVEL. bracketIsValidAgainstEntry is the discriminator;
+ * these cases are the two real trades it has to get right, in opposite
+ * directions.
+ */
+describe("bracketIsValidAgainstEntry", () => {
+  it("accepts trade 119's bracket against its real entry -- a level, must not move", () => {
+    // Recorded entry 30546.75, real fill 30732.50, stop 30545.75 is the genuine
+    // 5m 20 EMA. Shifting would have put the stop at 30731.50, one point under a
+    // 30733 market.
+    expect(bracketIsValidAgainstEntry(d("30732.50"), d("30545.75"), d("31106.75"), "long")).toBe(true);
+    // Against the WRONG recorded entry it also technically passes the side
+    // checks, which is why the check has to be made against the real entry --
+    // the 1.00 vs 560.00 distances are what look absurd, not the sides.
+    expect(d("30732.50").minus(d("30545.75")).toString()).toBe("186.75");
+  });
+
+  it("rejects ES trade 32's bracket against its real entry -- derived, must shift", () => {
+    // Real fill 7843.50 with a 4.50/13.50 plan recorded around 7837.00: sides
+    // are fine but reward 7.00 < risk 11.00, so the bracket was anchored wrong.
+    expect(bracketIsValidAgainstEntry(d("7843.5"), d("7832.5"), d("7850.5"), "short")).toBe(false);
+    expect(bracketIsValidAgainstEntry(d("7843.5"), d("7832.5"), d("7850.5"), "long")).toBe(false);
+    // And shifting it restores the sized distances.
+    const r = reanchorBracketToRealEntry(d(7837), d("7843.5"), d("7832.5"), d("7850.5"));
+    expect(bracketIsValidAgainstEntry(d("7843.5"), r.stopPrice, r.takeProfitPrice, "long")).toBe(true);
+  });
+
+  it("rejects a stop or target on the wrong side of entry", () => {
+    // Long with the target below entry -- the degenerate case seen live.
+    expect(bracketIsValidAgainstEntry(d(100), d(99), d(98), "long")).toBe(false);
+    // Long with the stop above entry.
+    expect(bracketIsValidAgainstEntry(d(100), d(101), d(110), "long")).toBe(false);
+    // Short, mirrored.
+    expect(bracketIsValidAgainstEntry(d(100), d(101), d(102), "short")).toBe(false);
+    expect(bracketIsValidAgainstEntry(d(100), d(99), d(90), "short")).toBe(false);
+  });
+
+  it("rejects reward equal to or below risk, and accepts just above", () => {
+    expect(bracketIsValidAgainstEntry(d(100), d(90), d(110), "long")).toBe(false); // 10 vs 10
+    expect(bracketIsValidAgainstEntry(d(100), d(90), d(109), "long")).toBe(false); // 9 < 10
+    expect(bracketIsValidAgainstEntry(d(100), d(90), d("110.25"), "long")).toBe(true);
+  });
+
+  it("treats a missing target as coherent -- there is nothing to compare", () => {
+    expect(bracketIsValidAgainstEntry(d(100), d(90), null, "long")).toBe(true);
+    expect(bracketIsValidAgainstEntry(d(100), d(110), null, "long")).toBe(false); // stop still wrong side
   });
 });

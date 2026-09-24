@@ -431,6 +431,53 @@ export const NO_STOP_LOSS_SENTINEL_POINTS = new Decimal("100");
 export const ENTRY_REANCHOR_MIN_TICKS = 2;
 
 /**
+ * Is this stop/target pair already coherent as ABSOLUTE prices against
+ * `entryPrice` -- both on the correct sides of it, and standing to make more
+ * than it risks?
+ *
+ * 2026-09-24. This is the discriminator reanchorBracketToRealEntry needs and
+ * did not have. That function preserves DISTANCES, which is right when the
+ * bracket was DERIVED from the entry price (every ATR, swing and R-multiple
+ * path) and wrong when the bracket is a real structural LEVEL -- a 5m EMA, an
+ * S/R pivot, a daily-plan boundary. A level is correct in absolute terms and
+ * must not move just because the entry it was recorded against turns out to
+ * have been wrong.
+ *
+ * Caught before it did damage, on live trade 119: recorded entry 30546.75,
+ * real fill 30732.50, stop 30545.75 (the genuine 5m 20 EMA), target 31106.75.
+ * The stored distances read as 1.00 risk against 560.00 reward, so preserving
+ * them around the real entry would have moved the stop to 30731.50 -- one point
+ * under a 30733 market, closing a position with a real 186.75pt stop
+ * essentially at once. Measured against the real entry instead, the existing
+ * bracket is already sane: 186.75 risk, 374.25 reward.
+ *
+ * So: valid against the true entry means the bracket is an absolute level and
+ * only the entry price needs correcting. Invalid means the bracket was built
+ * around the wrong anchor and should be shifted. Both real cases resolve
+ * correctly -- trade 119 above is valid (leave the bracket), while ES trade 32
+ * (real entry 7843.50, stop 7832.50, target 7850.50) is invalid on reward
+ * 7.00 < risk 11.00 and does need the shift that turns it back into 4.50/13.50.
+ *
+ * Uses reward > risk rather than MIN_REWARD_RISK_RATIO on purpose: this only
+ * has to tell "coherent" from "anchored to the wrong price," and a genuine
+ * structural bracket is allowed to sit below 3:1 without being rewritten.
+ */
+export function bracketIsValidAgainstEntry(
+  entryPrice: Decimal,
+  stopPrice: Decimal,
+  takeProfitPrice: Decimal | null,
+  side: "long" | "short"
+): boolean {
+  const stopOnCorrectSide = side === "long" ? stopPrice.lt(entryPrice) : stopPrice.gt(entryPrice);
+  if (!stopOnCorrectSide) return false;
+  // No target is not incoherent -- there is simply nothing to compare.
+  if (takeProfitPrice === null) return true;
+  const targetOnCorrectSide = side === "long" ? takeProfitPrice.gt(entryPrice) : takeProfitPrice.lt(entryPrice);
+  if (!targetOnCorrectSide) return false;
+  return takeProfitPrice.minus(entryPrice).abs().gt(entryPrice.minus(stopPrice).abs());
+}
+
+/**
  * Re-anchors a stop/target pair onto a corrected entry price, preserving both
  * DISTANCES exactly. Same operation execution/engine.ts performs at entry with
  * its fillOffset, factored out here so the other place that corrects an entry

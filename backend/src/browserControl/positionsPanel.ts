@@ -67,7 +67,29 @@ export async function isPositionFlatViaPanel(page: Page, contractPrefix: string)
 // camelCase data-field convention ("symbolName", "positionSize") since a MUI
 // DataGrid's field keys don't always match its visible column labels
 // one-to-one.
-const FILL_PRICE_FIELD_CANDIDATES = ["entryPrice", "avgPrice"];
+// 2026-09-24: "averagePrice" added FIRST, and it is the one that actually
+// works. Neither prior candidate had ever matched -- every real entry since
+// file logging was enabled logged real_fill_price_unavailable with
+// lastDeviationPoints: null, meaning no reading was obtained at all, not that a
+// reading was rejected. The table and the row were always found (this file's
+// own isPositionFlatViaPanel works off the same locators); only the price cell
+// lookup fell through, silently, because the loop below just returns null when
+// no candidate matches.
+//
+// Confirmed by dumping the live grid's headers rather than guessing a third
+// name: the column labelled "Entry Price" carries data-field="averagePrice".
+// The full row is entryTime / symbolName / positionSize / averagePrice / risk.
+// "entryPrice" was the visible LABEL, not the field key -- which is exactly the
+// mismatch the original comment below anticipated and then guessed wrong about.
+//
+// Cost of those two months: every trade's stop and target were anchored to the
+// theoretical signal price instead of the real fill. Live trade 119 recorded an
+// entry of 30546.75 against a real fill of 30732.50 -- 185.75 points out, which
+// made its stored risk read as 1.00pt against a genuine 186.75pt stop.
+//
+// Values carry thousands separators ("30,732.50"); the parse below already
+// strips them.
+const FILL_PRICE_FIELD_CANDIDATES = ["averagePrice", "entryPrice", "avgPrice"];
 
 /**
  * Reads the real fill/entry price for `contractPrefix`'s currently-open row,

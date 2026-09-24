@@ -50,6 +50,7 @@ import {
   hasReachedTrailingStopActivation,
   RiskEngine,
   ENTRY_REANCHOR_MIN_TICKS,
+  bracketIsValidAgainstEntry,
   reanchorBracketToRealEntry,
   resolveTrailingStopDistanceTicks,
   REQUIRE_DAILY_PLAN_SYMBOLS,
@@ -1341,12 +1342,48 @@ export class TradingEngine {
       return openTrade;
     }
 
-    const reanchored = reanchorBracketToRealEntry(
-      recordedEntry,
-      realEntry,
-      new Decimal(openTrade.stopPrice.toString()),
-      openTrade.takeProfitPrice ? new Decimal(openTrade.takeProfitPrice.toString()) : null
-    );
+    const storedStop = new Decimal(openTrade.stopPrice.toString());
+    const storedTarget = openTrade.takeProfitPrice ? new Decimal(openTrade.takeProfitPrice.toString()) : null;
+    const side = openTrade.side as "long" | "short";
+
+    // Does the bracket already make sense as ABSOLUTE prices against the real
+    // entry? If so it is a structural level (a strategy's 5m EMA stop, an S/R
+    // pivot, a daily-plan boundary) that happens to have been recorded against
+    // a wrong entry -- correct the entry and leave the levels exactly where
+    // they are. Shifting them would preserve distances that were never real.
+    //
+    // 2026-09-24, caught on live trade 119 before it did damage: recorded entry
+    // 30546.75, real fill 30732.50, stop 30545.75 (the genuine 5m 20 EMA).
+    // Preserving the stored 1.00pt "risk" would have put the stop at 30731.50,
+    // one point under a 30733 market, closing a position whose real stop was
+    // 186.75pts away. See risk/stops.ts's bracketIsValidAgainstEntry.
+    if (bracketIsValidAgainstEntry(realEntry, storedStop, storedTarget, side)) {
+      const updatedEntryOnly = await prisma.trade.update({
+        where: { id: openTrade.id },
+        data: {
+          entryPrice: realEntry.toString(),
+          explanation:
+            `${openTrade.explanation} [ENTRY PRICE CORRECTED: the broker reported this position's entry as ${realEntry.toString()}, ` +
+            `not the ${recordedEntry.toString()} it was recorded at. Stop/target left untouched -- they are real levels and are already ` +
+            `correct against the true entry (risk ${realEntry.minus(storedStop).abs().toFixed(2)}, ` +
+            `reward ${storedTarget ? storedTarget.minus(realEntry).abs().toFixed(2) : "n/a"}).]`,
+        },
+      });
+      logger.warn(
+        {
+          symbol,
+          tradeId: openTrade.id,
+          recordedEntry: recordedEntry.toString(),
+          realEntry: realEntry.toString(),
+          riskPts: realEntry.minus(storedStop).abs().toString(),
+          rewardPts: storedTarget ? storedTarget.minus(realEntry).abs().toString() : null,
+        },
+        "entry_price_corrected_bracket_already_valid_left_in_place"
+      );
+      return updatedEntryOnly;
+    }
+
+    const reanchored = reanchorBracketToRealEntry(recordedEntry, realEntry, storedStop, storedTarget);
     logger.warn(
       {
         symbol,
@@ -1510,12 +1547,15 @@ export class TradingEngine {
       // Correcting entryPrice without moving the bracket with it left the
       // stored risk and reward disagreeing with the distances the risk engine
       // actually sized -- see risk/stops.ts's reanchorBracketToRealEntry.
-      const reanchored = reanchorBracketToRealEntry(
-        new Decimal(trade.entryPrice.toString()),
-        real.entryPrice,
-        new Decimal(trade.stopPrice.toString()),
-        trade.takeProfitPrice ? new Decimal(trade.takeProfitPrice.toString()) : null
-      );
+      // bracketIsValidAgainstEntry first: a bracket already coherent against
+      // the real entry is a structural LEVEL and must not be shifted -- only
+      // distances derived from the wrong anchor should move. See risk/stops.ts
+      // for the live trade-119 case this guard exists for.
+      const storedStop = new Decimal(trade.stopPrice.toString());
+      const storedTarget = trade.takeProfitPrice ? new Decimal(trade.takeProfitPrice.toString()) : null;
+      const reanchored = bracketIsValidAgainstEntry(real.entryPrice, storedStop, storedTarget, trade.side as "long" | "short")
+        ? { stopPrice: storedStop, takeProfitPrice: storedTarget, offset: new Decimal(0) }
+        : reanchorBracketToRealEntry(new Decimal(trade.entryPrice.toString()), real.entryPrice, storedStop, storedTarget);
       if (!reanchored.offset.isZero()) {
         logger.info(
           {
@@ -1648,12 +1688,15 @@ export class TradingEngine {
       // entryPrice from real broker history, so both must move the bracket by
       // the same offset or the stored risk:reward stops describing the trade
       // that actually ran. See risk/stops.ts's reanchorBracketToRealEntry.
-      const reanchored = reanchorBracketToRealEntry(
-        new Decimal(trade.entryPrice.toString()),
-        real.entryPrice,
-        new Decimal(trade.stopPrice.toString()),
-        trade.takeProfitPrice ? new Decimal(trade.takeProfitPrice.toString()) : null
-      );
+      // bracketIsValidAgainstEntry first: a bracket already coherent against
+      // the real entry is a structural LEVEL and must not be shifted -- only
+      // distances derived from the wrong anchor should move. See risk/stops.ts
+      // for the live trade-119 case this guard exists for.
+      const storedStop = new Decimal(trade.stopPrice.toString());
+      const storedTarget = trade.takeProfitPrice ? new Decimal(trade.takeProfitPrice.toString()) : null;
+      const reanchored = bracketIsValidAgainstEntry(real.entryPrice, storedStop, storedTarget, trade.side as "long" | "short")
+        ? { stopPrice: storedStop, takeProfitPrice: storedTarget, offset: new Decimal(0) }
+        : reanchorBracketToRealEntry(new Decimal(trade.entryPrice.toString()), real.entryPrice, storedStop, storedTarget);
       if (!reanchored.offset.isZero()) {
         logger.info(
           {
