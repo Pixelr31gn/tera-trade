@@ -523,15 +523,27 @@ export function determineConsensus(gatedByVersion: Map<StrategyVersion, GatedSco
   // (representativeOrder included) whenever v6V7OnlySession is true, so the
   // rest of this function doesn't need its own separate v6/v7-only branch.
   const sessionGatePassed = v6V7OnlySession ? sessionGateDrivenByV6OrV7 : rawSessionGatePassed;
-  // Blocked entirely during Asian (2026-08-17, operator request: "v7
-  // shouldn't fire in asia ever") -- previously fired in every session
-  // regardless of v6V7OnlySession (2026-08-11 reactivation, see
-  // hasV7SoloAgreement's own comment), including as the one carve-out that
-  // could execute even when the session-best-version gate picked a
-  // non-v6/v7 version. That carve-out is gone: in Asian, v7 must now win the
-  // session-best-version gate like v6 does, or nothing v7-driven executes.
-  const v7SoloPassed = !v6V7OnlySession && hasV7SoloAgreement(gatedByVersion);
-  const taken = sessionGatePassed || v7SoloPassed;
+  // v7-solo RETIRED ENTIRELY, 2026-09-23 (operator decision, asked and
+  // answered directly: should the session-best version be the sole decider --
+  // "Yes, remove the v7-solo bypass"). This reverses the 2026-08-11
+  // reactivation ("i want it to be executable on live trading now i
+  // understand the risk"), which had been narrowed once already on 2026-08-17
+  // to exclude Asian. v7 must now win the session-best-version gate on its
+  // own realized win rate, exactly like every other arm -- which is the whole
+  // point of that gate, and was being undercut by an OR'd leg that fired
+  // regardless of session standing.
+  //
+  // This matters more now than it did before today: the gate it was bypassing
+  // was, until this same change, ranking versions on a metric that could not
+  // distinguish them (see scoring/sessionPerformance.ts's
+  // computeSessionVersionStats comment). With the ranking now measuring each
+  // version's own calls, the bypass is the remaining way for a version to
+  // execute without having earned it this session.
+  //
+  // hasV7SoloAgreement and hasV6SoloAgreement are both left in place, unused,
+  // per this file's "superseded, not deleted" convention -- reverting is
+  // re-adding one OR'd term here.
+  const taken = sessionGatePassed;
 
   // Prefer a version that itself agrees ("taken") for the most meaningful
   // representative explanation, falling back to the order's first entry if
@@ -540,17 +552,18 @@ export function determineConsensus(gatedByVersion: Map<StrategyVersion, GatedSco
   // checks -- e.g. v3's directional-conviction margin -- even when its raw
   // probability contributed to agreement here). The session-selected
   // version leads when its own gate is what fired (the entire reason this
-  // trade fired); v7 leads when it's the v7-solo leg that fired instead
-  // (2026-08-11 reactivation, see hasV7SoloAgreement's comment) -- e.g. a
-  // session cold-start, or a session where v7 isn't currently "best" but
-  // still cleared its own bar alone. Falls back to the v6-first base order
-  // otherwise.
+  // trade fired), and falls back to the v6-first base order otherwise -- which
+  // now means only the session cold-start case, where the v1/v2/v3 majority
+  // vote decided and no single version owns the trade.
+  //
+  // The v7-solo branch that used to sit here is gone with the leg itself
+  // (2026-09-23, see the `taken` assignment above): there is no longer a path
+  // where v7 fired without being this session's selected version, so having
+  // v7 lead the explanation would misattribute the trade.
   const representativeOrder =
     sessionGatePassed && !sessionSelection.coldStart
       ? [sessionSelection.selectedVersion, ...V6_MANDATORY_REPRESENTATIVE_ORDER.filter((v) => v !== sessionSelection.selectedVersion)]
-      : v7SoloPassed
-        ? ["v7" as StrategyVersion, ...V6_MANDATORY_REPRESENTATIVE_ORDER.filter((v) => v !== "v7")]
-        : V6_MANDATORY_REPRESENTATIVE_ORDER;
+      : V6_MANDATORY_REPRESENTATIVE_ORDER;
   const takenVersions = representativeOrder.filter((v) => gatedByVersion.get(v)!.decision === "taken");
   const representativeVersion = taken ? (representativeOrder.find((v) => takenVersions.includes(v)) ?? representativeOrder[0]!) : null;
 

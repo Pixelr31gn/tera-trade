@@ -206,31 +206,34 @@ describe.each([
 describe.each([
   ["determineConsensus", unrestricted(determineConsensus)],
   ["determineContinuousScanConsensus", unrestricted(determineContinuousScanConsensus)],
-] as const)("%s -- v7-solo gate (2026-08-11 reactivation, 65% threshold)", (_name, fn) => {
-  it("takes when v7 clears 65% alone, even though it is NOT the session-selected version and that version fails its own bar", () => {
+] as const)("%s -- v7-solo gate RETIRED 2026-09-23 (session-best is the sole decider)", (_name, fn) => {
+  // Each of the three cases below asserted taken=true until 2026-09-23, when
+  // the operator made the session-best-version gate the sole decider ("Yes --
+  // remove the v7-solo bypass"). They are kept, inverted, rather than deleted:
+  // they are the regression guard that the bypass has not crept back, and the
+  // record of exactly what it used to permit.
+  it("does NOT take when v7 clears 65% alone but is not the session-selected version", () => {
     const result = fn(
       map(gated("skipped_score", 0.1), gated("skipped_score", 0.3), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("taken", 0.7)),
-      sessionSelected("v2") // v2 is session-best but only scores 30% here -- session leg alone would reject
+      sessionSelected("v2") // v2 is session-best but only scores 30% here -- session leg rejects, and nothing else may fire
     );
-    expect(result.taken).toBe(true);
-    expect(result.representativeVersion).toBe("v7");
+    expect(result.taken).toBe(false);
   });
 
-  it("takes via v7-solo during cold-start, even though the plain v1/v2/v3 majority-vote fallback fails on its own", () => {
+  it("does NOT take during cold-start on v7 alone -- the majority-vote fallback is the only path", () => {
     const result = fn(
       map(gated("skipped_score", 0.3), gated("skipped_score", 0.2), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("taken", 0.7)),
       COLD_START
     );
-    expect(result.taken).toBe(true);
-    expect(result.representativeVersion).toBe("v7");
+    expect(result.taken).toBe(false);
   });
 
-  it("takes when v7 is exactly at the 65% threshold", () => {
+  it("does NOT take when v7 sits exactly at the old 65% bypass threshold", () => {
     const result = fn(
       map(gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("taken", 0.65)),
       COLD_START
     );
-    expect(result.taken).toBe(true);
+    expect(result.taken).toBe(false);
   });
 
   it("does not take when v7 stays just below 65% and no other leg clears either", () => {
@@ -315,19 +318,18 @@ describe.each([
     expect(result.representativeVersion).toBe("v7");
   });
 
-  it("allows v7-solo during asian when the session-best version is v3 but v3 itself doesn't clear the loose threshold", () => {
-    // v3 is session-best but only scored 50% -- below LOOSE_GATE_THRESHOLD (65%),
-    // so the primary session-best-version gate does NOT pass on its own here;
-    // this isolates the v7-solo escape hatch (v7=70%) as the actual reason
-    // taken=true, distinct from the "asian is unrestricted" tests above where
-    // the session-best version clears its own bar and drives execution directly.
+  it("does NOT execute during asian when the session-best version fails its own bar, even with v7 at 70%", () => {
+    // v3 is session-best but only scored 50% -- below LOOSE_GATE_THRESHOLD
+    // (65%), so the session-best-version gate does not pass. This case existed
+    // to isolate the v7-solo escape hatch as the reason taken was true; with
+    // that leg retired (2026-09-23) it now isolates the opposite -- v7 at 70%
+    // buys nothing when it is not the session's selected version.
     const result = fn(
       map(gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("skipped_score", 0.5), gated("skipped_score", 0.1), gated("skipped_score", 0.1), gated("taken", 0.7)),
       sessionSelected("v3"),
       "asian"
     );
-    expect(result.taken).toBe(true);
-    expect(result.representativeVersion).toBe("v7");
+    expect(result.taken).toBe(false);
   });
 
   it.each([["london"], ["new_york"], ["asian"]] as const)("behaves identically during %s -- a session-best v3 executes", (session) => {

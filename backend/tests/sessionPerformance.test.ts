@@ -23,9 +23,9 @@ describe("selectSessionBestVersion", () => {
   it("picks the highest win rate among versions that clear the sample floor", () => {
     const result = selectSessionBestVersion(
       new Map([
-        ["v1", stats("v1", 5, 0.4)],
-        ["v2", stats("v2", 5, 0.8)],
-        ["v3", stats("v3", 5, 0.2)],
+        ["v1", stats("v1", MIN_SESSION_SAMPLES_PER_VERSION, 0.4)],
+        ["v2", stats("v2", MIN_SESSION_SAMPLES_PER_VERSION, 0.8)],
+        ["v3", stats("v3", MIN_SESSION_SAMPLES_PER_VERSION, 0.2)],
       ]),
       SESSION_START
     );
@@ -36,8 +36,8 @@ describe("selectSessionBestVersion", () => {
   it("switches on even a one-point win-rate edge, no minimum margin required", () => {
     const result = selectSessionBestVersion(
       new Map([
-        ["v1", stats("v1", 10, 0.5)],
-        ["v2", stats("v2", 10, 0.51)],
+        ["v1", stats("v1", MIN_SESSION_SAMPLES_PER_VERSION * 2, 0.5)],
+        ["v2", stats("v2", MIN_SESSION_SAMPLES_PER_VERSION * 2, 0.51)],
       ]),
       SESSION_START
     );
@@ -60,7 +60,7 @@ describe("selectSessionBestVersion", () => {
     const coldStart = selectSessionBestVersion(new Map([["v1", stats("v1", 0, 0)]]), SESSION_START);
     expect(coldStart.sessionStart).toBe(SESSION_START);
 
-    const selected = selectSessionBestVersion(new Map([["v1", stats("v1", 5, 0.6)]]), SESSION_START);
+    const selected = selectSessionBestVersion(new Map([["v1", stats("v1", MIN_SESSION_SAMPLES_PER_VERSION, 0.6)]]), SESSION_START);
     expect(selected.sessionStart).toBe(SESSION_START);
   });
 
