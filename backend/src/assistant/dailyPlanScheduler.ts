@@ -56,6 +56,14 @@
  * specific prompt, the fail-safe above still holds: worst case is zero
  * zones for a session, never stale/wrong ones -- revert this one import/call
  * back to sendGeminiChatMessage if that's ever observed.
+ *
+ * 2026-09-24: no longer goes through client.ts at all. attemptRefresh now
+ * calls statelessTurn.ts's runStatelessAssistantTurn, which keeps the same
+ * ASSISTANT_PROVIDER routing and the same Ollama-falls-back-to-Gemini
+ * behaviour but persists no conversation history -- see that file's header for
+ * the input-token deadlock that made history fatal here. Everything the
+ * paragraph above says about provider selection still applies; only the
+ * transcript is gone.
  */
 import { getSessionStart, getSessionEnd } from "../analytics/session.js";
 import { getSettings } from "../core/config.js";
@@ -68,7 +76,7 @@ import { getCurrentRegime } from "../api/routes/regime.js";
 import { getSystemStateSnapshot } from "../api/routes/system.js";
 import { getNewsRiskStatus } from "../news/risk.js";
 import { cached, computeSessionPerformanceForAllSessions } from "../api/routes/analytics.js";
-import { sendChatMessage } from "./client.js";
+import { runStatelessAssistantTurn } from "./statelessTurn.js";
 import { childLogger } from "../core/logger.js";
 
 const logger = childLogger("dailyPlanScheduler");
@@ -87,9 +95,15 @@ const logger = childLogger("dailyPlanScheduler");
 //
 // Costs nothing real: a tick is one getSettings, one getSystemState and (only
 // inside the window, or when the current session has no plan) one indexed
-// zone lookup. It does NOT multiply Gemini usage -- lastHandledSessionStart
-// is set the moment a refresh is attempted, so exactly one refresh happens
-// per session regardless of how often this ticks.
+// zone lookup.
+//
+// It does not multiply Gemini usage either, but the reason changed on
+// 2026-09-24. It used to be that lastHandledSessionStart was set the moment a
+// refresh was ATTEMPTED, so there was exactly one attempt per session however
+// often this ticked -- which also meant one transient 503 forfeited the whole
+// session. Now handled means "confirmed to have zones" and a failed session
+// stays retryable, so what bounds the call rate is mayAttemptSession's
+// RETRY_INTERVAL_MS, not this interval.
 export const POLL_INTERVAL_MS = 60 * 1000;
 // One retry after a Gemini failure, matching the transient "high demand"
 // 503s confirmed live (2026-08-29): failed twice, succeeded on the very
@@ -221,6 +235,29 @@ export const PRE_TRIGGER_WINDOW_MS = 10 * 60 * 1000;
 let lastHandledSessionStart: number | null = null;
 let refreshInFlight = false;
 
+// When each session was last ATTEMPTED, successful or not (2026-09-24).
+// Separate from lastHandledSessionStart, which now means "confirmed to have
+// zones" -- see refreshForSession's finally block. A session whose refresh
+// genuinely failed stays retryable, and this is what stops that becoming a
+// hammer: without it, the catch-up path would re-attempt on every tick, which
+// at POLL_INTERVAL_MS = 1min is 60 attempts an hour against an API that is
+// rate-limited by the minute. Keyed by session start, so it never grows beyond
+// a handful of entries per day.
+const lastAttemptAtBySession = new Map<number, number>();
+
+// How long to wait before re-attempting a session whose refresh failed. Chosen
+// so a transient outage gets several shots across a session (Gemini 503s have
+// cleared in under a minute in practice) without the per-minute poll turning
+// into per-minute API calls. Not tuned against anything; lower it if sessions
+// are still being lost to failures that would have cleared.
+const RETRY_INTERVAL_MS = 10 * 60 * 1000;
+
+/** Has enough time passed since the last attempt at `sessionStartMs` to try again? True when it has never been attempted. */
+function mayAttemptSession(sessionStartMs: number): boolean {
+  const last = lastAttemptAtBySession.get(sessionStartMs);
+  return last === undefined || Date.now() - last >= RETRY_INTERVAL_MS;
+}
+
 /**
  * `at` is the session this refresh is FOR, not necessarily "now" -- the
  * pre-trigger path below calls this up to PRE_TRIGGER_WINDOW_MS before that
@@ -232,34 +269,72 @@ async function attemptRefresh(at: Date): Promise<void> {
   const digest = await buildContextDigest();
   setDailyPlanSessionOverride(at);
   try {
-    await sendChatMessage(buildRefreshPrompt(digest));
+    // 2026-09-24: runStatelessAssistantTurn, NOT client.ts's sendChatMessage.
+    // See statelessTurn.ts's header for the deadlock that forced this -- in
+    // short, sendChatMessage persists this prompt (which embeds a ~29 KB
+    // digest) to AssistantMessage BEFORE calling the model, so every failure
+    // left an orphan row, and 40 of those in the history window exceeded
+    // Gemini's per-minute input-token cap on their own. Three consecutive
+    // sessions got no plan at all. A stateless turn reads and writes no
+    // history, so a failed refresh leaves nothing behind and the next attempt
+    // is exactly as cheap as the first. Tool execution, the actions gate and
+    // the AssistantAction audit trail are all unchanged.
+    await runStatelessAssistantTurn(buildRefreshPrompt(digest));
   } finally {
     setDailyPlanSessionOverride(null);
   }
 }
 
 export async function refreshForSession(sessionStart: Date): Promise<void> {
-  if (refreshInFlight) return; // shouldn't happen at a 5-min poll vs typical reply time, but never overlap two live LLM calls
+  if (refreshInFlight) return; // never overlap two live LLM calls
   refreshInFlight = true;
-  lastHandledSessionStart = sessionStart.getTime();
+  // Recorded before the attempt so mayAttemptSession can space retries out;
+  // lastHandledSessionStart is NOT set here -- see the finally block.
+  lastAttemptAtBySession.set(sessionStart.getTime(), Date.now());
   logger.info({ sessionStart: sessionStart.toISOString() }, "daily_plan_scheduler_refresh_starting");
   try {
     await attemptRefresh(sessionStart);
-    logger.info("daily_plan_scheduler_refresh_succeeded");
   } catch (err) {
     logger.warn({ err: String(err) }, "daily_plan_scheduler_refresh_failed_retrying_once");
     await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
     try {
       await attemptRefresh(sessionStart);
-      logger.info("daily_plan_scheduler_refresh_succeeded_on_retry");
     } catch (retryErr) {
-      logger.error(
-        { err: String(retryErr) },
-        "daily_plan_scheduler_refresh_failed -- this session trades with no daily-plan-zone gate until manually refreshed"
-      );
+      logger.warn({ err: String(retryErr) }, "daily_plan_scheduler_refresh_threw_checking_whether_zones_landed_anyway");
     }
   } finally {
     refreshInFlight = false;
+    // Success is whether ZONES EXIST for this session, not whether the turn
+    // threw (2026-09-24). Two separate faults, both observed live:
+    //
+    //  - The old code logged "this session trades with no daily-plan-zone
+    //    gate" whenever the message errored, even when every set_daily_plan_
+    //    zones call had already succeeded and the failure was the closing
+    //    summary turn hitting a quota. On 2026-09-22 the 22:00 session had a
+    //    complete, correct plan written at 21:52:38 and was reported as
+    //    ungated -- the log inverted the fail-safe, and anyone acting on it
+    //    (including me) would have set a manual plan over a good one.
+    //  - lastHandledSessionStart was set BEFORE the attempt, so one transient
+    //    503 forfeited the whole session: the catch-up path saw the session as
+    //    handled and never tried again. Three consecutive sessions were lost
+    //    that way (2026-09-23 NY through 2026-09-24 NY).
+    //
+    // Marking handled only on confirmed zones fixes both: a partial success is
+    // recognised as success, and a real failure stays retryable. A failed
+    // lookup is treated as "not confirmed" -- retrying a session that actually
+    // has a plan is cheap (the pre-trigger path checks for existing zones
+    // first and returns), while wrongly marking one handled is not.
+    const planned = await listActiveDailyPlanZones(sessionStart).catch(() => ({} as Record<string, unknown>));
+    const plannedSymbols = Object.keys(planned);
+    if (plannedSymbols.length > 0) {
+      lastHandledSessionStart = sessionStart.getTime();
+      logger.info({ sessionStart: sessionStart.toISOString(), symbols: plannedSymbols }, "daily_plan_scheduler_refresh_succeeded");
+    } else {
+      logger.error(
+        { sessionStart: sessionStart.toISOString(), retryInMs: RETRY_INTERVAL_MS },
+        "daily_plan_scheduler_refresh_failed -- no zones written, this session trades with no daily-plan-zone gate until a later attempt succeeds"
+      );
+    }
   }
 }
 
@@ -289,7 +364,10 @@ async function maybeRefreshForNewSession(): Promise<void> {
       lastHandledSessionStart = upcomingSessionStart.getTime();
       return;
     }
-    if (!refreshInFlight) {
+    // mayAttemptSession spaces out retries for a session whose refresh failed
+    // -- lastHandledSessionStart above only excludes CONFIRMED-planned sessions
+    // now, so without this a persistent failure would re-attempt every tick.
+    if (!refreshInFlight && mayAttemptSession(upcomingSessionStart.getTime())) {
       await refreshForSession(upcomingSessionStart);
       return;
     }
@@ -308,7 +386,7 @@ async function maybeRefreshForNewSession(): Promise<void> {
     return;
   }
 
-  if (refreshInFlight) return;
+  if (refreshInFlight || !mayAttemptSession(currentSessionStartMs)) return;
   await refreshForSession(currentSessionStart);
 }
 
