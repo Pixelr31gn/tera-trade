@@ -36,7 +36,9 @@ import type { BanditSelectionResult } from "../scoring/consensusBandit.js";
 import { getSessionPerformanceSelection } from "../engine/sessionPerformanceCache.js";
 import type { SessionPerformanceSelection } from "../scoring/sessionPerformance.js";
 import { getDealerLevels } from "../engine/dealerGexCache.js";
+import type { Decimal } from "decimal.js";
 import { getActiveDailyPlanZones } from "../engine/dailyPlanZoneCache.js";
+import { getAssistantTakeProfitCapPoints } from "../engine/dailyPlanTakeProfitCache.js";
 import { getDisabledStrategyIds } from "../engine/strategyEnablementCache.js";
 import { getDisabledSymbols } from "../engine/symbolEnablementCache.js";
 import { getDisabledStrategySymbolPairs } from "../engine/strategySymbolEnablementCache.js";
@@ -131,6 +133,10 @@ export class LiveDecisionContext implements DecisionContext {
 
   async dailyPlanZones(symbol: string, at: Date): Promise<DailyPlanZone[]> {
     return getActiveDailyPlanZones(symbol, at);
+  }
+
+  async assistantTakeProfitCapPoints(symbol: string, at: Date): Promise<Decimal | null> {
+    return getAssistantTakeProfitCapPoints(symbol, at);
   }
 
   async disabledStrategyIds(): Promise<Set<string>> {

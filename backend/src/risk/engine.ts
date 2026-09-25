@@ -797,6 +797,66 @@ export class RiskEngine {
       stopDistancePoints = levelDistance.dividedBy(MIN_REWARD_RISK_RATIO);
       stopPrice = roundAwayFromEntry(side === "long" ? entryPrice.minus(stopDistancePoints) : entryPrice.plus(stopDistancePoints), entryPrice, tickSize);
     }
+    // Daily-plan take-profit CEILING, applied to whatever this branch ended up
+    // with from any source -- generic ATR/swing R-multiple, an S/R level
+    // override, or a strategy's own explicit target.
+    //
+    // 2026-09-25, operator report: "still exceeding the tp point cap." They
+    // were. assistantTakeProfitCapPoints had only ever been read inside the
+    // hardTakeProfitDollars branch above, and that branch is skipped for every
+    // real strategy signal (decideOnBar passed the static
+    // HARD_TAKE_PROFIT_DOLLARS constant and, until today, no cap at all). So
+    // the session's own read of today's realistic range constrained almost
+    // nothing: live trade 121 took a 481.50pt target -- 3x a 160.50pt stop --
+    // against a 73.33pt cap, and trade 119 a 374.25pt target against the same.
+    //
+    // The stop is RE-DERIVED from the capped target rather than left alone,
+    // and that is the whole point. Capping 481.50 to 73.33 while leaving a
+    // 160.50pt stop would risk more than twice the reward -- the exact
+    // inversion the operator ruled out absolutely on 2026-09-21 ("the risk has
+    // to be smaller than what we are trying to win at all times no
+    // exceptions"). Deriving stop = cap / MIN_REWARD_RISK_RATIO keeps 3:1 by
+    // construction, and is the same operator-stated principle this file
+    // already applies in the hardTakeProfitDollars and S/R-level branches
+    // (2026-09-09: "sl need to be adjusted based on 1/3rd of how many points
+    // the tp is set to").
+    //
+    // Fail-open on a null cap: no assistant read this session means no
+    // ceiling, exactly as before, not a zero.
+    let cappedByDailyPlan: Decimal | null = null;
+    if (assistantTakeProfitCapPoints != null && assistantTakeProfitCapPoints.gt(0)) {
+      const targetDistance = takeProfitPrice.minus(entryPrice).abs();
+      if (targetDistance.gt(assistantTakeProfitCapPoints)) {
+        cappedByDailyPlan = targetDistance;
+        takeProfitPrice = roundAwayFromEntry(
+          side === "long" ? entryPrice.plus(assistantTakeProfitCapPoints) : entryPrice.minus(assistantTakeProfitCapPoints),
+          entryPrice,
+          tickSize
+        );
+        // Rounded TOWARD entry, unlike every other stop in this file, and the
+        // exception is load-bearing: cap / 3 is rarely tick-aligned, and
+        // rounding a derived stop away from entry makes it fractionally WIDER,
+        // which drops the ratio a hair under 3:1 and gets the trade rejected by
+        // rewardRiskFloorViolation below on pure rounding. Caught by the
+        // short-side test with a 5pt cap -- 5/3 = 1.666...7, and 3x that is
+        // marginally more than the 5pt target. Rounding toward entry makes the
+        // stop marginally tighter instead, so the floor can only be satisfied.
+        // Consistent with stops.ts's stated posture for derived stops:
+        // "tighter is fine, wider than 1:3 never is."
+        const rawStop = side === "long"
+          ? entryPrice.minus(assistantTakeProfitCapPoints.dividedBy(MIN_REWARD_RISK_RATIO))
+          : entryPrice.plus(assistantTakeProfitCapPoints.dividedBy(MIN_REWARD_RISK_RATIO));
+        stopPrice = side === "long" ? rawStop.toNearest(tickSize, Decimal.ROUND_CEIL) : rawStop.toNearest(tickSize, Decimal.ROUND_FLOOR);
+        // Recomputed from the ROUNDED price so the reported distance is the one
+        // actually in force, not the pre-rounding ideal.
+        stopDistancePoints = entryPrice.minus(stopPrice).abs();
+      }
+    }
+    const dailyPlanCapReason =
+      cappedByDailyPlan !== null
+        ? `; take-profit capped at the assistant's session likely-move read (${assistantTakeProfitCapPoints!.toFixed(2)} pts, down from ${cappedByDailyPlan.toFixed(2)}), stop re-derived at 1/${MIN_REWARD_RISK_RATIO.toString()} of it (${stopDistancePoints.toFixed(2)} pts)`
+        : "";
+
     const usedTargetLevel = targetLevel;
     const dailyPlanRangeReason = dailyPlanRange.mode === "fade" || dailyPlanRange.mode === "breakout" ? `; daily plan range: ${dailyPlanRange.reason}` : "";
 
@@ -831,7 +891,7 @@ export class RiskEngine {
       reason:
         (usedTargetLevel
           ? `${plan.sizingReason}; take-profit targets the nearest real ${usedTargetLevel.type} level (${usedTargetLevel.price.toFixed(2)}, ${usedTargetLevel.touches} touches), stop derived at 1/${MIN_REWARD_RISK_RATIO.toString()} of that distance (${stopDistancePoints.toFixed(2)} pts) instead of a generic R-multiple`
-          : plan.sizingReason) + dailyPlanRangeReason,
+          : plan.sizingReason) + dailyPlanCapReason + dailyPlanRangeReason,
       tripKillSwitch: false,
       // nearest can be null here only when srGateBypass skipped the
       // existence check above entirely (e.g. no real level was ever found)

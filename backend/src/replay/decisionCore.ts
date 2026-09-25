@@ -123,6 +123,10 @@ export async function decideOnBar(params: {
   // dealerLevelResult above. See DecisionContext.dailyPlanZones's own
   // comment for why this is never pushed to degraded[].
   const dailyPlanZones = await ctx.dailyPlanZones(symbol, barTime);
+  // Session take-profit ceiling, injected for the same reasons as the zones
+  // above (DB-free decision core, null in replay). Passed into assessNewTrade
+  // below -- see DecisionContext.assistantTakeProfitCapPoints.
+  const assistantTakeProfitCapPoints = await ctx.assistantTakeProfitCapPoints(symbol, barTime);
 
   // Bar-level, not per-symbol -- see DecisionContext.disabledStrategyIds's
   // own comment.
@@ -269,6 +273,14 @@ export async function decideOnBar(params: {
         // hardTakeProfitDollars param. Applies identically in replay, same
         // as srGateBypass above.
         hardTakeProfitDollars: HARD_TAKE_PROFIT_DOLLARS[symbol],
+        // 2026-09-25, operator report: "still exceeding the tp point cap." It
+        // was -- this call site never passed the cap, so every real strategy
+        // signal was sized by the generic R-multiple path with no ceiling at
+        // all (live trade 121: a 481.50pt target against a 73.33pt session
+        // cap). Injected via DecisionContext so risk/ and this file stay
+        // DB-free and so replay gets a null ceiling rather than a fabricated
+        // one -- see that field's own comment.
+        assistantTakeProfitCapPoints,
         // 2026-08-29, operator request -- see risk/engine.ts's
         // DailyPlanZone/classifyDailyPlanZone. Always [] in replay (see
         // DecisionContext.dailyPlanZones's own comment), so the normal

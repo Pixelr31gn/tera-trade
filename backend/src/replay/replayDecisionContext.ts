@@ -377,6 +377,13 @@ export class ReplayDecisionContext implements DecisionContext {
     return [];
   }
 
+  // Always null -- see DecisionContext.assistantTakeProfitCapPoints. An
+  // assistant read of today's realistic range has no meaning for a historical
+  // bar, so replay has no ceiling rather than a fabricated one.
+  async assistantTakeProfitCapPoints(): Promise<Decimal | null> {
+    return null;
+  }
+
   // Always empty -- see DecisionContext.disabledStrategyIds's own comment.
   async disabledStrategyIds(): Promise<Set<string>> {
     return new Set();

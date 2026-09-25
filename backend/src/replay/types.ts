@@ -184,6 +184,29 @@ export interface DecisionContext {
   dailyPlanZones(symbol: string, at: Date): Promise<DailyPlanZone[]>;
 
   /**
+   * This session's assistant-estimated take-profit CEILING for `symbol`, in
+   * points -- DAILY_PLAN_TAKE_PROFIT_FRACTION of its likely-move read (see
+   * engine/dailyPlanTakeProfitCache.ts's getAssistantTakeProfitCapPoints), or
+   * null when nothing has been set this session.
+   *
+   * 2026-09-25, operator report: targets were "still exceeding the tp point
+   * cap." They were -- the cap only ever reached risk/engine.ts through the
+   * continuous-scan call site. Real strategy signals come through decideOnBar,
+   * which passed the STATIC HARD_TAKE_PROFIT_DOLLARS constant and no cap at
+   * all, so every one of them was sized by the generic R-multiple path with no
+   * ceiling: live trade 121 got a 481.50pt target (3 x a 160.50pt stop) against
+   * a session cap of 73.33.
+   *
+   * Injected rather than read directly, same as dailyPlanZones above, because
+   * risk/ and the decision core stay DB-free and because the `at` bound is
+   * what keeps replay honest. Live: TTL-cached per session. Replay: ALWAYS
+   * null, same reasoning as dailyPlanZones -- an assistant's read of "today's
+   * realistic range" has no meaning for a historical bar, so replay simply
+   * has no ceiling rather than a fabricated one.
+   */
+  assistantTakeProfitCapPoints(symbol: string, at: Date): Promise<Decimal | null>;
+
+  /**
    * strategyIds currently taken out of live signal generation (see prisma's
    * DisabledStrategy model, engine/strategyEnablementCache.ts,
    * assistant/tools.ts's disable_strategy/enable_strategy tools) --
