@@ -531,6 +531,32 @@ mounting at the old path fails the container's healthcheck with a clear error.
   the `clear-pos` skill, which as of the same pass also runs this reconciliation automatically
   every tick (`engine/loop.ts`'s `manageLiveOpenTrade`) rather than requiring the operator to
   notice and ask for it.
+- **Every stop exit is recorded at the stop price, not a real fill, so `pnl` on a loss is
+  systematically optimistic** (measured 2026-09-29, trades 278/279/280). No broker-side STOP
+  order is ever placed -- `configureBracket` is deliberately not called (2026-07-21), and
+  `activateTakeProfitOrder` places only a take-profit LIMIT -- so a trade's downside protection
+  is purely `manageLiveOpenTrade`'s in-process `hitStop` check until the trailing stop arms.
+  When price crosses the stop, `isPositionFlat` returns false (nothing broker-side closed
+  anything), the engine force-closes by clicking, and `closeTrade` records
+  `exitPrice = stopPrice` with customTag `forced_after_bracket_failure` -- see that block's own
+  comment, "this app has no way yet to read back TopstepX's actual fill price". Concretely, all
+  three NQ trades in the 2026-09-28 Asian session took this path; comparing each recorded exit
+  against `bars_1m` at the forced-close instant put the real fills 1-6 pts worse, i.e. a
+  recorded -$600 that was really about -$630 to -$710. Two consequences worth keeping in mind
+  before trusting any P&L-derived number: reported per-trade losses are a floor, and session/
+  daily loss totals (and anything fitted on them, including outcome labels and session-best
+  version ranking) inherit the same bias. `readRealFillPrice`/`readOpenPositionEntryPrice`
+  already exist and are used on the ENTRY side (2026-09-21) -- the close path has no equivalent
+  readback yet. Also note the whole stop is only as alive as the backend process: while it is
+  down, an open position genuinely has no stop at all.
+- **Resting take-profit limits are often left `pending` in `orders` after a forced close.**
+  `cancelRestingOrdersAfterClose` re-reads `isPositionFlat` ~150ms after the close click, gets
+  false, logs `skipping_resting_order_cancel_position_not_confirmed_flat` and gives up -- it is
+  called once from `closeTrade` and never retried. TopstepX appears to cancel these itself when
+  the position flattens (a 2026-09-28 ES attempt found its own "Cancel Orders" button
+  *disabled*, i.e. nothing was resting), so this is believed to be stale bookkeeping rather
+  than live naked orders -- but the app has no way to list working orders, so only the TopstepX
+  Orders panel can confirm it. Don't infer a real resting order from an `orders` row alone.
 - Order-flow's directional signal (buy/sell aggressor volume + book imbalance) now feeds v3
   scoring as a bounded adjustment; its accuracy under live conditions still hasn't been
   validated against real outcomes the way the historical-similarity adjustment has, and the
