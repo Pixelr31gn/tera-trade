@@ -201,12 +201,20 @@ export async function isPositionFlat(page: Page, contractPrefix: string): Promis
 
 /** Sets the order ticket's quantity and verifies the buy button's own displayed quantity actually changed before returning. */
 export async function setQuantity(widget: OrderWidget, quantity: number): Promise<void> {
+  await widget.qtyInput.fill("");
   await widget.qtyInput.fill(String(quantity));
   await widget.qtyInput.press("Tab");
 
+  // Exact match on the box itself. The old check only asked whether the Buy
+  // button's text CONTAINED the digits, so "66" passed for 6 -- 2026-10-06 a
+  // live MNQ BUY 66 went out (TopstepX rejected it on size).
+  const typed = (await widget.qtyInput.inputValue()).replace(/[^\d]/g, "");
+  if (typed !== String(quantity)) {
+    throw new Error(`quantity box reads "${typed}" after typing ${quantity} -- refusing to submit`);
+  }
   const buyText = await widget.buyButton.textContent();
-  if (!buyText || !buyText.includes(String(quantity))) {
-    throw new Error(`quantity did not take effect -- buy button reads "${buyText}", expected it to reference ${quantity}`);
+  if (!buyText || !new RegExp(`(^|\\D)${quantity}(\\D|$)`).test(buyText)) {
+    throw new Error(`quantity did not take effect -- buy button reads "${buyText}", expected it to reference exactly ${quantity}`);
   }
 }
 

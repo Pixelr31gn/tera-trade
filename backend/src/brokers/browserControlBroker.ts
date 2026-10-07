@@ -41,6 +41,7 @@ import {
   submitSell,
 } from "../browserControl/orderTicket.js";
 import { isPositionFlatViaPanel, readOpenPositionFillPrice } from "../browserControl/positionsPanel.js";
+import { readApiOpenPosition } from "../browserControl/topstepApi.js";
 import { readClosedTradeHistoryForContract } from "../browserControl/tradeHistoryPanel.js";
 import { getSettings } from "../core/config.js";
 import { childLogger } from "../core/logger.js";
@@ -61,6 +62,19 @@ const FILL_CONFIRMATION_DELAY_MS = 750;
 
 export class BrowserControlBroker implements BrokerClient {
   private browser: Browser | undefined;
+  // TopstepX has ONE order ticket shared by every contract: each action
+  // switches it to its contract, sets type/qty/price, then clicks. Two symbols
+  // acting at once interleave those steps -- 2026-10-06, an ES trailing-stop
+  // SELL landed on MNQ while the NQ entry had switched the ticket, opening an
+  // unintended 6-lot MNQ short. Every ticket action runs through this chain,
+  // one at a time.
+  private ticketChain: Promise<unknown> = Promise.resolve();
+
+  private withTicket<T>(action: () => Promise<T>): Promise<T> {
+    const run = this.ticketChain.then(action, action);
+    this.ticketChain = run.catch(() => undefined);
+    return run;
+  }
 
   async connect(): Promise<void> {
     const settings = getSettings();
@@ -114,7 +128,11 @@ export class BrowserControlBroker implements BrokerClient {
     ];
   }
 
-  async placeOrder(request: OrderRequest): Promise<OrderResult> {
+  placeOrder(request: OrderRequest): Promise<OrderResult> {
+    return this.withTicket(() => this.placeOrderOnTicket(request));
+  }
+
+  private async placeOrderOnTicket(request: OrderRequest): Promise<OrderResult> {
     const settings = getSettings();
     if (request.quantity <= 0) {
       return { brokerOrderId: "", status: "rejected", error: "refusing to place an order with non-positive quantity" };
@@ -278,7 +296,15 @@ export class BrowserControlBroker implements BrokerClient {
       if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, FILL_CONFIRMATION_DELAY_MS));
       const page = await this.getPage().catch(() => null);
       if (!page) continue;
-      const raw = await readOpenPositionFillPrice(page, instrument.brokerContractPrefix).catch(() => null);
+      // TopstepX's own API first -- the Positions-panel read below returned
+      // nothing on every live entry on 2026-10-06, which anchored every
+      // stop/target to a stale theoretical price (TP sell limits below the
+      // market, filling instantly).
+      const apiPosition = await readApiOpenPosition(page, instrument.brokerContractPrefix);
+      const raw =
+        apiPosition && apiPosition !== "flat"
+          ? apiPosition.averagePrice
+          : await readOpenPositionFillPrice(page, instrument.brokerContractPrefix).catch(() => null);
       if (raw === null) continue;
       const real = new Decimal(raw);
       const deviationPoints = real.minus(theoreticalPrice).abs();
@@ -326,8 +352,32 @@ export class BrowserControlBroker implements BrokerClient {
     const instrument = getInstrument(symbol);
     const page = await this.getPage().catch(() => null);
     if (!page) return null;
+    const apiPosition = await readApiOpenPosition(page, instrument.brokerContractPrefix);
+    if (apiPosition && apiPosition !== "flat") return new Decimal(apiPosition.averagePrice);
     const raw = await readOpenPositionFillPrice(page, instrument.brokerContractPrefix).catch(() => null);
     return raw === null ? null : new Decimal(raw);
+  }
+
+  /**
+   * Refuses a protective order (trailing stop / take-profit) unless the
+   * position it protects is actually open on that side. 2026-10-06: a
+   * take-profit filled instantly and the trailing stop placed seconds later
+   * sat on a FLAT position -- a naked stop that would open a new position.
+   * Unknown (API unreadable) is allowed through: leaving a real position
+   * unprotected is the worse failure.
+   */
+  private async protectiveOrderRefusal(page: Page, symbol: string, side: "long" | "short", contractPrefix: string, takeProfitLimit?: Decimal): Promise<string | null> {
+    const position = await readApiOpenPosition(page, contractPrefix);
+    if (position === null) return null;
+    if (position === "flat") return `${symbol} position is already flat -- not placing a protective order that would open a new position`;
+    if (position.side !== side) return `${symbol} position is ${position.side}, not ${side} -- not placing a ${side} protective order`;
+    if (takeProfitLimit) {
+      const wrongSide = side === "long" ? takeProfitLimit.lte(position.averagePrice) : takeProfitLimit.gte(position.averagePrice);
+      if (wrongSide) {
+        return `${symbol} take-profit ${takeProfitLimit.toString()} is on the losing side of the ${position.averagePrice} entry -- it would fill instantly`;
+      }
+    }
+    return null;
   }
 
   // Prefers the dedicated Positions panel (a single table of every open
@@ -342,12 +392,23 @@ export class BrowserControlBroker implements BrokerClient {
   // panel avoids that entirely since it's a passive read, not a switch.
   private async checkPositionFlat(contractPrefix: string): Promise<boolean | null> {
     const page = await this.getPage();
+    // TopstepX's own API first (the selected account's open positions). The
+    // panel read below missed a real fill on 2026-10-07 00:18 -- the entry was
+    // logged as "silently rejected" and the bot sold a second 10 MNQ on top of
+    // it (short 20 while tracking 10). Panel/widget reads stay as the fallback
+    // for when the API can't be read.
+    const viaApi = await readApiOpenPosition(page, contractPrefix);
+    if (viaApi !== null) return viaApi === "flat";
     const viaPanel = await isPositionFlatViaPanel(page, contractPrefix);
     if (viaPanel !== null) return viaPanel;
     return await isPositionFlatCheck(page, contractPrefix);
   }
 
-  async requestClosePosition(symbol: string): Promise<OrderResult> {
+  requestClosePosition(symbol: string): Promise<OrderResult> {
+    return this.withTicket(() => this.requestClosePositionOnTicket(symbol));
+  }
+
+  private async requestClosePositionOnTicket(symbol: string): Promise<OrderResult> {
     const settings = getSettings();
     try {
       const page = await this.getPage();
@@ -375,7 +436,11 @@ export class BrowserControlBroker implements BrokerClient {
     }
   }
 
-  async flattenPosition(symbol: string, side: "long" | "short", quantity: number): Promise<OrderResult> {
+  flattenPosition(symbol: string, side: "long" | "short", quantity: number): Promise<OrderResult> {
+    return this.withTicket(() => this.flattenPositionOnTicket(symbol, side, quantity));
+  }
+
+  private async flattenPositionOnTicket(symbol: string, side: "long" | "short", quantity: number): Promise<OrderResult> {
     const settings = getSettings();
     if (quantity <= 0) {
       return { brokerOrderId: "", status: "rejected", error: "refusing to flatten with non-positive quantity" };
@@ -394,6 +459,9 @@ export class BrowserControlBroker implements BrokerClient {
         return { brokerOrderId: "", status: "rejected", error: `no order-entry widget found for contract prefix "${instrument.brokerContractPrefix}"` };
       }
 
+      // The ticket keeps whatever type the last action used (a trailing stop
+      // or take-profit limit leaves it on those) -- a flatten must be market.
+      await setOrderType(widget, "market");
       await setQuantity(widget, quantity);
 
       // No configureBracket call here -- this is a closing trade, not a new
@@ -418,7 +486,11 @@ export class BrowserControlBroker implements BrokerClient {
     }
   }
 
-  async placeTrailingStop(symbol: string, side: "long" | "short", quantity: number, trailTicks: number): Promise<OrderResult> {
+  placeTrailingStop(symbol: string, side: "long" | "short", quantity: number, trailTicks: number): Promise<OrderResult> {
+    return this.withTicket(() => this.placeTrailingStopOnTicket(symbol, side, quantity, trailTicks));
+  }
+
+  private async placeTrailingStopOnTicket(symbol: string, side: "long" | "short", quantity: number, trailTicks: number): Promise<OrderResult> {
     const settings = getSettings();
     if (quantity <= 0) {
       return { brokerOrderId: "", status: "rejected", error: "refusing to place a trailing stop with non-positive quantity" };
@@ -435,6 +507,12 @@ export class BrowserControlBroker implements BrokerClient {
       const widget = await findOrSwitchToOrderWidget(page, instrument.brokerContractPrefix);
       if (!widget) {
         return { brokerOrderId: "", status: "rejected", error: `no order-entry widget found for contract prefix "${instrument.brokerContractPrefix}"` };
+      }
+
+      const refusal = await this.protectiveOrderRefusal(page, symbol, side, instrument.brokerContractPrefix);
+      if (refusal) {
+        logger.warn({ symbol, side, reason: refusal }, "trailing_stop_refused");
+        return { brokerOrderId: "", status: "rejected", error: refusal };
       }
 
       await setOrderType(widget, "trailingStop");
@@ -468,7 +546,11 @@ export class BrowserControlBroker implements BrokerClient {
   // See BrokerClient.placeTakeProfitOrder's own doc comment for why this exists and why it's
   // deliberately built the same way as placeTrailingStop (a plain resting limit order via the
   // normal order ticket) rather than TopstepX's native Position Brackets feature.
-  async placeTakeProfitOrder(symbol: string, side: "long" | "short", quantity: number, limitPrice: Decimal): Promise<OrderResult> {
+  placeTakeProfitOrder(symbol: string, side: "long" | "short", quantity: number, limitPrice: Decimal): Promise<OrderResult> {
+    return this.withTicket(() => this.placeTakeProfitOrderOnTicket(symbol, side, quantity, limitPrice));
+  }
+
+  private async placeTakeProfitOrderOnTicket(symbol: string, side: "long" | "short", quantity: number, limitPrice: Decimal): Promise<OrderResult> {
     const settings = getSettings();
     if (quantity <= 0) {
       return { brokerOrderId: "", status: "rejected", error: "refusing to place a take-profit order with non-positive quantity" };
@@ -485,6 +567,12 @@ export class BrowserControlBroker implements BrokerClient {
       const widget = await findOrSwitchToOrderWidget(page, instrument.brokerContractPrefix);
       if (!widget) {
         return { brokerOrderId: "", status: "rejected", error: `no order-entry widget found for contract prefix "${instrument.brokerContractPrefix}"` };
+      }
+
+      const refusal = await this.protectiveOrderRefusal(page, symbol, side, instrument.brokerContractPrefix, limitPrice);
+      if (refusal) {
+        logger.warn({ symbol, side, reason: refusal }, "take_profit_order_refused");
+        return { brokerOrderId: "", status: "rejected", error: refusal };
       }
 
       await setOrderType(widget, "limit");
@@ -517,7 +605,11 @@ export class BrowserControlBroker implements BrokerClient {
     throw new Error("BrowserControlBroker does not support cancelOrder -- use closePosition instead");
   }
 
-  async cancelRestingOrder(symbol: string): Promise<OrderResult> {
+  cancelRestingOrder(symbol: string): Promise<OrderResult> {
+    return this.withTicket(() => this.cancelRestingOrderOnTicket(symbol));
+  }
+
+  private async cancelRestingOrderOnTicket(symbol: string): Promise<OrderResult> {
     const settings = getSettings();
     try {
       const page = await this.getPage();
@@ -533,6 +625,13 @@ export class BrowserControlBroker implements BrokerClient {
         return { brokerOrderId: "", status: "rejected", error: `no order-entry widget found for contract prefix "${instrument.brokerContractPrefix}"` };
       }
 
+      // TopstepX greys out Cancel Orders when this contract has nothing
+      // working. Clicking it anyway waited out a 30s timeout -- now that ticket
+      // actions take turns, that would stall every other symbol's orders.
+      if (await widget.cancelOrdersButton.isDisabled().catch(() => false)) {
+        logger.info({ symbol }, "cancel_orders_skipped_nothing_working");
+        return { brokerOrderId: `browser-cancel-${Date.now()}`, status: "filled", filledAt: new Date() };
+      }
       const result = await submitCancelOrders(widget, settings.dryRunOrders);
       if (result.dryRun) {
         return { brokerOrderId: "", status: "rejected", error: `DRY_RUN_ORDERS is enabled -- would have clicked "${result.buttonText}"` };

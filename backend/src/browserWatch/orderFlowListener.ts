@@ -106,6 +106,19 @@ function globexCodeToSymbol(code: string): string | null {
   return GLOBEX_ROOT_TO_SYMBOL[match[1]!] ?? null;
 }
 
+// One contract's row in a RealTimeTilt message (confirmed from live traffic
+// 2026-10-06): longBias/shortBias are 0-100, percentPositive/percentNegative
+// are 0-1 fractions.
+interface TiltRow {
+  contractName: string;
+  longBias: number;
+  shortBias: number;
+  percentPositive?: number;
+  percentNegative?: number;
+  avgPriceLong?: number;
+  avgPriceShort?: number;
+}
+
 interface SymbolState {
   bestBidPrice: number | null;
   bestBidSize: number | null;
@@ -116,6 +129,11 @@ interface SymbolState {
   tradeCount: number;
   tiltLongBias: number | null;
   tiltShortBias: number | null;
+  tiltPositivePct: number | null;
+  tiltNegativePct: number | null;
+  tiltLongsAvgPrice: number | null;
+  tiltShortsAvgPrice: number | null;
+  tiltUpdatedAtMs: number | null;
 }
 
 export interface OrderFlowSnapshot {
@@ -129,6 +147,26 @@ export interface OrderFlowSnapshot {
   tradeCount: number;
   tiltLongBias: number | null;
   tiltShortBias: number | null;
+  /**
+   * When the last RealTimeTilt row for this symbol arrived (epoch ms). Tilt
+   * carries forward between flushes, so without this a dead feed would look
+   * like a current reading forever -- risk/tiltGate.ts rejects stale values.
+   * Optional so existing snapshot literals (tests) stay valid.
+   */
+  tiltUpdatedAtMs?: number | null;
+  /**
+   * The Tilt panel's BOTTOM row, "% Positive ($)" / "% Negative ($)", as
+   * 0-100 percentages (the feed sends percentPositive/percentNegative as
+   * 0-1 fractions). 2026-10-06, operator: "on the tilt you should be using
+   * the bottom numbers" -- these, not longBias/shortBias, drive the Tilt
+   * execution gate and the Tilt scoring factor. Positive sits under % Long
+   * and counts for longs; Negative sits under % Short and counts for shorts.
+   */
+  tiltPositivePct?: number | null;
+  tiltNegativePct?: number | null;
+  /** The panel's "Longs avg price" / "Shorts avg price" -- recorded for analysis (Score.features), not used in decisions. */
+  tiltLongsAvgPrice?: number | null;
+  tiltShortsAvgPrice?: number | null;
 }
 
 function emptyState(): SymbolState {
@@ -142,6 +180,11 @@ function emptyState(): SymbolState {
     tradeCount: 0,
     tiltLongBias: null,
     tiltShortBias: null,
+    tiltPositivePct: null,
+    tiltNegativePct: null,
+    tiltLongsAvgPrice: null,
+    tiltShortsAvgPrice: null,
+    tiltUpdatedAtMs: null,
   };
 }
 
@@ -272,7 +315,7 @@ export class OrderFlowListener {
         this.handleTradeLog(msg.arguments as [string, Array<{ price: number; volume: number }>]);
         break;
       case "RealTimeTilt":
-        this.handleTilt(msg.arguments as [Array<{ contractName: string; longBias: number; shortBias: number }>]);
+        this.handleTilt(msg.arguments as [Array<TiltRow>]);
         break;
       default:
         break; // RealTimeContractBar/RealTimeContractQuote etc. -- not needed here, prices already come from browserWatch
@@ -330,7 +373,7 @@ export class OrderFlowListener {
     }
   }
 
-  private handleTilt(args: [Array<{ contractName: string; longBias: number; shortBias: number }>]): void {
+  private handleTilt(args: [Array<TiltRow>]): void {
     const [rows] = args;
     if (!Array.isArray(rows)) return;
     for (const row of rows) {
@@ -340,6 +383,11 @@ export class OrderFlowListener {
       const state = this.getState(symbol);
       state.tiltLongBias = row.longBias;
       state.tiltShortBias = row.shortBias;
+      state.tiltPositivePct = typeof row.percentPositive === "number" ? row.percentPositive * 100 : null;
+      state.tiltNegativePct = typeof row.percentNegative === "number" ? row.percentNegative * 100 : null;
+      state.tiltLongsAvgPrice = typeof row.avgPriceLong === "number" ? row.avgPriceLong : null;
+      state.tiltShortsAvgPrice = typeof row.avgPriceShort === "number" ? row.avgPriceShort : null;
+      state.tiltUpdatedAtMs = Date.now();
     }
   }
 

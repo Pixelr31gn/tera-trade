@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   hasReachedTrailingStopActivation,
   resolveTrailingStopDistanceTicks,
-  TRAILING_STOP_ACTIVATION_FRACTION,
+  TRAILING_STOP_ACTIVATION_R,
   TRAILING_STOP_DISTANCE_TICKS,
   TRAILING_STOP_MIN_TICKS,
 } from "../src/risk/stops.js";
@@ -13,56 +13,51 @@ function d(n: number): Decimal {
   return new Decimal(n);
 }
 
-// Activation was 0.5 from v1.3 until 2026-09-21, when the operator raised it
-// to 0.65 ("the trailing stop loss should be set when the trade hits 65% of
-// its tp goal"). Every case below is stated against the CONSTANT rather than
-// a hardcoded 113/87, so the next change to it doesn't silently leave these
-// asserting a fraction nobody uses -- only the last test pins the value.
+// Activation history: 0.5 of the way to target (v1.3), 0.65 (2026-09-21),
+// then 1.5R in profit (2026-10-06, operator: "set a trailing stop when price
+// hits 1.5R") -- measured from the trade's own stop distance, not the target.
+// Cases are stated against the constant; only the last test pins its value.
 describe("hasReachedTrailingStopActivation", () => {
-  // Entry 100, target 120, fraction 0.65 -> activation at 113.
-  const longActivation = 100 + TRAILING_STOP_ACTIVATION_FRACTION * 20;
-  // Entry 100, target 80, fraction 0.65 -> activation at 87.
-  const shortActivation = 100 - TRAILING_STOP_ACTIVATION_FRACTION * 20;
+  // Entry 100, stop 95 (5pt risk) -> long arms at 100 + 1.5 x 5 = 107.5.
+  const longActivation = 100 + TRAILING_STOP_ACTIVATION_R * 5;
+  // Entry 100, stop 105 -> short arms at 92.5.
+  const shortActivation = 100 - TRAILING_STOP_ACTIVATION_R * 5;
 
-  it("does not activate before price reaches the activation point on a long", () => {
-    expect(hasReachedTrailingStopActivation(d(100), d(120), "long", d(longActivation - 0.25), d(101))).toBe(false);
+  it("does not activate before price reaches 1.5R on a long", () => {
+    expect(hasReachedTrailingStopActivation(d(100), d(95), "long", d(longActivation - 0.25), d(99))).toBe(false);
   });
 
-  it("activates exactly at the activation point on a long", () => {
-    expect(hasReachedTrailingStopActivation(d(100), d(120), "long", d(longActivation), d(101))).toBe(true);
+  it("activates exactly at 1.5R on a long", () => {
+    expect(hasReachedTrailingStopActivation(d(100), d(95), "long", d(longActivation), d(99))).toBe(true);
   });
 
-  it("activates once price has moved past the activation point on a long", () => {
-    expect(hasReachedTrailingStopActivation(d(100), d(120), "long", d(longActivation + 2), d(101))).toBe(true);
+  it("activates once price has moved past 1.5R on a long", () => {
+    expect(hasReachedTrailingStopActivation(d(100), d(95), "long", d(longActivation + 2), d(99))).toBe(true);
   });
 
-  it("does not activate before price reaches the activation point on a short", () => {
-    expect(hasReachedTrailingStopActivation(d(100), d(80), "short", d(99), d(shortActivation + 0.25))).toBe(false);
+  it("does not activate before price reaches 1.5R on a short", () => {
+    expect(hasReachedTrailingStopActivation(d(100), d(105), "short", d(101), d(shortActivation + 0.25))).toBe(false);
   });
 
-  it("activates exactly at the activation point on a short", () => {
-    expect(hasReachedTrailingStopActivation(d(100), d(80), "short", d(99), d(shortActivation))).toBe(true);
+  it("activates exactly at 1.5R on a short", () => {
+    expect(hasReachedTrailingStopActivation(d(100), d(105), "short", d(101), d(shortActivation))).toBe(true);
   });
 
-  it("activates once price has moved past the activation point on a short", () => {
-    expect(hasReachedTrailingStopActivation(d(100), d(80), "short", d(99), d(shortActivation - 2))).toBe(true);
+  it("activates once price has moved past 1.5R on a short", () => {
+    expect(hasReachedTrailingStopActivation(d(100), d(105), "short", d(101), d(shortActivation - 2))).toBe(true);
   });
 
-  it("uses the bar's favorable extreme (high for long, low for short), not close", () => {
-    // The low never reaches activation, but the high does -- must still activate.
-    expect(hasReachedTrailingStopActivation(d(100), d(120), "long", d(longActivation), d(101))).toBe(true);
-    // The high never reaches activation, but the low does -- must still activate.
-    expect(hasReachedTrailingStopActivation(d(100), d(80), "short", d(99), d(shortActivation))).toBe(true);
+  it("is the halfway point of a 3R target", () => {
+    // Entry 100, stop 95, target 115 (3R): arms at 107.5, halfway to 115.
+    expect(longActivation).toBe(100 + (115 - 100) / 2);
   });
 
-  it("requires more of the target to be earned than the old 0.5 rule did", () => {
-    // Regression guard for the 2026-09-21 change specifically: a bar that
-    // reached the OLD halfway point (110) must no longer arm the trail.
-    expect(hasReachedTrailingStopActivation(d(100), d(120), "long", d(110), d(101))).toBe(false);
+  it("never arms with a zero stop distance", () => {
+    expect(hasReachedTrailingStopActivation(d(100), d(100), "long", d(200), d(99))).toBe(false);
   });
 
-  it("exposes the activation fraction as the expected constant", () => {
-    expect(TRAILING_STOP_ACTIVATION_FRACTION).toBe(0.65);
+  it("exposes the activation multiple as 1.5R", () => {
+    expect(TRAILING_STOP_ACTIVATION_R).toBe(1.5);
   });
 });
 
@@ -130,5 +125,14 @@ describe("resolveTrailingStopDistanceTicks", () => {
   it("guards a zero tickSize without dividing by it", () => {
     const broken = { tickSize: d(0), trailingStopTickBand: { minTicks: 20, maxTicks: 35 } };
     expect(resolveTrailingStopDistanceTicks(broken, d(10))).toBe(20);
+  });
+});
+
+describe("hasReachedTrailingStopActivation after a stop moves to breakeven", () => {
+  it("measures R from the 3R target, so a breakeven stop doesn't disable the trail", () => {
+    // Entry 100, target 115 (3R -> R = 5), stop moved to 100 (breakeven).
+    expect(hasReachedTrailingStopActivation(d(100), d(100), "long", d(107.5), d(99), d(115))).toBe(true);
+    expect(hasReachedTrailingStopActivation(d(100), d(100), "long", d(107.25), d(99), d(115))).toBe(false);
+    expect(hasReachedTrailingStopActivation(d(100), d(100), "short", d(101), d(92.5), d(85))).toBe(true);
   });
 });

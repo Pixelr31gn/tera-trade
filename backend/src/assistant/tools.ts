@@ -54,6 +54,7 @@ import { resolveDailyPlanAt } from "../engine/dailyPlanSessionOverride.js";
 import { listDisabledStrategies, disableStrategy, enableStrategy } from "../engine/strategyEnablementCache.js";
 import { listDisabledStrategySymbols, disableStrategySymbol, enableStrategySymbol } from "../engine/strategySymbolEnablementCache.js";
 import { childLogger } from "../core/logger.js";
+import { loadRecentBars } from "../engine/bootstrap.js";
 
 const logger = childLogger("assistantTools");
 
@@ -590,6 +591,28 @@ const WRITE_TOOLS: { tool: FunctionDeclaration; handler: WriteToolHandler }[] = 
           }
           zones.push({ priceLow, priceHigh, enforcement, label: String(z.label ?? "") });
         }
+
+        // Enforced here, not just asked for in the prompt (2026-10-05): the
+        // session's first plan that night put NQ's two zones (30525-30850)
+        // ~300 points BELOW a live price of ~31150, anchored on dealer walls
+        // computed from a stale spot price -- a plan that can't gate anything
+        // sensibly. Returning an error with the real price lets the model
+        // correct itself inside the same tool loop instead of saving it.
+        if (zones.length !== 0 && zones.length !== 2) {
+          return { ok: false, error: `exactly two zones are required (support boundary and resistance boundary), got ${zones.length}.` };
+        }
+        if (zones.length === 2) {
+          const [lower, upper] = [...zones].sort((a, b) => a.priceLow - b.priceLow) as [DailyPlanZoneInput, DailyPlanZoneInput];
+          const lastBar = (await loadRecentBars(symbol, 1)).at(-1);
+          const price = lastBar && Date.now() - lastBar.time.getTime() < 15 * 60_000 ? lastBar.close : null;
+          if (price !== null && !(Number(lower.priceLow) < price && Number(upper.priceHigh) > price)) {
+            return {
+              ok: false,
+              error: `zones must bracket the CURRENT ${symbol} price of ${price}: the support boundary must start below it and the resistance boundary must end above it. Got support ${lower.priceLow}-${lower.priceHigh}, resistance ${upper.priceLow}-${upper.priceHigh}. Pick real levels around ${price} and call again.`,
+            };
+          }
+        }
+
         await setDailyPlanZones(symbol, zones, resolveDailyPlanAt());
         return {
           ok: true,

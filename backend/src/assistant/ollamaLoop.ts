@@ -33,6 +33,7 @@ import { SYSTEM_PROMPT } from "./systemPrompt.js";
 import { executeTool, getAvailableTools } from "./tools.js";
 import { childLogger } from "../core/logger.js";
 import type { ChatResult } from "./client.js";
+import { readOllamaChatStream } from "../agentCore/ollamaToolLoop.js";
 
 const logger = childLogger("ollamaLoop");
 
@@ -56,7 +57,14 @@ const MAX_OUTPUT_TOKENS = 4096;
 // which needs far more server VRAM than a 16384 default implies is available on this host -- lower
 // this if the host can't hold 65536 tokens of KV cache; the failure mode is the same either way, so
 // watch for message.content coming back empty with done_reason:"length" as the signal to lower it.
-const CONTEXT_WINDOW_TOKENS = 65536;
+//
+// 65536 -> 32768 (2026-10-05, this install: qwen3:8b on an 8 GB GPU). At 65536
+// the KV cache pushed the model partly onto the CPU (19-38% depending on
+// cache type, ~4 tokens/s at worst). 32768 is still twice the 16384 that hit
+// the empty-reply wall above with the full tool list + history, and the
+// chat stays mostly or fully on the GPU. Same signal applies if it's ever
+// too small: empty content with done_reason:"length".
+const CONTEXT_WINDOW_TOKENS = 32768;
 // Confirmed live 2026-09-03 against the actual remote Ollama host: loading a
 // 22GB model from cold took 171s before the first response of a session --
 // well past a 120s timeout, which would make every post-restart first call
@@ -121,7 +129,11 @@ async function callOllamaChatOnce(params: { messages: OllamaMessage[]; tools: Fu
         model: settings.ollamaModel,
         messages: params.messages,
         tools: params.tools.map(toOllamaTool),
-        stream: false,
+        // Streamed (2026-10-05) -- with stream: false Ollama sends no headers
+        // until generation ends, and Node's fetch gives up at a fixed 300s
+        // headersTimeout regardless of REQUEST_TIMEOUT_MS. See
+        // agentCore/ollamaToolLoop.ts's callOnce for the incident.
+        stream: true,
         // MUST be true -- confirmed live 2026-09-03 via a real smoke test
         // that this actually broke tool-calling: with think:false, once a
         // conversation contains even one turn the model answered in plain
@@ -142,9 +154,7 @@ async function callOllamaChatOnce(params: { messages: OllamaMessage[]; tools: Fu
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`Ollama chat request failed: HTTP ${res.status} ${await res.text()}`);
-    const json = (await res.json()) as OllamaApiResponse;
-    if (json.error) throw new Error(`Ollama chat error: ${json.error}`);
-    return json;
+    return (await readOllamaChatStream(res)) as OllamaApiResponse;
   } finally {
     clearTimeout(timeout);
   }

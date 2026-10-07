@@ -66,6 +66,7 @@
  * transcript is gone.
  */
 import { getSessionStart, getSessionEnd } from "../analytics/session.js";
+import { prisma } from "../db/client.js";
 import { getSettings } from "../core/config.js";
 import { getSystemState } from "../execution/mode.js";
 import { listActiveDailyPlanZones } from "../engine/dailyPlanZoneCache.js";
@@ -145,7 +146,19 @@ async function buildContextDigest(): Promise<string> {
     cached("session-performance", () => computeSessionPerformanceForAllSessions()),
   ]);
 
+  // Current prices first, on their own line (2026-10-05): the dealer-gamma
+  // sections carry their own spotPrice, which can lag the live price by tens
+  // of points (dealer_gex_stale_spot_price), and the session's first plan
+  // that night anchored its zones on that instead. set_daily_plan_zones now
+  // also rejects zones that don't bracket the live price.
+  const currentPrices = (marketSnapshot as Array<{ symbol: string; lastPrice: unknown }>)
+    .filter((row) => PLAN_SYMBOLS.includes(row.symbol))
+    .map((row) => `${row.symbol} ${row.lastPrice ?? "unavailable"}`)
+    .join(", ");
+
   return [
+    `## CURRENT PRICES (the zones you set must bracket these): ${currentPrices}`,
+    "",
     "## Market snapshot (ES/NQ)",
     JSON.stringify(jsonFor(PLAN_SYMBOLS, marketSnapshot), null, 2),
     "\n## Support/resistance levels (ES/NQ)",
@@ -227,6 +240,23 @@ ${digest}`;
 // window left little margin before the boundary it exists to beat.
 export const PRE_TRIGGER_WINDOW_MS = 10 * 60 * 1000;
 
+// Mid-session plan refresh cadence (2026-10-05, operator request: "update
+// each hour"). See maybeRefreshForNewSession's hourly-refresh block.
+export const PLAN_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
+
+// Per model call during a plan build -- see attemptRefresh. Long enough for
+// the local model's reasoning pass; still well inside the hourly cadence.
+const PLAN_TURN_TIMEOUT_MS = 15 * 60 * 1000;
+
+// num_ctx for a plan build (2026-10-05). Measured: system prompt + the two
+// plan tools ~3.2k tokens, digest + instructions ~10-12k, plus up to
+// MAX_OUTPUT_TOKENS (4,096) of reasoning/answer -- ~20k total. The general
+// 65,536 default reserves a KV cache that pushed the model ~38% onto the CPU
+// (~4 tokens/s); this leaves headroom without that cost. Too small is the
+// documented failure mode (empty replies once the context fills -- see
+// ollamaToolLoop.ts's CONTEXT_WINDOW_TOKENS), hence the margin.
+const PLAN_TURN_CONTEXT_TOKENS = 24_576;
+
 // Only set once a session has actually been handled (zones already existed,
 // or a refresh was attempted, success or failure) -- deliberately NOT set
 // when skipped because the assistant/actions gate is off, so a later tick
@@ -265,7 +295,7 @@ function mayAttemptSession(sessionStartMs: number): boolean {
  * threaded through to assistant/tools.ts's write handlers, which otherwise
  * have no way to know "which session" beyond real current time.
  */
-async function attemptRefresh(at: Date): Promise<void> {
+async function attemptRefresh(at: Date): Promise<string> {
   const digest = await buildContextDigest();
   setDailyPlanSessionOverride(at);
   try {
@@ -279,26 +309,46 @@ async function attemptRefresh(at: Date): Promise<void> {
     // history, so a failed refresh leaves nothing behind and the next attempt
     // is exactly as cheap as the first. Tool execution, the actions gate and
     // the AssistantAction audit trail are all unchanged.
-    await runStatelessAssistantTurn(buildRefreshPrompt(digest));
+    // Only the two tools this prompt is allowed to call, and a long per-call
+    // timeout (2026-10-05): on the local qwen3:8b model every plan attempt
+    // that night was aborted at the default 5:00 while still generating its
+    // reasoning, and 39 unused tool schemas only added to what it had to read.
+    return (await runStatelessAssistantTurn(buildRefreshPrompt(digest), {
+      toolNames: ["set_daily_plan_zones", "set_daily_take_profit_target"],
+      requestTimeoutMs: PLAN_TURN_TIMEOUT_MS,
+      contextTokens: PLAN_TURN_CONTEXT_TOKENS,
+    })).reply;
   } finally {
     setDailyPlanSessionOverride(null);
   }
 }
 
-export async function refreshForSession(sessionStart: Date): Promise<void> {
-  if (refreshInFlight) return; // never overlap two live LLM calls
+export interface PlanRefreshOutcome {
+  /** Symbols with zones for the session once the refresh finished. */
+  plannedSymbols: string[];
+  /** The model's closing summary, when it got that far. */
+  reply: string | null;
+  /** True when another refresh was already running and this call did nothing. */
+  skippedInFlight: boolean;
+}
+
+export async function refreshForSession(sessionStart: Date): Promise<PlanRefreshOutcome> {
+  if (refreshInFlight) return { plannedSymbols: [], reply: null, skippedInFlight: true }; // never overlap two live LLM calls
   refreshInFlight = true;
+  let reply: string | null = null;
+  let plannedSymbols: string[] = [];
+  const attemptStartedAt = new Date();
   // Recorded before the attempt so mayAttemptSession can space retries out;
   // lastHandledSessionStart is NOT set here -- see the finally block.
   lastAttemptAtBySession.set(sessionStart.getTime(), Date.now());
   logger.info({ sessionStart: sessionStart.toISOString() }, "daily_plan_scheduler_refresh_starting");
   try {
-    await attemptRefresh(sessionStart);
+    reply = await attemptRefresh(sessionStart);
   } catch (err) {
     logger.warn({ err: String(err) }, "daily_plan_scheduler_refresh_failed_retrying_once");
     await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
     try {
-      await attemptRefresh(sessionStart);
+      reply = await attemptRefresh(sessionStart);
     } catch (retryErr) {
       logger.warn({ err: String(retryErr) }, "daily_plan_scheduler_refresh_threw_checking_whether_zones_landed_anyway");
     }
@@ -324,8 +374,15 @@ export async function refreshForSession(sessionStart: Date): Promise<void> {
     // lookup is treated as "not confirmed" -- retrying a session that actually
     // has a plan is cheap (the pre-trigger path checks for existing zones
     // first and returns), while wrongly marking one handled is not.
-    const planned = await listActiveDailyPlanZones(sessionStart).catch(() => ({} as Record<string, unknown>));
-    const plannedSymbols = Object.keys(planned);
+    // Only zones written by THIS attempt count (2026-10-05). Once hourly
+    // refreshes existed, "the session has zones" stopped meaning "this refresh
+    // worked": a refresh that never got a reply from the model still logged
+    // daily_plan_scheduler_refresh_succeeded, because the previous hour's
+    // zones were still there.
+    const fresh = await prisma.dailyPlanZone
+      .findMany({ where: { sessionStart, createdAt: { gte: attemptStartedAt } }, select: { symbol: true }, distinct: ["symbol"] })
+      .catch(() => [] as Array<{ symbol: string }>);
+    plannedSymbols = fresh.map((z) => z.symbol);
     if (plannedSymbols.length > 0) {
       lastHandledSessionStart = sessionStart.getTime();
       logger.info({ sessionStart: sessionStart.toISOString(), symbols: plannedSymbols }, "daily_plan_scheduler_refresh_succeeded");
@@ -336,6 +393,21 @@ export async function refreshForSession(sessionStart: Date): Promise<void> {
       );
     }
   }
+  return { plannedSymbols, reply, skippedInFlight: false };
+}
+
+/**
+ * Rebuilds the CURRENT session's plan right now, on demand -- the chat path
+ * (api/routes/assistant.ts) calls this when the operator asks for a trading
+ * plan (2026-10-05, operator: "any time I prompt the assistant to do this it
+ * should be provided with all that information"). Before this, a plan request
+ * typed into chat went to the ordinary chat loop with none of
+ * buildContextDigest's data, and a small local model answered by asking the
+ * operator to supply the levels themselves. Same digest, same prompt, same
+ * tools as the scheduler -- one implementation.
+ */
+export async function buildDailyPlanNow(): Promise<PlanRefreshOutcome> {
+  return refreshForSession(getSessionStart(new Date()));
 }
 
 async function maybeRefreshForNewSession(): Promise<void> {
@@ -378,6 +450,25 @@ async function maybeRefreshForNewSession(): Promise<void> {
   // the in-memory lastHandledSessionStart, etc.). Same fallback this
   // scheduler has always had; unchanged by the pre-trigger addition above.
   const currentSessionStartMs = currentSessionStart.getTime();
+
+  // Hourly refresh (2026-10-05, operator: "it should update each hour so its
+  // plan stays relevant"). A session runs many hours; levels picked at its
+  // start go stale as price moves through them. Rebuilds the current
+  // session's plan once its newest zone is PLAN_REFRESH_INTERVAL_MS old --
+  // read from the zones' own created_at, so a restart doesn't reset the
+  // clock and a manual chat-built plan counts as fresh. setDailyPlanZones
+  // replaces per symbol, so a refresh that fails partway leaves the previous
+  // zones for any symbol it didn't reach rather than none. Skipped inside the
+  // pre-trigger window, where the next session's plan is about to be built.
+  if (currentSessionStartMs === lastHandledSessionStart && !(msUntilUpcoming >= 0 && msUntilUpcoming <= PRE_TRIGGER_WINDOW_MS)) {
+    const newest = await prisma.dailyPlanZone.aggregate({ where: { sessionStart: currentSessionStart }, _max: { createdAt: true } });
+    const builtAt = newest._max.createdAt?.getTime() ?? null;
+    if (builtAt !== null && Date.now() - builtAt >= PLAN_REFRESH_INTERVAL_MS && !refreshInFlight && mayAttemptSession(currentSessionStartMs)) {
+      logger.info({ sessionStart: currentSessionStart.toISOString(), planAgeMs: Date.now() - builtAt }, "daily_plan_hourly_refresh");
+      await refreshForSession(currentSessionStart);
+    }
+    return;
+  }
   if (currentSessionStartMs === lastHandledSessionStart) return;
 
   const existing = await listActiveDailyPlanZones(now);

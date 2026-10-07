@@ -20,6 +20,7 @@ import { scoreSetupV5 } from "./ruleScorerV5.js";
 import { scoreSetupV6 } from "./ruleScorerV6.js";
 import { scoreSetupV7 } from "./ruleScorerV7.js";
 import { computeHistoricalAdjustment } from "./v3HistoricalAdjustment.js";
+import { applyTiltToProbability, computeTiltAdjustment, type TiltAdjustment } from "./tiltAdjustment.js";
 import { MLScorer } from "./training.js";
 
 export interface GatedScore {
@@ -83,6 +84,11 @@ export async function evaluateSetup(
   extra?: ScoringInputs
 ): Promise<GatedScore> {
   const settings = getSettings();
+  // TopstepX Tilt, scored into every version (see tiltAdjustment.ts). Applied
+  // to each version's probability BEFORE its decision, so it can move a setup
+  // across the threshold in either direction.
+  const tilt = computeTiltAdjustment(features.orderFlowSnapshot, features.side, at);
+  const tiltFactor = (t: TiltAdjustment): FactorContribution => ({ name: "tiltAdjustment", contribution: t.adjustmentPoints, description: t.description });
 
   if (version === "v3") {
     // v3 is a different scoring *mechanism* entirely (six independent
@@ -126,7 +132,8 @@ export async function evaluateSetup(
           ppm.adjustmentPoints +
           orderFlow.adjustmentPoints +
           emaProximity.adjustmentPoints +
-          emaRegime.adjustmentPoints
+          emaRegime.adjustmentPoints +
+          tilt.adjustmentPoints
       )
     );
     const probability = Math.round((adjustedScore / 100) * 1e5) / 1e5;
@@ -165,6 +172,7 @@ export async function evaluateSetup(
     factors.push({ name: "orderFlowAdjustment", contribution: orderFlow.adjustmentPoints, description: orderFlow.description });
     factors.push({ name: "emaProximityAdjustment", contribution: emaProximity.adjustmentPoints, description: emaProximity.description });
     factors.push({ name: "emaRegimeAdjustment", contribution: emaRegime.adjustmentPoints, description: emaRegime.description });
+    factors.push(tiltFactor(tilt));
 
     // Hard override: if v1 AND v2 both independently took this exact same
     // setup, v3 takes it too, even if its own score/conviction check
@@ -195,8 +203,9 @@ export async function evaluateSetup(
     // historical-similarity lookup. See ruleScorerV5.ts's header for where
     // its factors came from.
     const result = scoreSetupV5(features);
-    const decision: "taken" | "skipped_score" = result.probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
-    return { probability: result.probability, decision, factors: result.factors, modelUsed: "rule_v5", blockReason: null, v3Bucket: null };
+    const probability = applyTiltToProbability(result.probability, tilt);
+    const decision: "taken" | "skipped_score" = probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
+    return { probability, decision, factors: [...result.factors, tiltFactor(tilt)], modelUsed: "rule_v5", blockReason: null, v3Bucket: null };
   }
 
   if (version === "v6") {
@@ -213,8 +222,9 @@ export async function evaluateSetup(
       throw new Error("evaluateSetup: extra.bars is required when version is 'v6'");
     }
     const result = scoreSetupV6(features, extra.bars);
-    const decision: "taken" | "skipped_score" = result.probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
-    return { probability: result.probability, decision, factors: result.factors, modelUsed: "rule_v6", blockReason: null, v3Bucket: null };
+    const probability = applyTiltToProbability(result.probability, tilt);
+    const decision: "taken" | "skipped_score" = probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
+    return { probability, decision, factors: [...result.factors, tiltFactor(tilt)], modelUsed: "rule_v6", blockReason: null, v3Bucket: null };
   }
 
   if (version === "v7") {
@@ -224,8 +234,9 @@ export async function evaluateSetup(
     // historical-similarity lookup). See ruleScorerV7.ts's header for the
     // three mined factors and the real win-rate numbers behind them.
     const result = scoreSetupV7(features);
-    const decision: "taken" | "skipped_score" = result.probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
-    return { probability: result.probability, decision, factors: result.factors, modelUsed: "rule_v7", blockReason: null, v3Bucket: null };
+    const probability = applyTiltToProbability(result.probability, tilt);
+    const decision: "taken" | "skipped_score" = probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
+    return { probability, decision, factors: [...result.factors, tiltFactor(tilt)], modelUsed: "rule_v7", blockReason: null, v3Bucket: null };
   }
 
   // v4 is the independently-trained ML model (see scoring/training.ts) --
@@ -249,7 +260,9 @@ export async function evaluateSetup(
     probability = ruleResult.probability;
     modelUsed = "rule_v1";
   }
-  const factors = ruleResult.factors;
+  // v1, v2 and v4 (ML or its rule fallback) all get the same Tilt adjustment.
+  probability = applyTiltToProbability(probability, tilt);
+  const factors = [...ruleResult.factors, tiltFactor(tilt)];
 
   const decision: "taken" | "skipped_score" = probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
 
