@@ -79,13 +79,23 @@ function toAgentCoreTools(actionsEnabled: boolean): OllamaToolDeclaration[] {
  * performs none. The scheduler has its own refreshInFlight guard against
  * overlapping refreshes.
  */
-export async function runStatelessAssistantTurn(userPrompt: string): Promise<StatelessTurnResult> {
+export interface StatelessTurnOptions {
+  /** Offer only these tools, by name. The daily-plan turn needs 2 of the ~41: fewer tool schemas is less for a local model to read and reason over (2026-10-05). */
+  toolNames?: string[];
+  /** Per-call timeout for the Ollama path -- see RunOllamaToolLoopParams.requestTimeoutMs. */
+  requestTimeoutMs?: number;
+  /** num_ctx for the Ollama path -- see RunOllamaToolLoopParams.contextTokens. */
+  contextTokens?: number;
+}
+
+export async function runStatelessAssistantTurn(userPrompt: string, options: StatelessTurnOptions = {}): Promise<StatelessTurnResult> {
   const settings = getSettings();
   if (!settings.assistantEnabled) throw new Error("Assistant is disabled (ASSISTANT_ENABLED=false)");
 
   const systemState = await getSystemState();
   const actionsEnabled = settings.assistantEnabled && systemState.assistantActionsEnabled;
-  const tools = toAgentCoreTools(actionsEnabled);
+  const allTools = toAgentCoreTools(actionsEnabled);
+  const tools = options.toolNames ? allTools.filter((t) => options.toolNames!.includes(t.name)) : allTools;
   // Null messageId: there is no AssistantMessage row for a stateless turn.
   const execute = (name: string, input: Record<string, unknown>) => executeTool(name, input, null);
 
@@ -98,6 +108,8 @@ export async function runStatelessAssistantTurn(userPrompt: string): Promise<Sta
         userPrompt,
         tools,
         executeTool: execute,
+        requestTimeoutMs: options.requestTimeoutMs,
+        contextTokens: options.contextTokens,
       });
     } catch (err) {
       if (!settings.geminiApiKey) throw err;

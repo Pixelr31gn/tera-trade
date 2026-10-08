@@ -111,7 +111,10 @@ describe.skipIf(!hasRealDb)("replay equivalence (Phase 1 definition of done)", (
   beforeAll(async () => {
     process.env.DATABASE_URL = TEST_DB_URL;
     ({ prisma } = await import("../src/db/client.js"));
-    ({ TradingEngine } = await import("../src/engine/loop.js"));
+    const loopModule = await import("../src/engine/loop.js");
+    ({ TradingEngine } = loopModule);
+    loopModule.setTiltGateEnabled(false); // synthetic bars, no TopstepX Tilt feed
+    loopModule.setChartZoneGateEnabled(false); // ...and no TopstepX chart
     ({ SimulatedBroker } = await import("../src/brokers/simulatedBroker.js"));
     ({ ensureDefaultAccount } = await import("../src/engine/bootstrap.js"));
     ({ decideOnBar } = await import("../src/replay/decisionCore.js"));

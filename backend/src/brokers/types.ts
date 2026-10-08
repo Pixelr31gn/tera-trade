@@ -177,7 +177,7 @@ export interface BrokerClient {
    * long, buy to protect a short), same quantity, trailing `trailTicks`
    * ticks behind the best price reached. v1.3: this is what actually
    * replaces the internal hard-stop-price check once a trade reaches the
-   * activation point set by risk/stops.ts TRAILING_STOP_ACTIVATION_FRACTION
+   * activation point set by risk/stops.ts TRAILING_STOP_ACTIVATION_R (1.5R in profit)
    * (see engine/loop.ts). A trailing
    * stop is a resting order, not an immediate fill -- returns `status:
    * "pending"` on success, same as a limit order. Only implemented by

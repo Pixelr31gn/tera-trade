@@ -70,7 +70,7 @@ import { computeConfidenceTierQuantity } from "./sizing.js";
 // branch's own comment). Both remain exported from stops.ts as the record of
 // what that branch used to do, and as what to restore if the reward:risk
 // floor is ever relaxed.
-import { MIN_REWARD_RISK_RATIO, roundAwayFromEntry } from "./stops.js";
+import { fiveMinuteAtrPoints, MIN_REWARD_RISK_RATIO, MIN_TARGET_ATR5_MULTIPLE, roundAwayFromEntry } from "./stops.js";
 import { computeTradePlan } from "./tradePlan.js";
 
 /**
@@ -787,7 +787,19 @@ export class RiskEngine {
     // separate minimum-distance floor replaces it -- a level close enough to
     // derive a very tight stop is a known, accepted trade-off of "tighter
     // is fine, wider than 1:3 never is," not a bug.
-    const targetLevel = effectiveExplicitTakeProfitPrice === undefined ? findNearestTargetLevel(levels, side, entryPrice.toNumber()) : null;
+    // Minimum target distance (2026-10-06, see stops.ts's
+    // MIN_TARGET_ATR5_MULTIPLE): a nearest-level target closer than this is
+    // ignored, and any target that still comes out closer is pushed out to it,
+    // with the stop re-derived at 1/MIN_REWARD_RISK_RATIO. Supersedes the
+    // "a very tight stop is an accepted trade-off" stance above -- in live
+    // trading those trades were stopped out by noise within seconds.
+    const atr5 = fiveMinuteAtrPoints(bars);
+    const minTargetDistance = atr5 ? atr5.times(MIN_TARGET_ATR5_MULTIPLE) : null;
+    const nearestLevel = effectiveExplicitTakeProfitPrice === undefined ? findNearestTargetLevel(levels, side, entryPrice.toNumber()) : null;
+    const targetLevel =
+      nearestLevel !== null && minTargetDistance !== null && new Decimal(nearestLevel.price).minus(entryPrice).abs().lt(minTargetDistance)
+        ? null
+        : nearestLevel;
     let takeProfitPrice = plan.takeProfitPrice;
     let stopPrice = plan.stopPrice;
     let stopDistancePoints = plan.stopDistancePoints;
@@ -796,6 +808,18 @@ export class RiskEngine {
       takeProfitPrice = roundAwayFromEntry(side === "long" ? entryPrice.plus(levelDistance) : entryPrice.minus(levelDistance), entryPrice, tickSize);
       stopDistancePoints = levelDistance.dividedBy(MIN_REWARD_RISK_RATIO);
       stopPrice = roundAwayFromEntry(side === "long" ? entryPrice.minus(stopDistancePoints) : entryPrice.plus(stopDistancePoints), entryPrice, tickSize);
+    }
+    let widenedToMinTarget = false;
+    if (minTargetDistance !== null && takeProfitPrice.minus(entryPrice).abs().lt(minTargetDistance)) {
+      widenedToMinTarget = true;
+      takeProfitPrice = roundAwayFromEntry(side === "long" ? entryPrice.plus(minTargetDistance) : entryPrice.minus(minTargetDistance), entryPrice, tickSize);
+      // Toward entry, same reason as the daily-plan cap below: a stop rounded
+      // a hair wider would fail the 3:1 floor on rounding alone.
+      const rawStop = side === "long"
+        ? entryPrice.minus(minTargetDistance.dividedBy(MIN_REWARD_RISK_RATIO))
+        : entryPrice.plus(minTargetDistance.dividedBy(MIN_REWARD_RISK_RATIO));
+      stopPrice = side === "long" ? rawStop.toNearest(tickSize, Decimal.ROUND_CEIL) : rawStop.toNearest(tickSize, Decimal.ROUND_FLOOR);
+      stopDistancePoints = entryPrice.minus(stopPrice).abs();
     }
     // Daily-plan take-profit CEILING, applied to whatever this branch ended up
     // with from any source -- generic ATR/swing R-multiple, an S/R level
@@ -857,6 +881,21 @@ export class RiskEngine {
         ? `; take-profit capped at the assistant's session likely-move read (${assistantTakeProfitCapPoints!.toFixed(2)} pts, down from ${cappedByDailyPlan.toFixed(2)}), stop re-derived at 1/${MIN_REWARD_RISK_RATIO.toString()} of it (${stopDistancePoints.toFixed(2)} pts)`
         : "";
 
+    // The session cap can pull a target back under the minimum -- there is
+    // then no room for a target worth taking, so skip rather than trade a
+    // cramped one.
+    if (minTargetDistance !== null && takeProfitPrice.minus(entryPrice).abs().lt(minTargetDistance.minus(tickSize))) {
+      return {
+        approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
+        reason: `take-profit room too small: the session's likely-move cap leaves ${takeProfitPrice.minus(entryPrice).abs().toFixed(2)} pts, under the ${minTargetDistance.toFixed(2)} pt minimum (${MIN_TARGET_ATR5_MULTIPLE.toString()}x the 5-minute ATR of ${atr5!.toFixed(2)})`,
+        tripKillSwitch: false, nearestSrLevel: nearest?.level ?? null, targetSrLevel: null,
+      };
+    }
+    const minTargetReason =
+      widenedToMinTarget && cappedByDailyPlan === null
+        ? `; take-profit widened to the ${minTargetDistance!.toFixed(2)} pt minimum (${MIN_TARGET_ATR5_MULTIPLE.toString()}x the 5-minute ATR), stop at 1/${MIN_REWARD_RISK_RATIO.toString()} of it (${stopDistancePoints.toFixed(2)} pts)`
+        : "";
+
     const usedTargetLevel = targetLevel;
     const dailyPlanRangeReason = dailyPlanRange.mode === "fade" || dailyPlanRange.mode === "breakout" ? `; daily plan range: ${dailyPlanRange.reason}` : "";
 
@@ -891,7 +930,7 @@ export class RiskEngine {
       reason:
         (usedTargetLevel
           ? `${plan.sizingReason}; take-profit targets the nearest real ${usedTargetLevel.type} level (${usedTargetLevel.price.toFixed(2)}, ${usedTargetLevel.touches} touches), stop derived at 1/${MIN_REWARD_RISK_RATIO.toString()} of that distance (${stopDistancePoints.toFixed(2)} pts) instead of a generic R-multiple`
-          : plan.sizingReason) + dailyPlanCapReason + dailyPlanRangeReason,
+          : plan.sizingReason) + minTargetReason + dailyPlanCapReason + dailyPlanRangeReason,
       tripKillSwitch: false,
       // nearest can be null here only when srGateBypass skipped the
       // existence check above entirely (e.g. no real level was ever found)

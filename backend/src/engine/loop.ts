@@ -8,7 +8,10 @@
 import { Decimal } from "decimal.js";
 import { prisma } from "../db/client.js";
 import { childLogger } from "../core/logger.js";
-import { AccountSource, BrokerKind, getSettings, TradingMode } from "../core/config.js";
+import { AccountSource, BrokerKind, getSettings, PriceSource, TradingMode } from "../core/config.js";
+import { checkTiltAlignment } from "../risk/tiltGate.js";
+import { checkChartZone } from "../risk/chartZoneGate.js";
+import { readChartPriceZones } from "../browserControl/chartZones.js";
 import type { BrokerClient, ClosedSimTrade, ClosedTradeHistoryEntry } from "../brokers/types.js";
 import { getBroker } from "../brokers/index.js";
 import { findMatchingClosedTrade } from "../browserControl/tradeHistoryPanel.js";
@@ -629,6 +632,18 @@ export function determineContinuousScanConsensus(gatedByVersion: Map<StrategyVer
 
 const logger = childLogger("engineLoop");
 
+// TopstepX Tilt gate switch (see attemptExecution). On in the app; engine
+// tests feed synthetic bars with no Tilt feed, so they turn it off.
+// Same for the chart rectangle gate -- tests have no TopstepX chart.
+let chartZoneGateEnabled = true;
+export function setChartZoneGateEnabled(enabled: boolean): void {
+  chartZoneGateEnabled = enabled;
+}
+let tiltGateEnabled = true;
+export function setTiltGateEnabled(enabled: boolean): void {
+  tiltGateEnabled = enabled;
+}
+
 const MIN_BARS_FOR_REGIME = 120;
 
 // scanSymbolContinuously is timer-driven (runs on a fixed interval, not off
@@ -1022,12 +1037,12 @@ export class TradingEngine {
     // this same tick instead of one tick late.
     openTrade = await this.maybeReanchorToRealEntry(openTrade, symbol, broker);
 
-    const stopPrice = new Decimal(openTrade.stopPrice.toString());
+    let stopPrice = new Decimal(openTrade.stopPrice.toString());
     const takeProfitPrice = openTrade.takeProfitPrice ? new Decimal(openTrade.takeProfitPrice.toString()) : null;
     const entryPrice = new Decimal(openTrade.entryPrice.toString());
     const side = openTrade.side as "long" | "short";
 
-    // v1.3: once price reaches TRAILING_STOP_ACTIVATION_FRACTION of the way to
+    // v1.3: once price reaches TRAILING_STOP_ACTIVATION_R (1.5R) in profit (was a fraction of the way to
     // the take-profit target (65% as of 2026-09-21), place a real
     // broker-side Trailing Stop order and stop relying on our own internal
     // stopPrice check for this trade -- see risk/stops.ts's hasReachedTrailingStopActivation/activateTrailingStop.
@@ -1076,7 +1091,8 @@ export class TradingEngine {
     // flat TRAILING_STOP_DISTANCE_TICKS -- see those for the history.
     const LIVE_TRAILING_STOP_ENABLED = true;
     let trailingStopPlaced = openTrade.trailingStopPlaced;
-    if (LIVE_TRAILING_STOP_ENABLED && !trailingStopPlaced && takeProfitPrice !== null && hasReachedTrailingStopActivation(entryPrice, takeProfitPrice, side, h, l)) {
+    // Arms at 1.5R in profit (risk/stops.ts's TRAILING_STOP_ACTIVATION_R).
+    if (LIVE_TRAILING_STOP_ENABLED && !trailingStopPlaced && hasReachedTrailingStopActivation(entryPrice, stopPrice, side, h, l, takeProfitPrice)) {
       trailingStopPlaced = await this.activateTrailingStop(openTrade, symbol);
     }
 
@@ -1154,12 +1170,41 @@ export class TradingEngine {
     // is caught by the isPositionFlat check above instead, since the real
     // trailing level (tracked server-side on TopstepX) can differ from
     // whatever stopPrice was computed at entry.
-    const hitStop = !trailingStopPlaced && (side === "long" ? l.lte(stopPrice) : h.gte(stopPrice));
+    // Chart box exit rule (2026-10-06, operator request): once price is
+    // outside every rectangle drawn on this symbol's chart (it left the box,
+    // or the box was moved/deleted -- risk/chartZoneGate.ts), a GREEN position
+    // gets its stop moved to breakeven and a RED one is closed. A failed chart
+    // read changes nothing -- open positions are never closed on a glitch.
+    let closeRedOutsideBox = false;
+    const markPrice = h.plus(l).dividedBy(2);
+    if (chartZoneGateEnabled) {
+      const zones = await readChartPriceZones();
+      if (zones.ok && !checkChartZone(zones, symbol, markPrice.toNumber()).allowed) {
+        const green = side === "long" ? markPrice.gte(entryPrice) : markPrice.lte(entryPrice);
+        if (!green) {
+          closeRedOutsideBox = true;
+          logger.warn({ symbol, tradeId: openTrade.id, markPrice: markPrice.toString(), entryPrice: entryPrice.toString() }, "chart_box_exit_red_closing");
+        } else if (!trailingStopPlaced) {
+          if (side === "long" ? stopPrice.lt(entryPrice) : stopPrice.gt(entryPrice)) {
+            await prisma.trade.update({ where: { id: openTrade.id }, data: { stopPrice: entryPrice.toString() } });
+            logger.info({ symbol, tradeId: openTrade.id, oldStopPrice: stopPrice.toString(), newStopPrice: entryPrice.toString() }, "chart_box_exit_green_stop_to_breakeven");
+            stopPrice = entryPrice;
+          }
+          // ...and arm the real TopstepX trailing stop right away instead of
+          // waiting for 1.5R (operator choice, same day). A failed placement
+          // retries on the next tick while price stays outside the box.
+          trailingStopPlaced = await this.activateTrailingStop(openTrade, symbol);
+          if (trailingStopPlaced) logger.info({ symbol, tradeId: openTrade.id }, "chart_box_exit_green_trailing_stop_armed");
+        }
+      }
+    }
+
+    const hitStop = closeRedOutsideBox || (!trailingStopPlaced && (side === "long" ? l.lte(stopPrice) : h.gte(stopPrice)));
 
     if (!hitStop && !hitTarget) return;
 
     const exitReason: "stop" | "target" = hitStop ? "stop" : "target";
-    const exitPrice = hitStop ? stopPrice : takeProfitPrice!;
+    const exitPrice = closeRedOutsideBox ? markPrice : hitStop ? stopPrice : takeProfitPrice!;
 
     // Re-check right here (not just reuse isFlatNow from above) --
     // requestClosePosition's own DOM interaction takes real time below, and
@@ -1180,7 +1225,7 @@ export class TradingEngine {
     logger.error({ symbol, tradeId: openTrade.id, exitReason, isFlat }, "live_position_past_exit_forcing_close");
 
     let closeResult = await broker.requestClosePosition?.(symbol);
-    let closeTag = "forced_after_bracket_failure";
+    let closeTag = closeRedOutsideBox ? "closed_red_outside_chart_box" : "forced_after_bracket_failure";
 
     if (!closeResult || closeResult.status === "rejected") {
       // Re-check right here, not just once at the top -- requestClosePosition's
@@ -2006,6 +2051,35 @@ export class TradingEngine {
       logger.warn({ symbol, side, strategyId, reason: rejection }, "risk_rejected");
       await this.emit({ type: "risk_rejected", symbol, reason: rejection });
       return { outcome: "risk_rejected", executed: false };
+    }
+
+    // TopstepX Tilt direction gate (risk/tiltGate.ts, operator request
+    // 2026-10-06): only enter with the crowd's side at >= 51%. Applies in
+    // live always, and in paper whenever the Tilt feed is configured -- it
+    // fails closed, so a live entry with no fresh Tilt reading is skipped.
+    if (tiltGateEnabled && (mode === TradingMode.LIVE || (settings.priceSource === PriceSource.BROWSER && settings.orderFlowEnabled))) {
+      const tilt = checkTiltAlignment(getLatestOrderFlowSnapshot(symbol), side, Date.now());
+      if (!tilt.allowed) {
+        const rejection = `${symbol} ${side} skipped: ${tilt.reason}`;
+        logger.warn({ symbol, side, strategyId, reason: tilt.reason }, "entry_blocked_tilt_mismatch");
+        await this.emit({ type: "risk_rejected", symbol, reason: rejection });
+        return { outcome: "risk_rejected", executed: false };
+      }
+      logger.info({ symbol, side, strategyId, reason: tilt.reason }, "tilt_gate_passed");
+    }
+
+    // Chart rectangle gate (risk/chartZoneGate.ts, operator request
+    // 2026-10-06): only enter while price is inside a rectangle drawn on this
+    // symbol's TopstepX chart; no rectangle means no trade. Same scope as the
+    // Tilt gate -- the chart only exists when trading through the browser.
+    if (chartZoneGateEnabled && (mode === TradingMode.LIVE || settings.priceSource === PriceSource.BROWSER)) {
+      const zone = checkChartZone(await readChartPriceZones(), symbol, closePrice.toNumber());
+      if (!zone.allowed) {
+        logger.warn({ symbol, side, strategyId, reason: zone.reason }, "entry_blocked_outside_chart_zone");
+        await this.emit({ type: "risk_rejected", symbol, reason: `${symbol} ${side} skipped: ${zone.reason}` });
+        return { outcome: "risk_rejected", executed: false };
+      }
+      logger.info({ symbol, side, strategyId, reason: zone.reason }, "chart_zone_gate_passed");
     }
 
     const decisionExplanation = decisionExplanationPrefix + explainScore(symbol, side, decisionGated, settings.minScoreThreshold);

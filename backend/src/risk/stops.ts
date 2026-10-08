@@ -8,7 +8,42 @@
  * model implies just because the last swing point was far away.
  */
 import { Decimal } from "decimal.js";
-import type { OhlcBar } from "../regime/indicators.js";
+import { atr, type OhlcBar } from "../regime/indicators.js";
+
+/**
+ * Minimum take-profit distance, as a multiple of the 5-minute ATR (2026-10-06,
+ * operator report: "the tp is only a few points from entry, which is making
+ * nothing but losing trades"). Live targets were coming from the 1-minute
+ * ATR or the nearest S/R level with no floor at all -- 0.25-2pt targets with
+ * 1-3 tick stops, knocked out by ordinary noise in seconds. With the stop at
+ * 1/MIN_REWARD_RISK_RATIO of the target, a 3x floor puts the stop at one
+ * 5-minute ATR.
+ */
+export const MIN_TARGET_ATR5_MULTIPLE = new Decimal(3);
+
+/**
+ * ATR(14) of the 5-minute bars built from 1-minute bars (bucketed by clock
+ * time). Null when there aren't enough bars for a reading.
+ */
+export function fiveMinuteAtrPoints(oneMinuteBars: OhlcBar[]): Decimal | null {
+  const buckets = new Map<number, OhlcBar>();
+  for (const bar of oneMinuteBars) {
+    const key = Math.floor(bar.time.getTime() / 300_000);
+    const existing = buckets.get(key);
+    if (!existing) {
+      buckets.set(key, { ...bar });
+    } else {
+      existing.high = Math.max(existing.high, bar.high);
+      existing.low = Math.min(existing.low, bar.low);
+      existing.close = bar.close;
+      existing.volume += bar.volume;
+    }
+  }
+  const fiveMinuteBars = [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([, b]) => b);
+  const series = atr(fiveMinuteBars).filter((v) => !Number.isNaN(v));
+  const last = series[series.length - 1];
+  return last === undefined || last <= 0 ? null : new Decimal(last);
+}
 
 export interface StopPlan {
   stopPrice: Decimal;
@@ -238,7 +273,14 @@ export function computeInitialStop(
 // when the trade hits 65% of its tp goal"): raised from 0.5 to 0.65, so the
 // real trailing order arms later and a trade has to earn more of its target
 // before its structural stop is handed over to a trail.
+//
+// 2026-10-06 (operator instruction: "set a trailing stop when price hits 1.5R"):
+// activation is now measured in R -- multiples of the trade's own stop
+// distance -- instead of a fraction of the target. With the 3:1 target that
+// is the halfway point. TRAILING_STOP_ACTIVATION_FRACTION is kept for its
+// history only; nothing reads it any more.
 export const TRAILING_STOP_ACTIVATION_FRACTION = 0.65;
+export const TRAILING_STOP_ACTIVATION_R = 1.5;
 
 // Fallback trailing-stop distance, in TICKS, for instruments with no
 // trailingStopTickBand of their own (2026-09-09, operator instruction: "a
@@ -550,14 +592,29 @@ export function roundAwayFromEntry(price: Decimal, entryPrice: Decimal, tickSize
   return price.gte(entryPrice) ? price.toNearest(tickSize, Decimal.ROUND_CEIL) : price.toNearest(tickSize, Decimal.ROUND_FLOOR);
 }
 
-/** Has price reached TRAILING_STOP_ACTIVATION_FRACTION of the way from entry to the take-profit target, in the trade's favor? */
+/**
+ * Has price moved TRAILING_STOP_ACTIVATION_R times the trade's ORIGINAL risk
+ * in its favor (1.5R in profit)?
+ *
+ * R comes from the take-profit distance / MIN_REWARD_RISK_RATIO when a target
+ * exists -- every target is built at 3R, and unlike the stop it doesn't move
+ * after entry. 2026-10-06: the chart-box rule moving a stop to breakeven made
+ * the stop distance zero, so measuring R off the live stop meant the trail
+ * could never arm on that trade again. The stop distance is only the fallback
+ * for a trade with no target.
+ */
 export function hasReachedTrailingStopActivation(
   entryPrice: Decimal,
-  takeProfitPrice: Decimal,
+  stopPrice: Decimal,
   side: "long" | "short",
   high: Decimal,
-  low: Decimal
+  low: Decimal,
+  takeProfitPrice: Decimal | null = null
 ): boolean {
-  const activationPrice = entryPrice.plus(takeProfitPrice.minus(entryPrice).times(TRAILING_STOP_ACTIVATION_FRACTION));
-  return side === "long" ? high.gte(activationPrice) : low.lte(activationPrice);
+  const riskPoints = takeProfitPrice !== null
+    ? takeProfitPrice.minus(entryPrice).abs().dividedBy(MIN_REWARD_RISK_RATIO)
+    : entryPrice.minus(stopPrice).abs();
+  if (riskPoints.isZero()) return false;
+  const move = riskPoints.times(TRAILING_STOP_ACTIVATION_R);
+  return side === "long" ? high.gte(entryPrice.plus(move)) : low.lte(entryPrice.minus(move));
 }
