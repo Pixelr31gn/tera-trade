@@ -25,7 +25,7 @@ export function checkChartZone(read: ChartZoneRead, symbol: string, price: numbe
   }
   const zones = read.zonesBySymbol.get(symbol) ?? [];
   if (zones.length === 0) {
-    return { allowed: false, reason: `no rectangle drawn on the ${symbol} chart` };
+    return { allowed: false, reason: `no active rectangle on the ${symbol} chart (a box must cover the current time, or extend right)` };
   }
   const inside = zones.find((z) => price >= z.low && price <= z.high);
   if (inside) {

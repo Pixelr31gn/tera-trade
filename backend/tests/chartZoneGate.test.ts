@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chartSymbolToInstrument, type ChartZoneRead } from "../src/browserControl/chartZones.js";
+import { chartSymbolToInstrument, isRectangleActive, type ChartZoneRead } from "../src/browserControl/chartZones.js";
 import { checkChartZone } from "../src/risk/chartZoneGate.js";
 
 function read(zones: Record<string, Array<[number, number]>>, charted: string[] = Object.keys(zones)): ChartZoneRead {
@@ -42,7 +42,7 @@ describe("checkChartZone", () => {
   it("blocks a symbol with a chart but no rectangle", () => {
     const c = checkChartZone(read({ NQ: [] }), "NQ", 31484);
     expect(c.allowed).toBe(false);
-    expect(c.reason).toContain("no rectangle");
+    expect(c.reason).toContain("no active rectangle");
   });
 
   it("blocks a symbol no chart is showing", () => {
@@ -53,5 +53,29 @@ describe("checkChartZone", () => {
 
   it("fails closed when the chart can't be read", () => {
     expect(checkChartZone({ ok: false, error: "tab not found" }, "NQ", 31484).allowed).toBe(false);
+  });
+});
+
+describe("isRectangleActive -- a box only counts while it covers now", () => {
+  const NOW = Date.parse("2026-10-11T23:22:00Z") / 1000;
+  const h = 3600;
+
+  it("ignores a box that ended in the past (the Oct 8 box behind trades #263-#265)", () => {
+    const from = Date.parse("2026-10-08T15:24:00Z") / 1000;
+    const to = Date.parse("2026-10-08T17:20:00Z") / 1000;
+    expect(isRectangleActive(from, to, false, false, NOW)).toBe(false);
+  });
+
+  it("counts a box whose left/right edges span the current time", () => {
+    expect(isRectangleActive(NOW - h, NOW + h, false, false, NOW)).toBe(true);
+  });
+
+  it("ignores a box that starts in the future", () => {
+    expect(isRectangleActive(NOW + h, NOW + 2 * h, false, false, NOW)).toBe(false);
+  });
+
+  it("keeps a box open to the right when it extends right", () => {
+    expect(isRectangleActive(NOW - 2 * h, NOW - h, false, true, NOW)).toBe(true);
+    expect(isRectangleActive(NOW + h, NOW + 2 * h, true, false, NOW)).toBe(true);
   });
 });

@@ -44,9 +44,12 @@ const READ_RECTANGLES_SCRIPT = `(() => {
     const rects = [];
     for (const s of c.getAllShapes()) {
       if (s.name !== "rectangle") continue;
-      const pts = c.getShapeById(s.id).getPoints() || [];
+      const shape = c.getShapeById(s.id);
+      const pts = shape.getPoints() || [];
       if (pts.length < 2) continue;
-      rects.push([pts[0].price, pts[1].price]);
+      let props = {};
+      try { props = shape.getProperties() || {}; } catch (e) {}
+      rects.push([pts[0].price, pts[1].price, Math.min(pts[0].time, pts[1].time), Math.max(pts[0].time, pts[1].time), !!props.extendLeft, !!props.extendRight]);
     }
     charts.push({ symbol: c.symbol(), rects });
   }
@@ -66,11 +69,21 @@ export function chartSymbolToInstrument(chartSymbol: string): string | null {
   return ROOT_TO_SYMBOL[root] ?? null;
 }
 
-async function readFromPage(page: Page): Promise<ChartZoneRead> {
+/** Is a rectangle spanning [fromSec, toSec] (chart time, epoch seconds) active at `nowSec`? */
+export function isRectangleActive(fromSec: number, toSec: number, extendLeft: boolean, extendRight: boolean, nowSec: number): boolean {
+  if (!Number.isFinite(fromSec) || !Number.isFinite(toSec)) return false;
+  return (extendLeft || nowSec >= fromSec) && (extendRight || nowSec <= toSec);
+}
+
+async function readFromPage(page: Page, nowMs: number): Promise<ChartZoneRead> {
   const frame = page.frames().find((f) => f.name().startsWith("tradingview_"));
   if (!frame) return { ok: false, error: "no TradingView chart found on the TopstepX page" };
-  const raw = (await frame.evaluate(READ_RECTANGLES_SCRIPT)) as { error?: string; charts?: Array<{ symbol: string; rects: Array<[number, number]> }> };
+  const raw = (await frame.evaluate(READ_RECTANGLES_SCRIPT)) as {
+    error?: string;
+    charts?: Array<{ symbol: string; rects: Array<[number, number, number, number, boolean, boolean]> }>;
+  };
   if (raw.error || !raw.charts) return { ok: false, error: raw.error ?? "chart read returned nothing" };
+  const nowSec = nowMs / 1000;
   const zonesBySymbol = new Map<string, ChartPriceZone[]>();
   const chartedSymbols = new Set<string>();
   for (const chart of raw.charts) {
@@ -78,8 +91,13 @@ async function readFromPage(page: Page): Promise<ChartZoneRead> {
     if (!symbol) continue;
     chartedSymbols.add(symbol);
     const zones = zonesBySymbol.get(symbol) ?? [];
-    for (const [a, b] of chart.rects) {
+    for (const [a, b, fromSec, toSec, extendLeft, extendRight] of chart.rects) {
       if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+      // Only a box that covers NOW counts (2026-10-11, operator choice): a
+      // box from an earlier day sat off-screen to the left and still let
+      // trades through when price came back to its level. Extend left/right
+      // keeps a box open in that direction.
+      if (!isRectangleActive(fromSec, toSec, extendLeft, extendRight, nowSec)) continue;
       zones.push({ low: Math.min(a, b), high: Math.max(a, b), chartSymbol: chart.symbol });
     }
     zonesBySymbol.set(symbol, zones);
@@ -98,7 +116,7 @@ export async function readChartPriceZones(): Promise<ChartZoneRead> {
     const settings = getSettings();
     const browser = await connectToChrome(settings.browserCdpUrl);
     const page = await findPage(browser, settings.browserUrlMatch);
-    read = page ? await readFromPage(page) : { ok: false, error: "TopstepX tab not found" };
+    read = page ? await readFromPage(page, Date.now()) : { ok: false, error: "TopstepX tab not found" };
   } catch (err) {
     read = { ok: false, error: String(err) };
   }
