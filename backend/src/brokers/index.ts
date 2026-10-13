@@ -23,7 +23,15 @@ export { TradeseaBrowserControlBroker } from "./tradeseaBrowserControlBroker.js"
 // marker when no contentMarker is passed.
 export const TRADESEA_AUTHENTICATED_PAGE_MARKER = "UP&L";
 
-export async function getBroker(kind: BrokerKind): Promise<BrokerClient> {
+// `mirror: false` opts a caller out of multi-account fan-out. Only the remote
+// executor service (multiAccount/executorMain.ts) passes it -- an executor must
+// never mirror its own commands onward. Every other caller (engine startup, the
+// manual-order and close routes, loop.ts's per-trade fallback) gets the mirrored
+// broker, so there is exactly ONE place that decides whether an order fans out
+// (2026-10-13: previously only index.ts's startup wrap did, so manual orders and
+// closes silently never reached the other accounts). With MIRROR_EXECUTORS unset,
+// maybeWrapWithFanOut returns the plain broker, so default behaviour is unchanged.
+export async function getBroker(kind: BrokerKind, opts: { mirror?: boolean } = {}): Promise<BrokerClient> {
   if (kind === BrokerKind.SIMULATED) return new SimulatedBroker();
   if (kind === BrokerKind.PROJECTX) {
     const { ProjectXGatewayBroker } = await import("./projectXGatewayBroker.js");
@@ -31,7 +39,10 @@ export async function getBroker(kind: BrokerKind): Promise<BrokerClient> {
   }
   if (kind === BrokerKind.BROWSER_CONTROL) {
     const { BrowserControlBroker } = await import("./browserControlBroker.js");
-    return new BrowserControlBroker();
+    const broker = new BrowserControlBroker();
+    if (opts.mirror === false) return broker;
+    const { maybeWrapWithFanOut } = await import("../multiAccount/wireMirror.js");
+    return maybeWrapWithFanOut(broker, kind);
   }
   if (kind === BrokerKind.TRADESEA_BROWSER_CONTROL) {
     const { TradeseaBrowserControlBroker } = await import("./tradeseaBrowserControlBroker.js");

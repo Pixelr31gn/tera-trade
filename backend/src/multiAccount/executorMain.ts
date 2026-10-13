@@ -24,7 +24,8 @@ async function main(): Promise<void> {
   const cfg = loadExecutorServerConfig();
 
   logger.info("connecting local browser-control broker to this PC's Chrome...");
-  const broker = await getBroker(BrokerKind.BROWSER_CONTROL);
+  // mirror:false -- an executor runs commands, it must never fan them out again.
+  const broker = await getBroker(BrokerKind.BROWSER_CONTROL, { mirror: false });
   await broker.connect();
 
   const app = buildExecutorServer({ broker, secret: cfg.secret });
