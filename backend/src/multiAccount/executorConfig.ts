@@ -21,6 +21,8 @@ export interface ExecutorServerConfig {
   host: string;
   port: number;
   secret: string;
+  /** Seconds of master silence before the executor flattens itself. 0 disables the dead-man switch. */
+  deadManSeconds: number;
 }
 
 export function loadExecutorServerConfig(): ExecutorServerConfig {
@@ -33,7 +35,13 @@ export function loadExecutorServerConfig(): ExecutorServerConfig {
     throw new Error(`EXECUTOR_PORT must be a valid port, got "${process.env.EXECUTOR_PORT}"`);
   }
   const host = (process.env.EXECUTOR_HOST ?? "0.0.0.0").trim();
-  return { host, port, secret };
+  // Default 60 s: six missed 10 s heartbeats, so a network blip or a tsx-watch
+  // restart of the master never trips it, but a dead master does within a minute.
+  const deadManSeconds = Number(process.env.EXECUTOR_DEADMAN_SECONDS ?? 60);
+  if (!Number.isFinite(deadManSeconds) || deadManSeconds < 0 || (deadManSeconds > 0 && deadManSeconds < 20)) {
+    throw new Error(`EXECUTOR_DEADMAN_SECONDS must be 0 (off) or at least 20, got "${process.env.EXECUTOR_DEADMAN_SECONDS}"`);
+  }
+  return { host, port, secret, deadManSeconds };
 }
 
 export interface MirrorTarget {

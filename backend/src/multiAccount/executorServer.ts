@@ -32,6 +32,8 @@ export interface ExecutorServerOptions {
    * "NQ") without placing anything. Optional: absent => /prepare answers 501.
    */
   prepare?: (symbol: string) => Promise<PrepareResult>;
+  /** Dead-man switch refreshed by POST /heartbeat. Absent => /heartbeat answers 501. */
+  deadMan?: { beat(): void; isArmed(): boolean };
 }
 
 export function buildExecutorServer(opts: ExecutorServerOptions): FastifyInstance {
@@ -64,6 +66,20 @@ export function buildExecutorServer(opts: ExecutorServerOptions): FastifyInstanc
       reply.code(500);
       return { error: String(err) };
     }
+  });
+
+  // The master's "I'm alive" ping -- arms/refreshes the dead-man switch.
+  app.post("/heartbeat", async (req, reply) => {
+    if (!secretValid(req.headers["x-mirror-secret"], opts.secret)) {
+      reply.code(401);
+      return { error: "unauthorized" };
+    }
+    if (!opts.deadMan) {
+      reply.code(501);
+      return { error: "dead-man switch is disabled on this executor" };
+    }
+    opts.deadMan.beat();
+    return { ok: true, armed: opts.deadMan.isArmed() };
   });
 
   // Puts the ticket on a contract and clicks nothing -- see ticketPrep.ts.

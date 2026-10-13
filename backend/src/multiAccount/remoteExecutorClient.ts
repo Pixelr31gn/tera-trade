@@ -81,6 +81,22 @@ export class RemoteExecutorClient implements RemoteExecutor {
     }
   }
 
+  /** Refreshes this executor's dead-man switch. Throws on a non-2xx or timeout. */
+  async heartbeat(): Promise<void> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}/heartbeat`, {
+        method: "POST",
+        headers: { "x-mirror-secret": this.secret },
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`executor ${this.name} heartbeat HTTP ${res.status}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async health(): Promise<boolean> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);

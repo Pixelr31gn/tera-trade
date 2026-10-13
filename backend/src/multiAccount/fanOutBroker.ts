@@ -78,14 +78,41 @@ export class FanOutBroker implements BrokerClient {
   constructor(
     private readonly master: BrokerClient,
     private readonly executors: readonly RemoteExecutor[],
+    private readonly heartbeatIntervalMs: number = 10_000,
   ) {}
 
   // ---- lifecycle: master drives; executors are their own services ----------
-  connect(): Promise<void> {
-    return this.master.connect();
+  async connect(): Promise<void> {
+    await this.master.connect();
+    this.startHeartbeats();
   }
-  disconnect(): Promise<void> {
+  async disconnect(): Promise<void> {
+    this.stopHeartbeats();
     return this.master.disconnect();
+  }
+
+  // Dead-man heartbeats: tell every executor the master is alive. They run
+  // from the long-lived engine broker's connect() until its disconnect(); a
+  // short-lived instance (manual-order route, scripts) beats once on connect and
+  // stops on disconnect, which is harmless -- if the engine is up its own timer
+  // keeps every executor armed, and if it is down they SHOULD trip.
+  private heartbeatTimer: NodeJS.Timeout | undefined;
+
+  private startHeartbeats(): void {
+    if (this.heartbeatTimer || this.executors.every((e) => !e.heartbeat)) return;
+    const beat = () => {
+      for (const e of this.executors) {
+        e.heartbeat?.().catch((err) => logger.warn({ executor: e.name, err: String(err) }, "mirror_heartbeat_failed"));
+      }
+    };
+    beat();
+    this.heartbeatTimer = setInterval(beat, this.heartbeatIntervalMs);
+    this.heartbeatTimer.unref?.();
+  }
+
+  private stopHeartbeats(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = undefined;
   }
 
   // ---- reads / decisions: master only (never mirrored) ---------------------

@@ -15,7 +15,8 @@
 import { getBroker } from "../brokers/index.js";
 import { BrokerKind } from "../core/config.js";
 import { childLogger } from "../core/logger.js";
-import { getInstrument } from "../marketData/instruments.js";
+import { ACTIVE_INSTRUMENTS, getInstrument } from "../marketData/instruments.js";
+import { DeadManSwitch, flattenAllPositions } from "./deadMan.js";
 import { loadExecutorServerConfig } from "./executorConfig.js";
 import { buildExecutorServer } from "./executorServer.js";
 import { prepareTicket } from "./ticketPrep.js";
@@ -30,9 +31,23 @@ async function main(): Promise<void> {
   const broker = await getBroker(BrokerKind.BROWSER_CONTROL, { mirror: false });
   await broker.connect();
 
+  const deadMan =
+    cfg.deadManSeconds > 0
+      ? new DeadManSwitch({
+          timeoutMs: cfg.deadManSeconds * 1000,
+          onTrip: async () => {
+            const report = await flattenAllPositions(broker, ACTIVE_INSTRUMENTS.map((i) => i.symbol));
+            logger.warn(report, "dead_man_flatten_finished");
+          },
+        })
+      : undefined;
+  deadMan?.start();
+  logger.info({ deadManSeconds: cfg.deadManSeconds }, deadMan ? "dead_man_switch_enabled" : "dead_man_switch_DISABLED");
+
   const app = buildExecutorServer({
     broker,
     secret: cfg.secret,
+    deadMan,
     // engine symbol ("ES") -> this PC's contract prefix ("MES"), same table the broker uses
     prepare: (symbol) => prepareTicket(getInstrument(symbol).brokerContractPrefix),
   });
@@ -41,6 +56,7 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "executor_shutting_down");
+    deadMan?.stop();
     await app.close().catch(() => {});
     await broker.disconnect().catch(() => {});
     process.exit(0);

@@ -35,6 +35,11 @@ export type MirrorCommandKind = MirrorCommand["kind"];
 export interface RemoteExecutor {
   readonly name: string; // account/PC label, e.g. "pc2"
   dispatch(command: MirrorCommand): Promise<OrderResult>;
+  /**
+   * "The master is alive" ping that arms/refreshes the executor's dead-man
+   * switch (deadMan.ts). Optional so plain test fakes need not implement it.
+   */
+  heartbeat?(): Promise<void>;
 }
 
 /** One remote's outcome for a single mirrored command. */
