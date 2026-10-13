@@ -75,6 +75,7 @@ describe("mirror integration (real HTTP)", () => {
     };
 
     const result = await fan.placeOrder(order);
+    await fan.settle();
 
     // engine sees the master's result, unchanged
     expect(result.brokerOrderId).toBe("master-filled");

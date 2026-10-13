@@ -68,6 +68,7 @@ describe("FanOutBroker", () => {
     const fan = new FanOutBroker(broker, [a.executor, b.executor]);
 
     await fan.placeOrder(sampleOrder);
+    await fan.settle();
 
     expect(calls.map((c) => c.method)).toEqual(["placeOrder"]);
     expect(a.received).toEqual([{ kind: "placeOrder", request: sampleOrder }]);
@@ -81,6 +82,7 @@ describe("FanOutBroker", () => {
     const fan = new FanOutBroker(broker, [bad.executor, rejecting.executor]);
 
     const result = await fan.placeOrder(sampleOrder);
+    await fan.settle();
 
     expect(result).toEqual({ brokerOrderId: "master-123", status: "filled" });
     // both executors were still attempted
@@ -112,6 +114,7 @@ describe("FanOutBroker", () => {
     await fan.placeTrailingStop("NQ", "long", 3, 10);
     await fan.placeTakeProfitOrder("NQ", "long", 3, new Decimal(20100));
     await fan.cancelRestingOrder("NQ");
+    await fan.settle();
 
     expect(a.received).toEqual([
       { kind: "requestClosePosition", symbol: "NQ" },

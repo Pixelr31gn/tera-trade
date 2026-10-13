@@ -71,6 +71,10 @@ function requireMethod<T>(method: T | undefined, broker: BrokerClient, kind: str
 }
 
 export class FanOutBroker implements BrokerClient {
+  // tail of each remote's command queue, keyed by executor name (see mirror())
+  private readonly tails = new Map<string, Promise<RemoteOutcome>>();
+  private readonly pendingLogs = new Set<Promise<void>>();
+
   constructor(
     private readonly master: BrokerClient,
     private readonly executors: readonly RemoteExecutor[],
@@ -138,20 +142,41 @@ export class FanOutBroker implements BrokerClient {
    * sees exactly the master broker's own behaviour, including a throw.
    */
   private async mirror(cmd: MirrorCommand): Promise<OrderResult> {
-    const remotePromises: Promise<RemoteOutcome>[] = this.executors.map((e) =>
-      e.dispatch(cmd).then(
-        (result): RemoteOutcome => ({ name: e.name, result }),
-        (err): RemoteOutcome => ({ name: e.name, error: String(err) }),
-      ),
-    );
+    // Per-remote FIFO queue: the master serializes ticket actions in call order
+    // (BrowserControlBroker's ticketChain), so each remote must apply commands in
+    // that same order -- otherwise a contract switch ("close MNQ", then "open MES")
+    // could land reversed on a remote, the exact interleaving behind the
+    // 2026-10-06 wrong-symbol incident. One queue per remote, so a slow account
+    // never delays another account. A failed command never blocks the ones behind
+    // it (each outcome promise below always resolves).
+    const remoteOutcomes: Promise<RemoteOutcome>[] = this.executors.map((e) => {
+      const previous = this.tails.get(e.name) ?? Promise.resolve();
+      const outcome: Promise<RemoteOutcome> = previous.then(() =>
+        e.dispatch(cmd).then(
+          (result): RemoteOutcome => ({ name: e.name, result }),
+          (err): RemoteOutcome => ({ name: e.name, error: String(err) }),
+        ),
+      );
+      this.tails.set(e.name, outcome);
+      return outcome;
+    });
 
     // Master runs with the same timing; a master throw propagates unchanged
     // (matches a direct broker call -- the engine's existing contract).
     const masterResult = await applyMirrorCommand(this.master, cmd);
 
-    const outcomes = await Promise.all(remotePromises);
-    this.logOutcomes(cmd, masterResult, outcomes);
+    // The engine gets the master's result immediately -- it never waits on a slow
+    // or hung remote (up to the client's timeout). Remote outcomes are logged
+    // when they arrive; settle() lets tests (and shutdown) wait for them.
+    const logged = Promise.all(remoteOutcomes).then((outcomes) => this.logOutcomes(cmd, masterResult, outcomes));
+    this.pendingLogs.add(logged);
+    void logged.finally(() => this.pendingLogs.delete(logged));
     return masterResult;
+  }
+
+  /** Resolves once every queued remote command has finished and been logged. */
+  async settle(): Promise<void> {
+    await Promise.all([...this.pendingLogs]);
   }
 
   private logOutcomes(cmd: MirrorCommand, masterResult: OrderResult, outcomes: RemoteOutcome[]): void {
