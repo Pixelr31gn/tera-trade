@@ -9,6 +9,7 @@
  */
 import type { OrderResult } from "../brokers/types.js";
 import type { MirrorCommand, RemoteExecutor } from "./fanOutTypes.js";
+import type { PrepareResult } from "./ticketPrep.js";
 import { decodeResult, encodeCommand } from "./wireCodec.js";
 
 export interface RemoteExecutorClientOptions {
@@ -50,6 +51,31 @@ export class RemoteExecutorClient implements RemoteExecutor {
         throw new Error(`executor ${this.name} HTTP ${res.status}: ${text.slice(0, 300)}`);
       }
       return decodeResult(await res.json());
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Asks the remote to point its order ticket at the contract for `symbol`
+   * ("ES" -> MES) without placing anything. Resolves with the remote's own
+   * report; a non-2xx (including 501 from an older executor) throws.
+   */
+  async prepare(symbol: string): Promise<PrepareResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}/prepare`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-mirror-secret": this.secret },
+        body: JSON.stringify({ symbol }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`executor ${this.name} HTTP ${res.status}: ${text.slice(0, 300)}`);
+      }
+      return (await res.json()) as PrepareResult;
     } finally {
       clearTimeout(timer);
     }

@@ -15,8 +15,10 @@
 import { getBroker } from "../brokers/index.js";
 import { BrokerKind } from "../core/config.js";
 import { childLogger } from "../core/logger.js";
+import { getInstrument } from "../marketData/instruments.js";
 import { loadExecutorServerConfig } from "./executorConfig.js";
 import { buildExecutorServer } from "./executorServer.js";
+import { prepareTicket } from "./ticketPrep.js";
 
 const logger = childLogger("executorMain");
 
@@ -28,7 +30,12 @@ async function main(): Promise<void> {
   const broker = await getBroker(BrokerKind.BROWSER_CONTROL, { mirror: false });
   await broker.connect();
 
-  const app = buildExecutorServer({ broker, secret: cfg.secret });
+  const app = buildExecutorServer({
+    broker,
+    secret: cfg.secret,
+    // engine symbol ("ES") -> this PC's contract prefix ("MES"), same table the broker uses
+    prepare: (symbol) => prepareTicket(getInstrument(symbol).brokerContractPrefix),
+  });
   await app.listen({ host: cfg.host, port: cfg.port });
   logger.info({ host: cfg.host, port: cfg.port }, "executor_service_listening");
 

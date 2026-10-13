@@ -19,6 +19,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { BrokerClient } from "../brokers/types.js";
 import { childLogger } from "../core/logger.js";
 import { applyMirrorCommand } from "./fanOutBroker.js";
+import type { PrepareResult } from "./ticketPrep.js";
 import { decodeCommand, encodeResult } from "./wireCodec.js";
 
 const logger = childLogger("executorServer");
@@ -26,6 +27,11 @@ const logger = childLogger("executorServer");
 export interface ExecutorServerOptions {
   broker: BrokerClient;
   secret: string;
+  /**
+   * Points this PC's order ticket at the contract for an engine symbol ("ES",
+   * "NQ") without placing anything. Optional: absent => /prepare answers 501.
+   */
+  prepare?: (symbol: string) => Promise<PrepareResult>;
 }
 
 export function buildExecutorServer(opts: ExecutorServerOptions): FastifyInstance {
@@ -55,6 +61,32 @@ export function buildExecutorServer(opts: ExecutorServerOptions): FastifyInstanc
       // A thrown broker error is reported as a 500 so the master's client
       // records it as a dispatch failure (never silently as a success).
       logger.error({ action: command.kind, err: String(err) }, "executor_command_threw");
+      reply.code(500);
+      return { error: String(err) };
+    }
+  });
+
+  // Puts the ticket on a contract and clicks nothing -- see ticketPrep.ts.
+  app.post("/prepare", async (req, reply) => {
+    if (!secretValid(req.headers["x-mirror-secret"], opts.secret)) {
+      reply.code(401);
+      return { error: "unauthorized" };
+    }
+    if (!opts.prepare) {
+      reply.code(501);
+      return { error: "this executor does not support /prepare" };
+    }
+    const symbol = (req.body as { symbol?: unknown } | null)?.symbol;
+    if (typeof symbol !== "string" || symbol.length === 0) {
+      reply.code(400);
+      return { error: "body must be {\"symbol\": \"ES\"}" };
+    }
+    try {
+      const result = await opts.prepare(symbol);
+      logger.info({ symbol, ok: result.ok, contract: result.contract }, "executor_prepared_ticket");
+      return result;
+    } catch (err) {
+      logger.error({ symbol, err: String(err) }, "executor_prepare_threw");
       reply.code(500);
       return { error: String(err) };
     }
