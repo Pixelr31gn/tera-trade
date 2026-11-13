@@ -28,6 +28,9 @@ import { backfillDaily, ensureInstrumentsSeeded } from "./marketData/backfill.js
 import { ACTIVE_INSTRUMENTS } from "./marketData/instruments.js";
 import { LiveBarPoller } from "./marketData/live.js";
 import { MinuteBarAggregator } from "./marketData/minuteBarAggregator.js";
+import { setFormingBarSource } from "./engine/formingBar.js";
+import { evaluateMaProximityForActiveSymbols } from "./engine/maProximity.js";
+import { CHART_OVERLAY_REFRESH_MS, renderChartOverlay, toOverlaySymbols } from "./browserControl/chartOverlay.js";
 
 // Defense in depth: a crashed backend means zero risk oversight (no kill
 // switch enforcement, no position monitoring, nothing) until someone notices
@@ -185,6 +188,8 @@ async function main(): Promise<void> {
     // rate: strategies were unknowingly trading 20-*tick* breakouts, not
     // 20-*minute* ones).
     const minuteBars = new MinuteBarAggregator();
+    // Lets the 15s continuous scan see the still-forming minute (engine/formingBar.ts).
+    setFormingBarSource((symbol) => minuteBars.getFormingBar(symbol));
     const watcher = new BrowserWatcher(
       {
         cdpUrl: settings.browserCdpUrl,
@@ -465,6 +470,22 @@ async function main(): Promise<void> {
   runDealerGexRefresh();
   const dealerGexRefreshTimer = setInterval(runDealerGexRefresh, DEALER_GEX_REFRESH_INTERVAL_MS);
 
+  // 20 MA checklist overlay on the TopstepX chart (2026-11-11, operator
+  // request) -- see browserControl/chartOverlay.ts for why it can't touch
+  // price extraction or clicks. Browser price feed only; overlap-guarded.
+  let chartOverlayRunning = false;
+  const runChartOverlay = (): void => {
+    if (chartOverlayRunning || settings.priceSource !== PriceSource.BROWSER) return;
+    chartOverlayRunning = true;
+    evaluateMaProximityForActiveSymbols()
+      .then((checks) => renderChartOverlay(toOverlaySymbols(checks)))
+      .catch((err) => logger.warn({ err: String(err) }, "chart_overlay_refresh_failed"))
+      .finally(() => {
+        chartOverlayRunning = false;
+      });
+  };
+  const chartOverlayTimer = setInterval(runChartOverlay, CHART_OVERLAY_REFRESH_MS);
+
   // bars_daily (dailyTrendCache.ts's v1/v2 daily-trend factor, and
   // dailyEmaTrendCache.ts's v3 daily-EMA20 factor) was found 11 days stale
   // (2026-07-20 DB audit) -- nothing had ever kept it current after the
@@ -506,6 +527,7 @@ async function main(): Promise<void> {
     clearInterval(macroIndicatorRefreshTimer);
     clearInterval(continuousScanTimer);
     clearInterval(dealerGexRefreshTimer);
+    clearInterval(chartOverlayTimer);
     clearInterval(dailyBarRefreshTimer);
     clearInterval(dailyPlanSchedulerTimer);
     stopDataSource();

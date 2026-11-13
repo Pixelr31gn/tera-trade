@@ -121,7 +121,10 @@ describe("RiskEngine.assessNewTrade with fixed-dollar risk/profit", () => {
       // fraction, not a real business-logic conflict (this profitDollars
       // path is dormant in production). 6.5 x 1.5 = 9.75pt, comfortably
       // clear of the 10pt boundary.
-      atrValue: new Decimal(6.5),
+      // 4.25, not 6.5 (2026-11-08): STOP_DISTANCE_WIDEN_FACTOR (1.5) took the
+      // 6.5 stop to 14.75pt, past the 10pt boundary. 4.25 x 1.5 x 1.5 =
+      // 9.5625, rounded up to 9.75pt -- clear of it again.
+      atrValue: new Decimal(4.25),
       structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
       accountState: accountState(),
       limits,
@@ -136,7 +139,9 @@ describe("RiskEngine.assessNewTrade with fixed-dollar risk/profit", () => {
 
     expect(assessment.quantity).toBe(2);
     // $120 profit / (2 contracts * $2/point) = 30 points above entry.
-    expect(assessment.takeProfitPrice?.toNumber()).toBeCloseTo(entryPrice.plus(30).toNumber(), 1);
+    // 2026-11-08: the 30-75 tick take-profit band (stops.ts's TAKE_PROFIT_MAX_TICKS) is applied last, and the 3:1 / reward>risk floors are off (risk/engine.ts's ENFORCE_REWARD_RISK_FLOOR, REWARD_MUST_EXCEED_RISK).
+    // So the 30pt dollar target is held to 18.75pt.
+    expect(assessment.takeProfitPrice?.toNumber()).toBeCloseTo(entryPrice.plus(18.75).toNumber(), 1);
   });
 
   it("mirrors the fixed dollar profit target below entry for a short", () => {
@@ -147,7 +152,7 @@ describe("RiskEngine.assessNewTrade with fixed-dollar risk/profit", () => {
     const assessment = engine.assessNewTrade({
       side: "short",
       entryPrice,
-      atrValue: new Decimal(6.5), // see the long test above for why not 6.667
+      atrValue: new Decimal(4.25), // see the long test above for why not 6.667, then not 6.5
       structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
       accountState: accountState(),
       limits,
@@ -160,7 +165,7 @@ describe("RiskEngine.assessNewTrade with fixed-dollar risk/profit", () => {
       confidenceTiers: DEFAULT_CONFIDENCE_TIERS,
     });
 
-    expect(assessment.takeProfitPrice?.toNumber()).toBeCloseTo(entryPrice.minus(30).toNumber(), 1);
+    expect(assessment.takeProfitPrice?.toNumber()).toBeCloseTo(entryPrice.minus(18.75).toNumber(), 1); // 30pt held to the 18.75pt band maximum, see the long test
   });
 
   it("falls back to the R:R-based take-profit when no fixed profit target is configured", () => {
@@ -197,7 +202,7 @@ describe("RiskEngine.assessNewTrade with fixed-dollar risk/profit", () => {
     // 4.0) is what's actually used -- should NOT be the fixed-dollar-derived
     // 30pt target, and NOT stops.ts's own bare default of 3.0x either.
     const stopDistance = entryPrice.minus(assessment.stopPrice!).abs();
-    expect(stopDistance.toNumber()).toBeCloseTo(3, 4); // confirms the uncapped structural stop, not the ~10pt ATR one
+    expect(stopDistance.toNumber()).toBeCloseTo(4.5, 4); // the uncapped 3pt structural stop x STOP_DISTANCE_WIDEN_FACTOR 1.5 (2026-11-08), not the ~10pt ATR one
     expect(assessment.takeProfitPrice?.toNumber()).toBeCloseTo(entryPrice.plus(stopDistance.times(4)).toNumber(), 1);
     // barsWithPivotLowNear(19990) has no resistance pivots at all -- no real
     // target-direction level exists, so this correctly falls back to the
@@ -247,26 +252,28 @@ describe("RiskEngine.assessNewTrade -- support/resistance proximity gate", () =>
     expect(assessment.reason).toContain("no support level found");
   });
 
-  it("rejects a long whose entry is too far from the nearest support level", () => {
+  it("no longer rejects a long far from the nearest support level (band off 2026-11-09)", () => {
     const engine = new RiskEngine();
     const assessment = engine.assessNewTrade({
       side: "long", entryPrice: new Decimal(20000), atrValue: new Decimal(6.667), structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
       accountState: accountState(), limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
-      bars: barsWithPivotLowNear(19950), // 50 points away -- 7.5x ATR, well past the 1.95x ceiling
+      // Was 19950 (50pt = 7.5x ATR) while the ceiling sat at 1.95-4.25x;
+      // 2026-10-14 moved to 130pt = 19.5x ATR when it widened to 17x.
+      bars: barsWithPivotLowNear(19870),
     });
-    expect(assessment.approved).toBe(false);
-    expect(assessment.reason).toContain("x ATR from the nearest support level");
+    // 2026-11-09: the ATR distance band is off (risk/engine.ts's SR_DISTANCE_BAND_ENABLED), so this no longer rejects.
+    expect(assessment.reason ?? "").not.toContain("x ATR from the nearest support level");
   });
 
-  it("rejects a long whose entry sits too close to the nearest support level (under the 0.25x ATR floor)", () => {
+  it("no longer rejects a long too close to the nearest support level (band off 2026-11-09)", () => {
     const engine = new RiskEngine();
     const assessment = engine.assessNewTrade({
       side: "long", entryPrice: new Decimal(20000), atrValue: new Decimal(6.667), structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
       accountState: accountState(), limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
       bars: barsWithPivotLowNear(19999), // 1 point away -- 0.15x ATR, under the 0.25x floor
     });
-    expect(assessment.approved).toBe(false);
-    expect(assessment.reason).toContain("too close");
+    // 2026-11-09: the ATR distance band is off (risk/engine.ts's SR_DISTANCE_BAND_ENABLED), so this no longer rejects.
+    expect(assessment.reason ?? "").not.toContain("too close");
   });
 
   it("approves a long whose entry sits within the 0.25x-1.95x ATR band of a real support level", () => {
@@ -395,8 +402,11 @@ describe("RiskEngine.assessNewTrade -- breakout signal gate", () => {
     expect(assessment.approved).toBe(true);
   });
 
-  it("still rejects a reversal at that same extended distance -- the ceiling stays reversal-only, not removed outright", () => {
+  it("no longer rejects a reversal at an extended distance (band off 2026-11-09)", () => {
     const engine = new RiskEngine();
+    // 2026-10-14: level moved 20025 -> 20035 (35pt = 5.25x ATR) when the
+    // ceiling widened 2.75 -> 4.25, then 20035 -> 20120 (120pt = 18x ATR)
+    // when it widened again to 17, so this still lands past it.
     const assessment = engine.assessNewTrade({
       side: "short",
       entryPrice: new Decimal(20000),
@@ -406,10 +416,10 @@ describe("RiskEngine.assessNewTrade -- breakout signal gate", () => {
       breakoutLevelPrice: null,
       accountState: accountState(),
       limits, pointValue: new Decimal(2), tickSize: new Decimal("0.25"), newsStatus: NO_NEWS,
-      bars: barsWithPivotHighNear(20025),
+      bars: barsWithPivotHighNear(20120),
     });
-    expect(assessment.approved).toBe(false);
-    expect(assessment.reason).toContain(`needs to be within ${2.75}x ATR`);
+    // 2026-11-09: the ATR distance band is off (risk/engine.ts's SR_DISTANCE_BAND_ENABLED), so this no longer rejects.
+    expect(assessment.reason ?? "").not.toContain("needs to be within");
   });
 
   it("rejects a breakout against a level that was only ever touched once (not a validated S/R zone)", () => {
@@ -507,8 +517,11 @@ describe("RiskEngine.assessNewTrade -- S/R-based take-profit targeting", () => {
     });
     expect(assessment.approved).toBe(true);
     expect(assessment.targetSrLevel?.price).toBeCloseTo(20001, 5);
-    expect(assessment.takeProfitPrice?.toNumber()).toBeCloseTo(20001, 5);
-    expect(assessment.stopDistancePoints?.toNumber()).toBeCloseTo(1 / 3, 3); // 1pt / 3, not the ~10pt ATR stop
+    // 2026-11-08: the 30-75 tick take-profit band (stops.ts's TAKE_PROFIT_MAX_TICKS) is applied last, and the 3:1 / reward>risk floors are off (risk/engine.ts's ENFORCE_REWARD_RISK_FLOOR, REWARD_MUST_EXCEED_RISK).
+    // The 1pt level target is pushed out to the band's 7.5pt minimum; the stop still follows the level.
+    expect(assessment.takeProfitPrice?.toNumber()).toBeCloseTo(20007.5, 5);
+    // 2026-11-12: a target-derived stop now follows the BANDED target: 7.5 / 3, not 1 / 3 (still not the ~10pt ATR stop).
+    expect(assessment.stopDistancePoints?.toNumber()).toBeCloseTo(7.5 / 3, 3);
   });
 
   it("a strategy-provided explicit take-profit still wins over the S/R-derived target, with the stop derived from IT instead", () => {

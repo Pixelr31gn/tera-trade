@@ -324,6 +324,11 @@ model Trade {
   /// existed and for any trade with brokerKind "simulated" (SimulatedBroker doesn't implement
   /// placeTakeProfitOrder).
   takeProfitOrderPlaced Boolean   @default(false) @map("take_profit_order_placed")
+  /// 2026-11-12 (operator: "lets make the sl hard too just like the tp is set for a hard tp"):
+  /// a real broker-side Stop Market order is resting at stopPrice. Once true, manageLiveOpenTrade's
+  /// own stop check only acts as a backstop (price well past the stop while the broker still shows
+  /// the position open) and otherwise defers to isPositionFlat seeing the broker's own fill.
+  stopOrderPlaced       Boolean   @default(false) @map("stop_order_placed")
   /// v1.3 operator override (Positions panel "let it ride" toggle) -- once true, the internal
   /// take-profit check in engine/loop.ts's manageLiveOpenTrade no longer force-closes this trade
   /// at its stored takeProfitPrice; only the real trailing-stop order (once placed) can close it.

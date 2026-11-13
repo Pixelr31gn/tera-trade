@@ -9,9 +9,13 @@ import { Decimal } from "decimal.js";
 import { prisma } from "../db/client.js";
 import { childLogger } from "../core/logger.js";
 import { AccountSource, BrokerKind, getSettings, PriceSource, TradingMode } from "../core/config.js";
-import { checkTiltAlignment } from "../risk/tiltGate.js";
+import { evaluateMaProximity } from "./maProximity.js";
+import { checkTrendStrength } from "../risk/trendStrengthGate.js";
+import { ALIGNMENT_LOOKBACK_BARS, checkTimeframeAlignment } from "../risk/timeframeAlignmentGate.js";
+import { checkMaTouchExit, maTouchExitTicksFor, watchedTimeframesAtEntry, type MaTouchExitCheck } from "../risk/maTouchExit.js";
 import { checkChartZone } from "../risk/chartZoneGate.js";
 import { readChartPriceZones } from "../browserControl/chartZones.js";
+import { withFormingBar } from "./formingBar.js";
 import type { BrokerClient, ClosedSimTrade, ClosedTradeHistoryEntry } from "../brokers/types.js";
 import { getBroker } from "../brokers/index.js";
 import { findMatchingClosedTrade } from "../browserControl/tradeHistoryPanel.js";
@@ -23,7 +27,7 @@ import { classifySession, TradingSession } from "../analytics/session.js";
 import { computeContextBucket } from "../analytics/contextBucket.js";
 import { computeSmartEntryPrice } from "../analytics/smartEntry.js";
 import { CONSENSUS_BANDIT_ARMS, type BanditSelectionResult } from "../scoring/consensusBandit.js";
-import type { SessionPerformanceSelection } from "../scoring/sessionPerformance.js";
+import { MIN_SESSION_SAMPLES_PER_VERSION, type SessionPerformanceSelection } from "../scoring/sessionPerformance.js";
 import { getSessionPerformanceSelection } from "./sessionPerformanceCache.js";
 import { getSessionSwitchingSelection } from "./sessionSwitchingAgentCache.js";
 import { getDealerLevels } from "./dealerGexCache.js";
@@ -57,6 +61,8 @@ import {
   reanchorBracketToRealEntry,
   resolveTrailingStopDistanceTicks,
   REQUIRE_DAILY_PLAN_SYMBOLS,
+  takeProfitTickBandFor,
+  isPastTimeExit,
   type RiskAssessment,
   type RiskLimitsConfig,
 } from "../risk/index.js";
@@ -438,6 +444,51 @@ function hasSessionBestVersionAgreement(gatedByVersion: Map<StrategyVersion, Gat
   return gatedByVersion.get(sessionSelection.selectedVersion)!.probability >= LOOSE_GATE_THRESHOLD;
 }
 
+export interface DecidingVersionStatus {
+  sessionStart: string;
+  /** "session_best": one version decides alone. "cold_start_majority": no version has enough results yet, v1/v2/v3 vote. */
+  mode: "session_best" | "cold_start_majority";
+  /** The version whose score triggers trades, or null during the majority vote. */
+  decidingVersion: StrategyVersion | null;
+  /** Versions that count right now (the decider, or the three voters). */
+  countingVersions: StrategyVersion[];
+  /** Plain-English rule, e.g. "v5 alone at 65%+". */
+  rule: string;
+  thresholdPct: number;
+  minResolvedPerVersion: number;
+  versions: Array<{ version: StrategyVersion; resolvedCount: number; winRate: number; eligible: boolean }>;
+}
+
+/**
+ * Who decides execution right now -- the same selection determineConsensus
+ * uses (hasSessionBestVersionAgreement above), for the dashboard's "Deciding
+ * now" indicator (2026-10-13, operator: "add some sort of indicator as to
+ * which v that is so I can monitor it properly").
+ */
+export function describeDecidingVersion(selection: SessionPerformanceSelection): DecidingVersionStatus {
+  const thresholdPct = Math.round(LOOSE_GATE_THRESHOLD * 100);
+  const versions = [...selection.statsByVersion.values()]
+    .map((s) => ({ version: s.version, resolvedCount: s.resolvedCount, winRate: s.winRate, eligible: s.resolvedCount >= MIN_SESSION_SAMPLES_PER_VERSION }))
+    .sort((a, b) => a.version.localeCompare(b.version));
+  const base = { sessionStart: selection.sessionStart.toISOString(), thresholdPct, minResolvedPerVersion: MIN_SESSION_SAMPLES_PER_VERSION, versions };
+  if (selection.coldStart) {
+    return {
+      ...base,
+      mode: "cold_start_majority",
+      decidingVersion: null,
+      countingVersions: ["v1", "v2", "v3"],
+      rule: `v1/v2/v3 majority vote -- 2 of 3 at ${thresholdPct}%+ (no version has ${MIN_SESSION_SAMPLES_PER_VERSION} resolved setups this session yet)`,
+    };
+  }
+  return {
+    ...base,
+    mode: "session_best",
+    decidingVersion: selection.selectedVersion,
+    countingVersions: [selection.selectedVersion],
+    rule: `${selection.selectedVersion} alone at ${thresholdPct}%+ (best win rate this session)`,
+  };
+}
+
 function sessionPerformanceSummary(gatedByVersion: Map<StrategyVersion, GatedScore>, averageProbability: number, sessionSelection: SessionPerformanceSelection, session: TradingSession): string {
   const v7Probability = gatedByVersion.get("v7")!.probability;
   const v6V7OnlySession = isV6V7OnlySession(session);
@@ -632,16 +683,25 @@ export function determineContinuousScanConsensus(gatedByVersion: Map<StrategyVer
 
 const logger = childLogger("engineLoop");
 
-// TopstepX Tilt gate switch (see attemptExecution). On in the app; engine
-// tests feed synthetic bars with no Tilt feed, so they turn it off.
-// Same for the chart rectangle gate -- tests have no TopstepX chart.
+// Entry gate switches (see attemptExecution). On in the app; engine tests
+// turn them off -- they have no TopstepX chart, and their synthetic bars
+// aren't built to sit near the 20 EMA. (The Tilt gate's switch lived here
+// too until that gate was removed, 2026-11-08.)
 let chartZoneGateEnabled = true;
 export function setChartZoneGateEnabled(enabled: boolean): void {
   chartZoneGateEnabled = enabled;
 }
-let tiltGateEnabled = true;
-export function setTiltGateEnabled(enabled: boolean): void {
-  tiltGateEnabled = enabled;
+let emaProximityGateEnabled = true;
+export function setEmaProximityGateEnabled(enabled: boolean): void {
+  emaProximityGateEnabled = enabled;
+}
+let trendStrengthGateEnabled = true;
+export function setTrendStrengthGateEnabled(enabled: boolean): void {
+  trendStrengthGateEnabled = enabled;
+}
+let timeframeAlignmentGateEnabled = true;
+export function setTimeframeAlignmentGateEnabled(enabled: boolean): void {
+  timeframeAlignmentGateEnabled = enabled;
 }
 
 const MIN_BARS_FOR_REGIME = 120;
@@ -680,6 +740,52 @@ const tradeExcursion = new Map<number, { mfe: Decimal; mae: Decimal }>();
 // something that is only ever "have we looked yet, this process."
 const entryReanchorChecked = new Set<number>();
 
+// Hard stop (2026-11-12). Retry spacing after a failed Stop Market placement:
+// a failure re-drives the shared order ticket, so it must not happen every
+// tick. In-memory like the set above; a restart just retries once sooner.
+// Time exit (risk/stops.ts's TIME_EXIT_MINUTES, 2026-11-08) switched OFF
+// 2026-11-12, operator: "there should be no time target for trades", right
+// after trade #606 (ES long, 6) was closed at 10 minutes for -$60 (8 ticks
+// against it) with its hard stop still resting and not hit. Gates both the
+// paper and live paths; the rule itself is left in stops.ts for the record.
+const TIME_EXIT_ENABLED = false;
+
+// 20 MA touch exit (risk/maTouchExit.ts, operator request 2026-11-13).
+// Paper only until the operator has watched it on paper: "I need to run this
+// on a simulator or paper account before any live trading". Flip the live
+// switch only on the operator's say-so.
+const MA_TOUCH_EXIT_PAPER_ENABLED = true;
+const MA_TOUCH_EXIT_LIVE_ENABLED = false;
+/** Per trade: the timeframes (minutes) its exit watches, fixed at entry. */
+const maTouchWatchByTrade = new Map<number, number[]>();
+/** Per symbol: recent bars for the MA math, reloaded at most every 15s. */
+const maTouchBarsCache = new Map<string, { at: number; bars: OhlcBar[] }>();
+const MA_TOUCH_BARS_TTL_MS = 15_000;
+/** Bars older than this mean a dead feed -- never exit on stale MAs. */
+const MA_TOUCH_MAX_BAR_AGE_MS = 5 * 60_000;
+
+const STOP_ORDER_RETRY_MS = 30_000;
+const stopOrderRetryAt = new Map<number, number>();
+/**
+ * Trades whose Stop Market order was clicked in this process. Checked before
+ * every placement and set BEFORE the DB write: on 2026-11-12 the first live
+ * run's flag write failed (the process had loaded a stale Prisma client), the
+ * click was retried every ~5s, and 7 sell-stops of 5 MES each stacked on a
+ * 5-contract long -- enough to flip it into a 30-contract short at the stop.
+ * Cancelled by hand. A clicked stop is never clicked again here, whatever the
+ * DB says.
+ */
+const stopOrderClickedThisProcess = new Set<number>();
+/**
+ * Ticks past the stop before the in-process backup close fires while a hard
+ * stop is resting (2026-11-12). Hand-set, not validated: wide enough that a
+ * normally-filling stop order has flattened the position first (the forced
+ * close's flatten fallback sells without checking the position, so firing
+ * early could reverse a position the stop already closed), tight enough to
+ * cap the damage if the stop order silently isn't there. Append any retune.
+ */
+const STOP_ORDER_BACKSTOP_TICKS = 8;
+
 // Price ticks land every ~5-10s (browser watch), and onNewBar used to write
 // an equity_curve row on every single one -- the paper account alone
 // accumulated 7,500+ rows in about a day, which is far more resolution than
@@ -691,14 +797,13 @@ const entryReanchorChecked = new Set<number>();
 const EQUITY_POINT_MIN_INTERVAL_MS = 30_000;
 const lastEquityPointAt = new Map<number, number>();
 
-// scanSymbolContinuously runs every 15s (see index.ts) but the underlying
-// 1-minute bar it scores usually hasn't changed between consecutive ticks --
-// confirmed live: the exact same probability was being persisted 3-4 times
-// in a row before the bar actually rolled over, tripling the Score writes
-// for no new information. Keyed by symbol, tracking the last bar timestamp
-// actually scored so a tick gets skipped entirely (no DB write, no recompute)
-// when nothing new has happened since.
-const lastContinuousScanBarTime = new Map<string, number>();
+// scanSymbolContinuously runs every 15s (see index.ts). When the bar it
+// scores hasn't changed between consecutive ticks, the exact same probability
+// used to be persisted 3-4 times in a row for no new information. Keyed by
+// symbol, tracking the last bar time + close/high/low actually scored so a
+// tick is skipped entirely (no DB write, no recompute) only when nothing new
+// has happened since -- see the scanKey comment where it's used.
+const lastContinuousScanBarTime = new Map<string, string>();
 
 export type EventSink = (event: Record<string, unknown>) => Promise<void>;
 
@@ -995,12 +1100,18 @@ export class TradingEngine {
       hitStop = h.gte(stopPrice);
       hitTarget = takeProfitPrice !== null && l.lte(takeProfitPrice);
     }
-    if (!hitStop && !hitTarget) return;
+    // Time exit, same rule as manageLiveOpenTrade -- at this bar's close.
+    const timeExit = TIME_EXIT_ENABLED && !hitStop && !hitTarget && !openTrade.letItRide && isPastTimeExit(openTrade.entryTime, barTime, openTrade.trailingStopPlaced);
+    // 20 MA touch exit, at this bar's close (paper -- MA_TOUCH_EXIT_PAPER_ENABLED).
+    const maExit = MA_TOUCH_EXIT_PAPER_ENABLED && !hitStop && !hitTarget && !timeExit && !openTrade.letItRide ? await this.maTouchExitFor(openTrade, symbol, l, h) : null;
+    const maExitFires = maExit?.fire === true;
+    if (maExitFires) logger.info({ symbol, tradeId: openTrade.id, reason: maExit!.reason }, "ma_touch_exit_closing_paper");
+    if (!hitStop && !hitTarget && !timeExit && !maExitFires) return;
 
-    const exitReason: "stop" | "target" = hitStop ? "stop" : "target";
-    const exitPrice = hitStop ? stopPrice : takeProfitPrice!;
+    const exitReason: "stop" | "target" | "ma_exit" = maExitFires ? "ma_exit" : hitTarget && !hitStop ? "target" : "stop";
+    const exitPrice = timeExit || maExitFires ? c : hitStop ? stopPrice : takeProfitPrice!;
     await this.simulatedBroker.closePosition(brokerAccountId, symbol, exitPrice); // no-op if the broker never had this position (e.g. post-restart)
-    await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: undefined });
+    await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason, customTag: timeExit ? "time_exit" : maExitFires ? "ma_touch_exit" : undefined });
   }
 
   // Live trades were previously never checked here at all ("live broker
@@ -1110,6 +1221,26 @@ export class TradingEngine {
       takeProfitOrderPlaced = await this.activateTakeProfitOrder(openTrade, symbol, takeProfitPrice);
     }
 
+    // Hard stop (2026-11-12, operator: "lets make the sl hard too just like
+    // the tp is set for a hard tp"): a real resting Stop Market order at
+    // stopPrice, placed as soon as possible after entry like the take-profit
+    // above, so the stop no longer depends on this process or the price feed
+    // being alive (the gap BUILD_HISTORY's known-limitations entry records).
+    // Not placed once a trailing stop is armed (that is the protection then),
+    // nor while price is already at/through the stop (a stop there would
+    // fill at once -- the backup check below closes it instead). A failed
+    // placement retries after STOP_ORDER_RETRY_MS, not every tick, so a
+    // ticket problem can't monopolize the shared order ticket.
+    // Off for ~2 min on 2026-11-12 after the first live run stacked 7 stop
+    // orders (see stopOrderClickedThisProcess); back on with that guard.
+    const LIVE_STOP_ORDER_ENABLED = true;
+    let stopOrderPlaced = openTrade.stopOrderPlaced || stopOrderClickedThisProcess.has(openTrade.id);
+    const priceAtOrThroughStop = side === "long" ? l.lte(stopPrice) : h.gte(stopPrice);
+    if (LIVE_STOP_ORDER_ENABLED && !stopOrderPlaced && !stopOrderClickedThisProcess.has(openTrade.id) && !trailingStopPlaced && !priceAtOrThroughStop && Date.now() >= (stopOrderRetryAt.get(openTrade.id) ?? 0)) {
+      stopOrderPlaced = await this.activateStopOrder(openTrade, symbol, stopPrice);
+      if (!stopOrderPlaced) stopOrderRetryAt.set(openTrade.id, Date.now() + STOP_ORDER_RETRY_MS);
+    }
+
     // Automates the clear-pos skill: previously, isPositionFlat was only
     // ever checked *after* our own stored stop/target levels were crossed
     // below -- a phantom trade that was never really filled (the click
@@ -1139,14 +1270,36 @@ export class TradingEngine {
         // this call site had never actually used it.
         await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason: "trailing_stop", customTag: "estimated_from_trailing_stop" }, broker);
         logger.info({ symbol, tradeId: openTrade.id }, "live_trade_closed_via_trailing_stop");
+      } else if (stopOrderPlaced && (await this.stopFilledBeforeTarget(openTrade, symbol, stopPrice, takeProfitOrderPlaced ? takeProfitPrice : null, h, l))) {
+        // 2026-11-12, hard stop: the resting Stop Market order is the likely
+        // fill. A stop-market fills at or past its trigger, so stopPrice is an
+        // optimistic estimate (labeled as such) -- the same gap the forced
+        // close already has, see BUILD_HISTORY's known limitations.
+        await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice: stopPrice, exitReason: "stop", customTag: "estimated_from_stop_order" }, broker);
+        logger.info({ symbol, tradeId: openTrade.id }, "live_trade_closed_via_stop_order");
       } else if (takeProfitOrderPlaced && takeProfitPrice !== null) {
         // A real take-profit LIMIT order was genuinely resting -- a limit order fills at its
         // stated price or better, so takeProfitPrice itself is a tighter estimate than the
         // trailing stop's "adverse extreme" guess above (still labeled an estimate, not a
         // confirmed fill, since this app has no way yet to read back the actual fill price for
         // this order type -- see readRealFillPrice's own comment on entry fills for the same gap).
-        await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice: takeProfitPrice, exitReason: "target", customTag: "estimated_from_take_profit_order" }, broker);
-        logger.info({ symbol, tradeId: openTrade.id }, "live_trade_closed_via_take_profit_order");
+        //
+        // 2026-11-08 (operator: "fix that bug"): only if price actually got there. The limit is
+        // placed right at entry, so it is resting on nearly every trade, and this branch used to
+        // book EVERY flat position as a target fill -- stopped out, closed by hand, closed by a
+        // mirror, never filled. Checked against bars_1m, 110 of 134 recorded "target" exits
+        // (Oct 5-Nov 4) never reached their target; their recorded exits sat ~97pts from the
+        // real price, and they made up most of the recorded P&L (+$263,870 recorded vs about
+        // +$2,800 rebuilt from the bars). Price not at the target -> the position closed some
+        // other way: record this tick's price as the estimate, labeled as such, never the target.
+        if (await this.priceReachedSinceEntry(openTrade, symbol, takeProfitPrice, h, l)) {
+          await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice: takeProfitPrice, exitReason: "target", customTag: "estimated_from_take_profit_order" }, broker);
+          logger.info({ symbol, tradeId: openTrade.id }, "live_trade_closed_via_take_profit_order");
+        } else {
+          const exitPrice = h.plus(l).dividedBy(2);
+          await this.closeTrade(account, { tradeId: openTrade.id, symbol, accountId: brokerAccountId, exitTime: barTime, exitPrice, exitReason: "stop", customTag: "estimated_flat_before_target" }, broker);
+          logger.warn({ symbol, tradeId: openTrade.id, exitPrice: exitPrice.toString(), takeProfitPrice: takeProfitPrice.toString() }, "live_trade_flat_before_target_reached");
+        }
       } else {
         // No real protective order was ever resting for this trade -- could
         // be a phantom that was never really filled, or a real position
@@ -1175,9 +1328,16 @@ export class TradingEngine {
     // or the box was moved/deleted -- risk/chartZoneGate.ts), a GREEN position
     // gets its stop moved to breakeven and a RED one is closed. A failed chart
     // read changes nothing -- open positions are never closed on a glitch.
+    // Turned off 2026-11-11 (operator: "remove that rule"). The matching ENTRY
+    // gate was removed 2026-11-08, so every trade began "outside the box":
+    // trades #527-#577 went 6W/44L, about -$398, median hold ~6s -- 40 closed
+    // here a tick red, and 40 had the stop jumped to entry and the trail armed
+    // at once, so nothing could reach its target. Exits are now the stop,
+    // target, trailing stop and time exit only.
+    const CHART_BOX_EXIT_ENABLED = false;
     let closeRedOutsideBox = false;
     const markPrice = h.plus(l).dividedBy(2);
-    if (chartZoneGateEnabled) {
+    if (CHART_BOX_EXIT_ENABLED && chartZoneGateEnabled) {
       const zones = await readChartPriceZones();
       if (zones.ok && !checkChartZone(zones, symbol, markPrice.toNumber()).allowed) {
         const green = side === "long" ? markPrice.gte(entryPrice) : markPrice.lte(entryPrice);
@@ -1199,12 +1359,32 @@ export class TradingEngine {
       }
     }
 
-    const hitStop = closeRedOutsideBox || (!trailingStopPlaced && (side === "long" ? l.lte(stopPrice) : h.gte(stopPrice)));
+    // Time exit (risk/stops.ts's TIME_EXIT_MINUTES, operator request
+    // 2026-11-08): still open 10 minutes in with no trailing stop armed ->
+    // close at market. letItRide opts a trade out, same as the target check.
+    const timeExit = TIME_EXIT_ENABLED && !openTrade.letItRide && isPastTimeExit(openTrade.entryTime, barTime, trailingStopPlaced);
+    if (timeExit) logger.warn({ symbol, tradeId: openTrade.id, entryTime: openTrade.entryTime.toISOString() }, "time_exit_closing");
+
+    // With a hard stop resting (2026-11-12), our own stop check is only a
+    // backup: it fires when price is STOP_ORDER_BACKSTOP_TICKS past the stop
+    // and the broker STILL shows the position open (isFlatNow above runs
+    // first every tick, so a filled stop order never reaches here). Without
+    // a resting stop order it fires at the stop, as before.
+    const stopBackstop = stopOrderPlaced ? getInstrument(symbol).tickSize.times(STOP_ORDER_BACKSTOP_TICKS) : new Decimal(0);
+    const stopCrossed = side === "long" ? l.lte(stopPrice.minus(stopBackstop)) : h.gte(stopPrice.plus(stopBackstop));
+    if (stopOrderPlaced && stopCrossed && !trailingStopPlaced) logger.error({ symbol, tradeId: openTrade.id, stopPrice: stopPrice.toString() }, "stop_order_did_not_fill_backup_close");
+    // 20 MA touch exit (live -- MA_TOUCH_EXIT_LIVE_ENABLED, off until the
+    // operator has run it on paper). Closes at market via the forced-close
+    // path below, which then cancels the resting stop/target.
+    const maExit = MA_TOUCH_EXIT_LIVE_ENABLED && !openTrade.letItRide ? await this.maTouchExitFor(openTrade, symbol, l, h) : null;
+    const maExitFires = maExit?.fire === true;
+    if (maExitFires) logger.warn({ symbol, tradeId: openTrade.id, reason: maExit!.reason }, "ma_touch_exit_closing");
+    const hitStop = closeRedOutsideBox || timeExit || maExitFires || (!trailingStopPlaced && stopCrossed);
 
     if (!hitStop && !hitTarget) return;
 
-    const exitReason: "stop" | "target" = hitStop ? "stop" : "target";
-    const exitPrice = closeRedOutsideBox ? markPrice : hitStop ? stopPrice : takeProfitPrice!;
+    const exitReason: "stop" | "target" | "ma_exit" = maExitFires ? "ma_exit" : hitStop ? "stop" : "target";
+    const exitPrice = closeRedOutsideBox || timeExit || maExitFires ? markPrice : hitStop ? stopPrice : takeProfitPrice!;
 
     // Re-check right here (not just reuse isFlatNow from above) --
     // requestClosePosition's own DOM interaction takes real time below, and
@@ -1225,7 +1405,7 @@ export class TradingEngine {
     logger.error({ symbol, tradeId: openTrade.id, exitReason, isFlat }, "live_position_past_exit_forcing_close");
 
     let closeResult = await broker.requestClosePosition?.(symbol);
-    let closeTag = closeRedOutsideBox ? "closed_red_outside_chart_box" : "forced_after_bracket_failure";
+    let closeTag = closeRedOutsideBox ? "closed_red_outside_chart_box" : timeExit ? "time_exit" : maExitFires ? "ma_touch_exit" : "forced_after_bracket_failure";
 
     if (!closeResult || closeResult.status === "rejected") {
       // Re-check right here, not just once at the top -- requestClosePosition's
@@ -1446,7 +1626,10 @@ export class TradingEngine {
     // flag we persist always describes what is actually at the broker.
     let takeProfitOrderPlaced = openTrade.takeProfitOrderPlaced;
     const newTakeProfit = reanchored.takeProfitPrice;
-    if (takeProfitOrderPlaced && newTakeProfit !== null && !openTrade.trailingStopPlaced && broker.cancelRestingOrder) {
+    // 2026-11-12: a resting hard stop is cancelled with it (Cancel Orders is
+    // per-symbol) and re-placed at the new stop on the next tick.
+    let stopOrderPlaced = openTrade.stopOrderPlaced;
+    if ((takeProfitOrderPlaced || stopOrderPlaced) && !openTrade.trailingStopPlaced && broker.cancelRestingOrder) {
       const otherOpen = await prisma.trade.findFirst({ where: { accountId: openTrade.accountId, symbol, status: "open", id: { not: openTrade.id } } });
       if (otherOpen) {
         logger.warn({ symbol, tradeId: openTrade.id, otherTradeId: otherOpen.id }, "entry_reanchor_resting_order_left_in_place_other_trade_open");
@@ -1459,7 +1642,9 @@ export class TradingEngine {
           // exit beats two exits fighting each other.
           logger.error({ symbol, tradeId: openTrade.id, error: cancelled.error }, "entry_reanchor_cancel_failed_resting_order_still_at_old_price");
         } else {
-          const replaced = await this.activateTakeProfitOrder(openTrade, symbol, newTakeProfit);
+          stopOrderPlaced = false;
+          stopOrderClickedThisProcess.delete(openTrade.id);
+          const replaced = takeProfitOrderPlaced && newTakeProfit !== null ? await this.activateTakeProfitOrder(openTrade, symbol, newTakeProfit) : true;
           if (!replaced) {
             // Cancelled but not re-placed: nothing is resting any more, so the
             // flag MUST go false or manageLiveOpenTrade would stand its own
@@ -1479,6 +1664,7 @@ export class TradingEngine {
         stopPrice: reanchored.stopPrice.toString(),
         takeProfitPrice: newTakeProfit?.toString() ?? null,
         takeProfitOrderPlaced,
+        stopOrderPlaced,
         explanation:
           `${openTrade.explanation} [BRACKET RE-ANCHORED: the broker reported this position's entry as ${realEntry.toString()}, ` +
           `${reanchored.offset.toString()} from the ${recordedEntry.toString()} it was sized around -- stop/target moved by the same ` +
@@ -1486,6 +1672,108 @@ export class TradingEngine {
       },
     });
     return updated;
+  }
+
+  /**
+   * 20 MA touch exit for one open trade (risk/maTouchExit.ts). The watched
+   * timeframes are fixed once per trade from the bars before entry; a
+   * restart recomputes the same set from the DB. Any failure, or bars older
+   * than MA_TOUCH_MAX_BAR_AGE_MS, answers null -- never close on a glitch.
+   */
+  private async maTouchExitFor(trade: Trade, symbol: string, low: Decimal, high: Decimal): Promise<MaTouchExitCheck | null> {
+    try {
+      const tickSize = getInstrument(symbol).tickSize.toNumber();
+      const maxTicks = maTouchExitTicksFor(symbol);
+      let watched = maTouchWatchByTrade.get(trade.id);
+      if (!watched) {
+        const rows = await prisma.bar.findMany({ where: { symbol, time: { lt: trade.entryTime } }, orderBy: { time: "desc" }, take: ALIGNMENT_LOOKBACK_BARS });
+        const before: OhlcBar[] = rows.reverse().map((r) => ({ time: r.time, open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close), volume: Number(r.volume) }));
+        watched = watchedTimeframesAtEntry(before, Number(trade.entryPrice), tickSize, maxTicks);
+        maTouchWatchByTrade.set(trade.id, watched);
+        logger.info({ symbol, tradeId: trade.id, watched, maxTicks }, "ma_touch_exit_watching");
+      }
+      let cached = maTouchBarsCache.get(symbol);
+      if (!cached || Date.now() - cached.at > MA_TOUCH_BARS_TTL_MS) {
+        cached = { at: Date.now(), bars: withFormingBar(symbol, await loadRecentBars(symbol, ALIGNMENT_LOOKBACK_BARS)) };
+        maTouchBarsCache.set(symbol, cached);
+      }
+      const last = cached.bars.at(-1);
+      if (!last || Date.now() - last.time.getTime() > MA_TOUCH_MAX_BAR_AGE_MS) return null;
+      return checkMaTouchExit(cached.bars, low.toNumber(), high.toNumber(), tickSize, maxTicks, watched);
+    } catch (err) {
+      logger.warn({ symbol, tradeId: trade.id, err: String(err) }, "ma_touch_exit_check_failed");
+      return null;
+    }
+  }
+
+  // 2026-11-12, hard stop: places the real resting Stop Market order -- same shape as
+  // activateTakeProfitOrder below. False on any failure; the caller retries later.
+  private async activateStopOrder(openTrade: Trade, symbol: string, stopPrice: Decimal): Promise<boolean> {
+    const broker = await this.brokerForTrade(openTrade);
+    if (!broker.placeStopOrder) return false;
+
+    const result = await broker.placeStopOrder(symbol, openTrade.side as "long" | "short", openTrade.quantity, stopPrice);
+    if (result.status === "rejected") {
+      logger.warn({ symbol, tradeId: openTrade.id, error: result.error }, "stop_order_activation_failed");
+      return false;
+    }
+    stopOrderClickedThisProcess.add(openTrade.id);
+
+    try {
+      await prisma.trade.update({ where: { id: openTrade.id }, data: { stopOrderPlaced: true } });
+    } catch (err) {
+      // The order IS resting -- report true so nothing re-places it; only the record is behind.
+      logger.error({ symbol, tradeId: openTrade.id, err: String(err) }, "stop_order_placed_but_flag_write_failed");
+      return true;
+    }
+    await prisma.orderRecord.create({
+      data: {
+        tradeId: openTrade.id,
+        brokerOrderId: result.brokerOrderId,
+        accountId: openTrade.accountId,
+        symbol,
+        orderType: "stop_market",
+        side: openTrade.side === "long" ? "sell" : "buy",
+        price: stopPrice.toString(),
+        quantity: openTrade.quantity,
+        status: "pending",
+      },
+    });
+    logger.info({ symbol, tradeId: openTrade.id, stopPrice: stopPrice.toString() }, "stop_order_activated");
+    return true;
+  }
+
+  /**
+   * The broker went flat with a hard stop resting: did price reach the stop since entry, and
+   * before the target (when a take-profit order was also resting)? Reads the first bars_1m
+   * minute to touch each level, plus this tick. A failed read answers false, so an exit is never
+   * booked at the stop on a guess -- it falls through to the existing estimate paths.
+   */
+  private async stopFilledBeforeTarget(trade: Trade, symbol: string, stopPrice: Decimal, takeProfitPrice: Decimal | null, h: Decimal, l: Decimal): Promise<boolean> {
+    const long = trade.side === "long";
+    const entryMinute = new Date(Math.floor(trade.entryTime.getTime() / 60_000) * 60_000);
+    try {
+      const firstStop = await prisma.bar.findFirst({
+        where: { symbol, time: { gte: entryMinute }, ...(long ? { low: { lte: stopPrice.toString() } } : { high: { gte: stopPrice.toString() } }) },
+        orderBy: { time: "asc" },
+        select: { time: true },
+      });
+      const stopNow = long ? l.lte(stopPrice) : h.gte(stopPrice);
+      if (!firstStop && !stopNow) return false;
+      if (takeProfitPrice === null) return true;
+      const firstTarget = await prisma.bar.findFirst({
+        where: { symbol, time: { gte: entryMinute }, ...(long ? { high: { gte: takeProfitPrice.toString() } } : { low: { lte: takeProfitPrice.toString() } }) },
+        orderBy: { time: "asc" },
+        select: { time: true },
+      });
+      if (!firstTarget) return true;
+      // Both reached: the earlier minute wins; the same minute goes to the stop (house rule, see
+      // analytics/outcomeSimulation.ts and SimulatedBroker.evaluateBar).
+      return firstStop !== null && firstStop.time.getTime() <= firstTarget.time.getTime();
+    } catch (err) {
+      logger.warn({ symbol, tradeId: trade.id, err: String(err) }, "stop_filled_check_failed");
+      return false;
+    }
   }
 
   private async activateTakeProfitOrder(openTrade: Trade, symbol: string, takeProfitPrice: Decimal): Promise<boolean> {
@@ -1544,6 +1832,27 @@ export class TradingEngine {
   // broker doesn't support this, the panel can't be read, or nothing in it
   // plausibly matches -- see tradeHistoryPanel.ts's findMatchingClosedTrade
   // for the match rule (side + quantity + closest entryTime, never price).
+  /**
+   * Did price trade at or through `level` (in the trade's favour) at any point since entry?
+   * Reads bars_1m from the entry minute on, plus this tick's own high/low for the
+   * still-forming minute. A failed read answers false, so an exit is never booked at
+   * the target on a guess.
+   */
+  private async priceReachedSinceEntry(trade: Trade, symbol: string, level: Decimal, h: Decimal, l: Decimal): Promise<boolean> {
+    const long = trade.side === "long";
+    if (long ? h.gte(level) : l.lte(level)) return true;
+    const entryMinute = new Date(Math.floor(trade.entryTime.getTime() / 60_000) * 60_000);
+    const extreme = await prisma.bar
+      .aggregate({ where: { symbol, time: { gte: entryMinute } }, _max: { high: true }, _min: { low: true } })
+      .catch((err) => {
+        logger.warn({ symbol, tradeId: trade.id, err: String(err) }, "target_reached_check_failed");
+        return null;
+      });
+    if (!extreme) return false;
+    if (long) return extreme._max.high !== null && new Decimal(extreme._max.high.toString()).gte(level);
+    return extreme._min.low !== null && new Decimal(extreme._min.low.toString()).lte(level);
+  }
+
   private async tryReadRealClosedTrade(trade: Trade): Promise<ClosedTradeHistoryEntry | null> {
     const broker = await this.brokerForTrade(trade);
     if (!broker.readClosedTradeHistory) return null;
@@ -1799,7 +2108,13 @@ export class TradingEngine {
             ? " [bracket failed to fire -- this app force-closed the position after price crossed the stop/target level]"
             : closed.customTag === "forced_close_via_opposite_order"
               ? " [bracket failed to fire and the Close-Position button didn't work either -- this app force-closed the position with an opposite-side order after price crossed the stop/target level]"
-              : "";
+              : closed.customTag === "estimated_flat_before_target"
+                ? " [exit price is an ESTIMATE (the price when TopstepX was first seen flat), not a confirmed fill -- the position closed before price ever reached the take-profit, so it was stopped, closed by hand or elsewhere, or never filled]"
+                : closed.customTag === "time_exit"
+                  ? " [closed by the 10-minute time exit (risk/stops.ts's TIME_EXIT_MINUTES)]"
+                  : closed.customTag === "ma_touch_exit"
+                    ? " [closed at market by the 20 MA exit (risk/maTouchExit.ts) -- exit price is an estimate]"
+                    : "";
     await prisma.trade.update({
       where: { id: trade.id },
       data: {
@@ -2053,33 +2368,61 @@ export class TradingEngine {
       return { outcome: "risk_rejected", executed: false };
     }
 
-    // TopstepX Tilt direction gate (risk/tiltGate.ts, operator request
-    // 2026-10-06): only enter with the crowd's side at >= 51%. Applies in
-    // live always, and in paper whenever the Tilt feed is configured -- it
-    // fails closed, so a live entry with no fresh Tilt reading is skipped.
-    if (tiltGateEnabled && (mode === TradingMode.LIVE || (settings.priceSource === PriceSource.BROWSER && settings.orderFlowEnabled))) {
-      const tilt = checkTiltAlignment(getLatestOrderFlowSnapshot(symbol), side, Date.now());
-      if (!tilt.allowed) {
-        const rejection = `${symbol} ${side} skipped: ${tilt.reason}`;
-        logger.warn({ symbol, side, strategyId, reason: tilt.reason }, "entry_blocked_tilt_mismatch");
-        await this.emit({ type: "risk_rejected", symbol, reason: rejection });
+    // The TopstepX Tilt direction gate (risk/tiltGate.ts, 2026-10-06) ran
+    // here until 2026-11-08, when the operator asked for it removed. The Tilt
+    // still nudges every version's score (scoring/tiltAdjustment.ts).
+
+    // The chart rectangle ENTRY gate (risk/chartZoneGate.ts, 2026-10-06: only
+    // enter while price is inside a rectangle drawn on the TopstepX chart) ran
+    // here until 2026-11-08, when the operator asked for it removed. The chart
+    // box EXIT rule in manageLiveOpenTrade is separate and still applies.
+
+    // Timeframe alignment gate (risk/timeframeAlignmentGate.ts, operator
+    // request 2026-11-02): 5m, 15m and 1h must all agree with the trade's
+    // side. Every mode -- it needs only bars_1m, not a browser feed.
+    const gateBars = timeframeAlignmentGateEnabled || emaProximityGateEnabled
+      ? withFormingBar(symbol, await loadRecentBars(symbol, ALIGNMENT_LOOKBACK_BARS))
+      : [];
+    if (timeframeAlignmentGateEnabled) {
+      const alignment = checkTimeframeAlignment(gateBars, side);
+      if (!alignment.allowed) {
+        logger.warn({ symbol, side, strategyId, reason: alignment.reason }, "entry_blocked_timeframe_misaligned");
+        await this.emit({ type: "risk_rejected", symbol, reason: `${symbol} ${side} skipped: ${alignment.reason}` });
         return { outcome: "risk_rejected", executed: false };
       }
-      logger.info({ symbol, side, strategyId, reason: tilt.reason }, "tilt_gate_passed");
+      logger.info({ symbol, side, strategyId, reason: alignment.reason }, "timeframe_alignment_gate_passed");
     }
 
-    // Chart rectangle gate (risk/chartZoneGate.ts, operator request
-    // 2026-10-06): only enter while price is inside a rectangle drawn on this
-    // symbol's TopstepX chart; no rectangle means no trade. Same scope as the
-    // Tilt gate -- the chart only exists when trading through the browser.
-    if (chartZoneGateEnabled && (mode === TradingMode.LIVE || settings.priceSource === PriceSource.BROWSER)) {
-      const zone = checkChartZone(await readChartPriceZones(), symbol, closePrice.toNumber());
-      if (!zone.allowed) {
-        logger.warn({ symbol, side, strategyId, reason: zone.reason }, "entry_blocked_outside_chart_zone");
-        await this.emit({ type: "risk_rejected", symbol, reason: `${symbol} ${side} skipped: ${zone.reason}` });
+    // 20 MA proximity gate (risk/emaProximityGate.ts, operator request
+    // 2026-11-08): only enter within EMA_PROXIMITY_MAX_TICKS (5, then 15 from 2026-11-09) ticks of the 5-minute EMA(20), judged
+    // at the current price (the forming bar). Every mode, like the one above.
+    // 2026-11-11: judged against the TopstepX chart's own 20 MA (operator
+    // request), then the same day widened to five timeframes -- price must
+    // be within range of the 20 MA on at least 2 of 1m/5m/15m/30m/1h (see
+    // risk/emaProximityGate.ts's checkMultiTimeframeMaProximity). The chart's
+    // own reading replaces the computed one for the timeframe it shows; if
+    // the chart can't be read, every timeframe is computed from gateBars.
+    if (emaProximityGateEnabled) {
+      const proximity = await evaluateMaProximity(symbol, gateBars, instrument.tickSize.toNumber());
+      if (!proximity.allowed) {
+        logger.warn({ symbol, side, strategyId, reason: proximity.reason }, "entry_blocked_far_from_20ma");
+        await this.emit({ type: "risk_rejected", symbol, reason: `${symbol} ${side} skipped: ${proximity.reason}` });
         return { outcome: "risk_rejected", executed: false };
       }
-      logger.info({ symbol, side, strategyId, reason: zone.reason }, "chart_zone_gate_passed");
+      logger.info({ symbol, side, strategyId, reason: proximity.reason }, "ema_proximity_gate_passed");
+    }
+
+    // Trend-strength gate (risk/trendStrengthGate.ts, operator request
+    // 2026-11-08, live and unvalidated): ADX TREND_STRENGTH_MIN_ADX+ (40, then 20 from 2026-11-09) or a strong trend in the
+    // trade's direction, read off this decision's own regime. Every mode.
+    if (trendStrengthGateEnabled) {
+      const strength = checkTrendStrength(regime, side);
+      if (!strength.allowed) {
+        logger.warn({ symbol, side, strategyId, reason: strength.reason }, "entry_blocked_weak_trend");
+        await this.emit({ type: "risk_rejected", symbol, reason: `${symbol} ${side} skipped: ${strength.reason}` });
+        return { outcome: "risk_rejected", executed: false };
+      }
+      logger.info({ symbol, side, strategyId, reason: strength.reason }, "trend_strength_gate_passed");
     }
 
     const decisionExplanation = decisionExplanationPrefix + explainScore(symbol, side, decisionGated, settings.minScoreThreshold);
@@ -2244,6 +2587,7 @@ export class TradingEngine {
           assistantTakeProfitCapPoints,
           dailyPlanZones,
           requiresDailyPlan: REQUIRE_DAILY_PLAN_SYMBOLS.has(symbol),
+          takeProfitTickBand: takeProfitTickBandFor(symbol),
           hasConflictingCrossSymbolPosition,
         });
 
@@ -2311,13 +2655,16 @@ export class TradingEngine {
     // None of these four depend on each other's result -- they were
     // previously awaited one at a time, paying for each one's DB round-trip
     // (or, on a cache miss, a genuinely expensive aggregate query) serially.
-    const [bars, newsStatus, openingRangeStats, dailyTrend, dailyEma20Trend] = await Promise.all([
+    const [completedBars, newsStatus, openingRangeStats, dailyTrend, dailyEma20Trend] = await Promise.all([
       loadRecentBars(symbol, 300),
       getNewsRiskStatus(barTime),
       getOpeningRangeStats(symbol),
       getDailyTrend(symbol),
       getDailyEma20Trend(symbol),
     ]);
+    // Include the still-forming minute so each 15s scan scores the latest
+    // price, not the last finished minute (engine/formingBar.ts).
+    const bars = withFormingBar(symbol, completedBars);
     if (bars.length < MIN_BARS_FOR_REGIME) return;
 
     const lastBar = bars[bars.length - 1]!;
@@ -2343,8 +2690,15 @@ export class TradingEngine {
       return;
     }
 
-    if (lastContinuousScanBarTime.get(symbol) === lastBarTimeMs) return; // nothing new since the last tick -- skip the recompute and the duplicate write
-    lastContinuousScanBarTime.set(symbol, lastBarTimeMs);
+    // Skip only when NOTHING changed since the last scan -- keyed by the bar's
+    // time AND its live close/high/low, not its time alone (2026-10-12,
+    // operator: "why are recommendations happening every minute instead of
+    // every 15 seconds"). The in-progress 1-minute bar keeps updating within
+    // its minute, so a time-only key skipped three of every four 15s scans
+    // even while price was moving.
+    const scanKey = `${lastBarTimeMs}|${lastBar.close}|${lastBar.high}|${lastBar.low}`;
+    if (lastContinuousScanBarTime.get(symbol) === scanKey) return; // nothing new since the last tick -- skip the recompute and the duplicate write
+    lastContinuousScanBarTime.set(symbol, scanKey);
 
     const closePrice = new Decimal(lastBar.close);
 
@@ -2507,6 +2861,7 @@ export class TradingEngine {
           assistantTakeProfitCapPoints,
           dailyPlanZones,
           requiresDailyPlan: REQUIRE_DAILY_PLAN_SYMBOLS.has(symbol),
+          takeProfitTickBand: takeProfitTickBandFor(symbol),
           hasConflictingCrossSymbolPosition,
         });
       }
@@ -2543,6 +2898,7 @@ export class TradingEngine {
           assistantTakeProfitCapPoints,
           dailyPlanZones,
           requiresDailyPlan: REQUIRE_DAILY_PLAN_SYMBOLS.has(symbol),
+          takeProfitTickBand: takeProfitTickBandFor(symbol),
           hasConflictingCrossSymbolPosition,
         });
 

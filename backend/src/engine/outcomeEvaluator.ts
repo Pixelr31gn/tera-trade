@@ -27,7 +27,15 @@ const MAX_BARS_TO_WALK = 500;
 // Bounds a single pass regardless of how large the pending backlog gets (e.g.
 // after extended downtime) -- oldest-first, so a big backlog just drains over
 // subsequent 5-minute ticks instead of one tick doing unbounded work.
-const MAX_ROWS_PER_PASS = 200;
+//
+// 2026-10-14: 200 -> 1000, operator report ("this is not updating as it
+// should"). The continuous scan went from once a minute to every 15s
+// (2026-10-12), raising inflow to ~252 scores per 5 minutes -- above the old
+// 200-per-pass budget, so the backlog only grew: 5,141 unlabeled rows, 977
+// older than 2h, and the Strategy page's "resolved" counts stopped moving.
+// 1000 leaves ~4x headroom over current inflow so the backlog drains and
+// stays drained; the per-version split and CONCURRENCY below are unchanged.
+const MAX_ROWS_PER_PASS = 1000;
 // Same bounded-concurrency shape as engine/fixedTargetEdgeCache.ts's identical
 // per-row loadBarsAfter-per-row pattern (tuned there against real Neon pool
 // contention) -- each pending row needs its own bar-window fetch, so this

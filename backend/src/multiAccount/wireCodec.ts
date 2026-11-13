@@ -91,6 +91,8 @@ export function encodeCommand(cmd: MirrorCommand): Record<string, unknown> {
       return { kind: cmd.kind, symbol: cmd.symbol, side: cmd.side, quantity: cmd.quantity, trailTicks: cmd.trailTicks };
     case "placeTakeProfitOrder":
       return { kind: cmd.kind, symbol: cmd.symbol, side: cmd.side, quantity: cmd.quantity, limitPrice: encDecimal(cmd.limitPrice) };
+    case "placeStopOrder":
+      return { kind: cmd.kind, symbol: cmd.symbol, side: cmd.side, quantity: cmd.quantity, stopPrice: encDecimal(cmd.stopPrice) };
     case "cancelRestingOrder":
       return { kind: cmd.kind, symbol: cmd.symbol };
     default: {
@@ -124,6 +126,8 @@ export function decodeCommand(body: unknown): MirrorCommand {
       return { kind: "placeTrailingStop", symbol: String(o.symbol), side: side(), quantity: qty(), trailTicks: o.trailTicks };
     case "placeTakeProfitOrder":
       return { kind: "placeTakeProfitOrder", symbol: String(o.symbol), side: side(), quantity: qty(), limitPrice: decDecimal(o.limitPrice, "limitPrice") };
+    case "placeStopOrder":
+      return { kind: "placeStopOrder", symbol: String(o.symbol), side: side(), quantity: qty(), stopPrice: decDecimal(o.stopPrice, "stopPrice") };
     case "cancelRestingOrder":
       return { kind: "cancelRestingOrder", symbol: String(o.symbol) };
     default:

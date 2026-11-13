@@ -85,7 +85,8 @@ export interface ClosedSimTrade {
   // reason distinct from "stop" (explain/engine.ts's explainTradeExit
   // already had the right message for it, this type was the only thing
   // blocking that call site from using it).
-  exitReason: "stop" | "target" | "trailing_stop";
+  // "ma_exit" added 2026-11-13 -- the 20 MA touch exit (risk/maTouchExit.ts).
+  exitReason: "stop" | "target" | "trailing_stop" | "ma_exit";
   customTag?: string;
 }
 
@@ -203,6 +204,16 @@ export interface BrokerClient {
    * BrowserControlBroker).
    */
   placeTakeProfitOrder?(symbol: string, side: "long" | "short", quantity: number, limitPrice: Decimal): Promise<OrderResult>;
+  /**
+   * Places a real, broker-native resting STOP MARKET order at `stopPrice` that closes an existing
+   * position if price trades through it -- opposite side from the position (sell-stop under a
+   * long, buy-stop over a short), same quantity. 2026-11-12 (operator: "lets make the sl hard too
+   * just like the tp is set for a hard tp"): the stop's protection no longer depends on the backend
+   * process or the browser price feed staying alive. Same plain order-ticket shape as
+   * placeTakeProfitOrder. Returns `status: "pending"` on success. Only implemented by brokers that
+   * support it (e.g. BrowserControlBroker).
+   */
+  placeStopOrder?(symbol: string, side: "long" | "short", quantity: number, stopPrice: Decimal): Promise<OrderResult>;
   /**
    * Cancels every resting order for `symbol` -- not a single order by ID.
    * The existing `cancelOrder(accountId, brokerOrderId)` method's signature

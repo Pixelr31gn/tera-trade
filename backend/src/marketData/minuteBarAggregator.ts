@@ -136,4 +136,15 @@ export class MinuteBarAggregator {
     existing.volume = existing.volume.plus(volume);
     return null;
   }
+
+  /**
+   * The still-forming current minute for `symbol` (a snapshot copy), or null.
+   * Completed bars only reach the DB when their minute ends, so the 15s
+   * continuous scan reads this to score the latest price instead of the last
+   * finished minute (see engine/formingBar.ts).
+   */
+  getFormingBar(symbol: string): AggregatedMinuteBar | null {
+    const b = this.current.get(symbol);
+    return b ? { time: new Date(b.minuteKey), open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume } : null;
+  }
 }

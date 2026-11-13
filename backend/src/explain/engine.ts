@@ -59,6 +59,7 @@ export function explainTradeExit(symbol: string, side: string, exitReason: strin
       trailing_stop: "the trailing stop was hit, locking in a favorable move",
       manual: "the position was closed manually",
       kill_switch: "the risk engine's kill switch force-closed this position",
+      ma_exit: "price reached a watched 20 MA (the 20 MA exit)",
     };
   const reason = reasonText[exitReason] ?? exitReason;
   return `Closed ${side} ${symbol} @ ${exitPrice} for ${outcome} of ${pnl.toFixed(2)} -- ${reason}.`;

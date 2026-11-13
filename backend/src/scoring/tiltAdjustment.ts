@@ -16,7 +16,8 @@
  * 73% / 65% -> +7.4, a 100/100 extreme -> +20 (on the 0-100 score scale).
  *
  * This is a soft factor on the score. The hard execution rule (the Tilt must
- * favor the trade's side, risk/tiltGate.ts) is separate and still applies.
+ * favor the trade's side, risk/tiltGate.ts) was separate; it was removed from
+ * the engine 2026-11-08 (operator request), and this factor stays.
  *
  * Pure, no wall clock: freshness is judged against the decision's own bar
  * time `at`, so replay stays deterministic. Replay has no Tilt feed

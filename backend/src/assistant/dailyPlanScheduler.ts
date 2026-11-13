@@ -78,6 +78,7 @@ import { getSystemStateSnapshot } from "../api/routes/system.js";
 import { getNewsRiskStatus } from "../news/risk.js";
 import { cached, computeSessionPerformanceForAllSessions } from "../api/routes/analytics.js";
 import { runStatelessAssistantTurn } from "./statelessTurn.js";
+import { describeRangePlans, writeRangePlans } from "./rangePlan.js";
 import { childLogger } from "../core/logger.js";
 
 const logger = childLogger("dailyPlanScheduler");
@@ -296,6 +297,19 @@ function mayAttemptSession(sessionStartMs: number): boolean {
  * have no way to know "which session" beyond real current time.
  */
 async function attemptRefresh(at: Date): Promise<string> {
+  // 2026-10-12: zones and session targets are computed from market data
+  // (assistant/rangePlan.ts), not asked of the model -- qwen3:8b wrote invalid
+  // or unusable zones on a large share of attempts. Same entry point for the
+  // scheduler, the hourly refresh and chat plan requests.
+  return describeRangePlans(await writeRangePlans(PLAN_SYMBOLS, at));
+}
+
+/**
+ * The model-driven plan build this scheduler used until 2026-10-12. Kept,
+ * unused, so it can be restored with a one-line change in attemptRefresh if a
+ * stronger model is ever wired in.
+ */
+export async function attemptModelRefresh(at: Date): Promise<string> {
   const digest = await buildContextDigest();
   setDailyPlanSessionOverride(at);
   try {

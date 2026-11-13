@@ -70,7 +70,7 @@ import { computeConfidenceTierQuantity } from "./sizing.js";
 // branch's own comment). Both remain exported from stops.ts as the record of
 // what that branch used to do, and as what to restore if the reward:risk
 // floor is ever relaxed.
-import { fiveMinuteAtrPoints, MIN_REWARD_RISK_RATIO, MIN_TARGET_ATR5_MULTIPLE, roundAwayFromEntry } from "./stops.js";
+import { clampTakeProfitTicks, fiveMinuteAtrPoints, MIN_REWARD_RISK_RATIO, MIN_TARGET_ATR5_MULTIPLE, roundAwayFromEntry, DEFAULT_TAKE_PROFIT_TICK_BAND, type TakeProfitTickBand } from "./stops.js";
 import { computeTradePlan } from "./tradePlan.js";
 
 /**
@@ -109,6 +109,24 @@ function rewardRiskFloorViolation(stopDistancePoints: Decimal, takeProfitPrice: 
  * side of entry (a long whose take-profit sits below its fill -- seen on five
  * real trades this session) is the degenerate case of the same fault.
  */
+/**
+ * 2026-11-08 (operator, choosing "keep current stop, drop 3:1" for the 30-75
+ * tick take-profit band -- see stops.ts's TAKE_PROFIT_MAX_TICKS): both the 3:1
+ * floor (rewardRiskFloorViolation) and the 2026-09-21 "risk has to be smaller
+ * than what we are trying to win at all times no exceptions" rule are off.
+ * With a ~16.5pt stop and an 18.75pt maximum target, the operator's chosen
+ * option was presented as reward:risk ~0.5-1.1, which these rules would have
+ * rejected outright. Flip both to true to restore them.
+ */
+const ENFORCE_REWARD_RISK_FLOOR = false;
+// Back ON 2026-11-12 (operator: "fix that however you can"), after trade
+// #602 (NQ short) risked 70.25pts to make 18.75 and lost $702.50 -- the
+// banded target and the stop had come apart on the daily-plan branch. This
+// is the 1:1 backstop only; the 3:1 floor above stays off as chosen
+// 2026-11-08, so the main pipeline's ~16.5pt stop / 18.75pt target ES trades
+// still pass, but nothing risking more than it can make does.
+const REWARD_MUST_EXCEED_RISK = true;
+
 function rewardBelowRiskViolation(entryPrice: Decimal, stopPrice: Decimal, takeProfitPrice: Decimal, side: "long" | "short"): string | null {
   const wrongSideTarget = side === "long" ? takeProfitPrice.lte(entryPrice) : takeProfitPrice.gte(entryPrice);
   if (wrongSideTarget) {
@@ -118,6 +136,9 @@ function rewardBelowRiskViolation(entryPrice: Decimal, stopPrice: Decimal, takeP
   if (wrongSideStop) {
     return `stop (${stopPrice.toFixed(2)}) is on the wrong side of entry (${entryPrice.toFixed(2)}) for a ${side}`;
   }
+  // 2026-11-08: the reward-must-exceed-risk half of this check was turned
+  // OFF; back on 2026-11-12 (REWARD_MUST_EXCEED_RISK above).
+  if (!REWARD_MUST_EXCEED_RISK) return null;
   const risk = entryPrice.minus(stopPrice).abs();
   const reward = takeProfitPrice.minus(entryPrice).abs();
   if (reward.gt(risk)) return null;
@@ -330,15 +351,41 @@ export interface RiskAssessment {
 // floor below still apply to breakouts; only this ceiling is now
 // reversal-only. 2026-08-17: widened again, 1.95 -> 3.25, operator request,
 // then tightened back the same day, 3.25 -> 2.75 -- final active band is
-// 0.25x-2.75x ATR.
-const MAX_ENTRY_DISTANCE_ATR = 2.75;
+// 0.25x-2.75x ATR. 2026-10-14: widened, 2.75 -> 4.25, operator request
+// ("widen it to 4.25"), after a strong NQ down-move: 32 v1/v2/v3-majority
+// NQ shorts (90-96%) in ~7 minutes were all rejected at 17-19x ATR from the
+// nearest resistance (30792.18, 7 touches). Note 4.25 alone would not have
+// passed those (they were far past it); the operator chose the value
+// knowingly. Active band is now 0.25x-4.25x ATR. 2026-10-14 (minutes
+// later): widened again, 4.25 -> 17, operator request ("widen it to 17
+// then"), same NQ down-move -- the rejected shorts were sitting at 17.5-19x.
+// No backtested basis for 17 either; at this width the ceiling only rules
+// out entries very far from any level. Active band is now 0.25x-17x ATR.
+// 2026-10-14 (evening): tightened, 17 -> 8, operator request ("switch the
+// ATR to 8 and the minimum .33"), together with the floor below 0.25 ->
+// 0.33. No backtested basis for either value. Active band is now
+// 0.33x-8x ATR.
+const MAX_ENTRY_DISTANCE_ATR = 8;
 
 // Floor for the same check, added alongside the 2026-07-27 ceiling bump --
 // entries sitting too close to the level itself are rejected too, not just
 // ones that have run too far past it. Together these carve out a
 // 0.25x-1.95x ATR "sweet spot" band instead of a single one-sided ceiling.
-// (2026-07-29: loosened 1.25 -> 0.25, operator request.)
-const MIN_ENTRY_DISTANCE_ATR = 0.25;
+// (2026-07-29: loosened 1.25 -> 0.25, operator request. 2026-10-14:
+// tightened 0.25 -> 0.33, operator request, alongside the ceiling 17 -> 8.)
+const MIN_ENTRY_DISTANCE_ATR = 0.33;
+
+// 2026-11-09: the whole ATR distance band (both MAX_ENTRY_DISTANCE_ATR and
+// MIN_ENTRY_DISTANCE_ATR above) switched off, operator request ("remove atr
+// aswell"), the same day the 20 MA gate went to 15 ticks and the trend gate
+// to ADX 20. Evidence: from 09:14 to 12:40 MST it rejected 173 consensus
+// signals -- 131 at 0.02-0.14x ATR from support (under the 0.33 floor, which
+// works against the operator's enter-at-the-20-EMA rule whenever the EMA
+// sits near a level) and 42 at ~25x ATR (over the 8x ceiling). No backtested
+// basis for removing it either, same as for every value it has had. The
+// level-existence and 2-touch checks still run. Set true to restore the band
+// at its last values (0.33x-8x).
+const SR_DISTANCE_BAND_ENABLED = false;
 
 export class RiskEngine {
   assessNewTrade(params: {
@@ -457,8 +504,15 @@ export class RiskEngine {
      * yourself, not diversification.)
      */
     hasConflictingCrossSymbolPosition?: boolean;
+    /**
+     * Take-profit tick band for this symbol (stops.ts's
+     * takeProfitTickBandFor, 2026-11-12 -- NQ gets a wider one). Resolved by
+     * the caller so this module stays symbol-agnostic. Defaults to the
+     * original 30-75 ticks.
+     */
+    takeProfitTickBand?: TakeProfitTickBand;
   }): RiskAssessment {
-    const { side, entryPrice, atrValue, structureSwingPrice, signalKind, breakoutLevelPrice, accountState, limits, pointValue, tickSize, bars, averageProbability, takeProfitRMultiple, confidenceTiers, explicitStopPrice, explicitTakeProfitPrice, srProximityGateSuspended = false, srGateBypass = false, hardTakeProfitDollars, assistantTakeProfitCapPoints, dailyPlanZones = [], requiresDailyPlan = false, hasConflictingCrossSymbolPosition = false } = params;
+    const { side, entryPrice, atrValue, structureSwingPrice, signalKind, breakoutLevelPrice, accountState, limits, pointValue, tickSize, bars, averageProbability, takeProfitRMultiple, confidenceTiers, explicitStopPrice, explicitTakeProfitPrice, srProximityGateSuspended = false, srGateBypass = false, hardTakeProfitDollars, assistantTakeProfitCapPoints, dailyPlanZones = [], requiresDailyPlan = false, hasConflictingCrossSymbolPosition = false, takeProfitTickBand = DEFAULT_TAKE_PROFIT_TICK_BAND } = params;
 
     // Checked first, before circuit breakers even -- a hard, unconditional
     // block that doesn't depend on anything computed below (2026-09-01, see
@@ -512,7 +566,8 @@ export class RiskEngine {
       // Both this and the floor below are skippable via srProximityGateSuspended
       // (2026-08-06, see that param's comment) -- the level-existence/touch-count
       // checks above still ran and still apply either way.
-      if (!srProximityGateSuspended) {
+      // 2026-11-09: also off while SR_DISTANCE_BAND_ENABLED is false.
+      if (SR_DISTANCE_BAND_ENABLED && !srProximityGateSuspended) {
         if (signalKind === "reversal" && nearest.distanceInAtr > MAX_ENTRY_DISTANCE_ATR) {
           return {
             approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
@@ -653,10 +708,13 @@ export class RiskEngine {
         // condition above guarantees a real read exists, and that fallback
         // was the 5pt target behind the 1.75pt stop.
         const targetDistance = assistantTakeProfitCapPoints;
-        const takeProfitPrice = roundAwayFromEntry(side === "long" ? entryPrice.plus(targetDistance) : entryPrice.minus(targetDistance), entryPrice, tickSize);
-        const stopDistancePoints = targetDistance.dividedBy(MIN_REWARD_RISK_RATIO);
+        // Tick band first, THEN the stop from the banded target (2026-11-12:
+        // the stop used to come from the raw read, so a 210.75pt NQ read gave
+        // a 70.25pt stop against an 18.75pt banded target -- trade #602).
+        const takeProfitPrice = clampTakeProfitTicks(entryPrice, roundAwayFromEntry(side === "long" ? entryPrice.plus(targetDistance) : entryPrice.minus(targetDistance), entryPrice, tickSize), side, tickSize, takeProfitTickBand);
+        const stopDistancePoints = takeProfitPrice.minus(entryPrice).abs().dividedBy(MIN_REWARD_RISK_RATIO);
         const stopPrice = roundAwayFromEntry(side === "long" ? entryPrice.minus(stopDistancePoints) : entryPrice.plus(stopDistancePoints), entryPrice, tickSize);
-        const targetReason = `take-profit set to the assistant's session likely-move read (${targetDistance.toFixed(2)} pts)`;
+        const targetReason = `take-profit set to the assistant's session likely-move read (${targetDistance.toFixed(2)} pts, banded to ${takeProfitPrice.minus(entryPrice).abs().toFixed(2)})`;
         const inversion = rewardBelowRiskViolation(entryPrice, stopPrice, takeProfitPrice, side);
         if (inversion) {
           return {
@@ -697,8 +755,9 @@ export class RiskEngine {
       // ever relaxed, this is the behavior to restore, and both constants
       // are still exported for it.
       const targetDistance = assistantTakeProfitCapPoints;
-      const takeProfitPrice = roundAwayFromEntry(side === "long" ? entryPrice.plus(targetDistance) : entryPrice.minus(targetDistance), entryPrice, tickSize);
-      const stopDistancePoints = targetDistance.dividedBy(MIN_REWARD_RISK_RATIO);
+      // Tick band first, then the stop from the banded target -- same fix as above (2026-11-12).
+      const takeProfitPrice = clampTakeProfitTicks(entryPrice, roundAwayFromEntry(side === "long" ? entryPrice.plus(targetDistance) : entryPrice.minus(targetDistance), entryPrice, tickSize), side, tickSize, takeProfitTickBand);
+      const stopDistancePoints = takeProfitPrice.minus(entryPrice).abs().dividedBy(MIN_REWARD_RISK_RATIO);
       const stopPrice = roundAwayFromEntry(side === "long" ? entryPrice.minus(stopDistancePoints) : entryPrice.plus(stopDistancePoints), entryPrice, tickSize);
       const inversion = rewardBelowRiskViolation(entryPrice, stopPrice, takeProfitPrice, side);
       if (inversion) {
@@ -715,7 +774,7 @@ export class RiskEngine {
         takeProfitPrice,
         trailTicks: null,
         stopDistancePoints,
-        reason: `take-profit set to the assistant's session likely-move read (${targetDistance.toFixed(2)} pts), stop derived at 1/${MIN_REWARD_RISK_RATIO.toString()} of that distance (${stopDistancePoints.toFixed(2)} pts) -- no daily-plan range set for this symbol yet, so the range gate is a no-op, but the stop/target relationship is unchanged -- confidence tier: ${Math.round(averageProbability * 100)}% avg -> ${quantity} contract(s)`,
+        reason: `take-profit set to the assistant's session likely-move read (${targetDistance.toFixed(2)} pts, banded to ${takeProfitPrice.minus(entryPrice).abs().toFixed(2)}), stop derived at 1/${MIN_REWARD_RISK_RATIO.toString()} of that distance (${stopDistancePoints.toFixed(2)} pts) -- no daily-plan range set for this symbol yet, so the range gate is a no-op, but the stop/target relationship is unchanged -- confidence tier: ${Math.round(averageProbability * 100)}% avg -> ${quantity} contract(s)`,
         tripKillSwitch: false,
         nearestSrLevel: nearest?.level ?? null,
         targetSrLevel: null,
@@ -803,7 +862,12 @@ export class RiskEngine {
     let takeProfitPrice = plan.takeProfitPrice;
     let stopPrice = plan.stopPrice;
     let stopDistancePoints = plan.stopDistancePoints;
+    // True when one of the steps below set the stop FROM the target (S/R
+    // level, min-target widening, daily-plan cap) -- the tick band at the end
+    // then re-derives it from the banded target (2026-11-12).
+    let stopDerivedFromTarget = false;
     if (targetLevel !== null) {
+      stopDerivedFromTarget = true;
       const levelDistance = new Decimal(targetLevel.price).minus(entryPrice).abs();
       takeProfitPrice = roundAwayFromEntry(side === "long" ? entryPrice.plus(levelDistance) : entryPrice.minus(levelDistance), entryPrice, tickSize);
       stopDistancePoints = levelDistance.dividedBy(MIN_REWARD_RISK_RATIO);
@@ -812,6 +876,7 @@ export class RiskEngine {
     let widenedToMinTarget = false;
     if (minTargetDistance !== null && takeProfitPrice.minus(entryPrice).abs().lt(minTargetDistance)) {
       widenedToMinTarget = true;
+      stopDerivedFromTarget = true;
       takeProfitPrice = roundAwayFromEntry(side === "long" ? entryPrice.plus(minTargetDistance) : entryPrice.minus(minTargetDistance), entryPrice, tickSize);
       // Toward entry, same reason as the daily-plan cap below: a stop rounded
       // a hair wider would fail the 3:1 floor on rounding alone.
@@ -852,6 +917,7 @@ export class RiskEngine {
       const targetDistance = takeProfitPrice.minus(entryPrice).abs();
       if (targetDistance.gt(assistantTakeProfitCapPoints)) {
         cappedByDailyPlan = targetDistance;
+        stopDerivedFromTarget = true;
         takeProfitPrice = roundAwayFromEntry(
           side === "long" ? entryPrice.plus(assistantTakeProfitCapPoints) : entryPrice.minus(assistantTakeProfitCapPoints),
           entryPrice,
@@ -884,7 +950,11 @@ export class RiskEngine {
     // The session cap can pull a target back under the minimum -- there is
     // then no room for a target worth taking, so skip rather than trade a
     // cramped one.
-    if (minTargetDistance !== null && takeProfitPrice.minus(entryPrice).abs().lt(minTargetDistance.minus(tickSize))) {
+    //
+    // 2026-11-08: off -- the 30-75 tick band below caps every target well under
+    // 3x the 5-minute ATR anyway, so this would only reject trades the band then
+    // clamps.
+    if (false as boolean && minTargetDistance !== null && takeProfitPrice.minus(entryPrice).abs().lt(minTargetDistance.minus(tickSize))) {
       return {
         approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
         reason: `take-profit room too small: the session's likely-move cap leaves ${takeProfitPrice.minus(entryPrice).abs().toFixed(2)} pts, under the ${minTargetDistance.toFixed(2)} pt minimum (${MIN_TARGET_ATR5_MULTIPLE.toString()}x the 5-minute ATR of ${atr5!.toFixed(2)})`,
@@ -911,7 +981,41 @@ export class RiskEngine {
     // or the S/R-level override just above) already satisfies this ratio
     // exactly by construction, so this mostly fires against that one
     // remaining case in practice.
-    const rewardRiskViolation = rewardRiskFloorViolation(stopDistancePoints, takeProfitPrice, entryPrice);
+    // Take-profit band (stops.ts's TAKE_PROFIT_MIN_TICKS/MAX_TICKS, operator
+    // request 2026-11-08): last word on the target, from whichever source above
+    // set it. The stop is not touched.
+    const unbandedTakeProfitPrice = takeProfitPrice;
+    takeProfitPrice = clampTakeProfitTicks(entryPrice, takeProfitPrice, side, tickSize, takeProfitTickBand);
+    // 2026-11-12 (trade #602): a stop that was itself derived from the target
+    // follows the banded target -- otherwise a 73pt cap gives a 24pt stop
+    // against an 18.75pt banded target. Rounded toward entry, same reason as
+    // the cap step. An ATR/structure stop is still left alone (2026-11-08,
+    // "keep current stop"); REWARD_MUST_EXCEED_RISK catches it if it ends up
+    // wider than the banded target.
+    let stopRebandedReason = "";
+    if (stopDerivedFromTarget && !takeProfitPrice.eq(unbandedTakeProfitPrice)) {
+      const bandedDistance = takeProfitPrice.minus(entryPrice).abs();
+      const rawStop = side === "long"
+        ? entryPrice.minus(bandedDistance.dividedBy(MIN_REWARD_RISK_RATIO))
+        : entryPrice.plus(bandedDistance.dividedBy(MIN_REWARD_RISK_RATIO));
+      stopPrice = side === "long" ? rawStop.toNearest(tickSize, Decimal.ROUND_CEIL) : rawStop.toNearest(tickSize, Decimal.ROUND_FLOOR);
+      stopDistancePoints = entryPrice.minus(stopPrice).abs();
+      stopRebandedReason = `, stop re-derived at 1/${MIN_REWARD_RISK_RATIO.toString()} of it (${stopDistancePoints.toFixed(2)} pts)`;
+    }
+    const takeProfitBandReason = takeProfitPrice.eq(unbandedTakeProfitPrice)
+      ? ""
+      : `; take-profit held to the ${takeProfitTickBand.minTicks}-${takeProfitTickBand.maxTicks} tick band (${takeProfitPrice.minus(entryPrice).abs().toFixed(2)} pts, was ${unbandedTakeProfitPrice.minus(entryPrice).abs().toFixed(2)})${stopRebandedReason}`;
+    const sideViolation = rewardBelowRiskViolation(entryPrice, stopPrice, takeProfitPrice, side);
+    if (sideViolation) {
+      return {
+        approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
+        reason: `reward:risk invariant: ${sideViolation}`,
+        tripKillSwitch: false, nearestSrLevel: nearest?.level ?? null, targetSrLevel: usedTargetLevel,
+      };
+    }
+
+    // Off as of 2026-11-08 -- see ENFORCE_REWARD_RISK_FLOOR.
+    const rewardRiskViolation = ENFORCE_REWARD_RISK_FLOOR ? rewardRiskFloorViolation(stopDistancePoints, takeProfitPrice, entryPrice) : null;
     if (rewardRiskViolation) {
       return {
         approved: false, quantity: 0, stopPrice: null, takeProfitPrice: null, trailTicks: null, stopDistancePoints: null,
@@ -930,7 +1034,7 @@ export class RiskEngine {
       reason:
         (usedTargetLevel
           ? `${plan.sizingReason}; take-profit targets the nearest real ${usedTargetLevel.type} level (${usedTargetLevel.price.toFixed(2)}, ${usedTargetLevel.touches} touches), stop derived at 1/${MIN_REWARD_RISK_RATIO.toString()} of that distance (${stopDistancePoints.toFixed(2)} pts) instead of a generic R-multiple`
-          : plan.sizingReason) + minTargetReason + dailyPlanCapReason + dailyPlanRangeReason,
+          : plan.sizingReason) + minTargetReason + dailyPlanCapReason + dailyPlanRangeReason + takeProfitBandReason,
       tripKillSwitch: false,
       // nearest can be null here only when srGateBypass skipped the
       // existence check above entirely (e.g. no real level was ever found)

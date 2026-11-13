@@ -43,7 +43,7 @@ describe("computeTradePlan -- minimum risk:reward floor", () => {
     });
 
     expect(plan.sizingReason).not.toContain("stop widened");
-    expect(plan.stopDistancePoints.toNumber()).toBeCloseTo(3, 5);
+    expect(plan.stopDistancePoints.toNumber()).toBeCloseTo(3 * 1.5, 5); // x STOP_DISTANCE_WIDEN_FACTOR (2026-11-08)
   });
 
   it("widens the stop as far as the fixed-dollar floor demands, with no upper cap (removed 2026-09-08, see stops.ts's MIN_REWARD_RISK_RATIO comment)", () => {
@@ -65,7 +65,7 @@ describe("computeTradePlan -- minimum risk:reward floor", () => {
     // widening needed here, the interesting case (needing MORE than the
     // natural distance) is covered by the near-zero-ATR tests above.
     expect(plan.sizingReason).not.toContain("stop widened");
-    expect(plan.stopDistancePoints.toNumber()).toBeCloseTo(6.667 * 1.5, 4);
+    expect(plan.stopDistancePoints.toNumber()).toBeCloseTo(15.25, 4); // 10.0005 x STOP_DISTANCE_WIDEN_FACTOR 1.5, rounded up to a whole tick (2026-11-08)
   });
 
   it("mirrors the widening below entry for a short (stop moves further above)", () => {
@@ -210,7 +210,8 @@ describe("computeTradePlan -- explicit stop/target override (strategy/trendPullb
 
     // 1.5x ATR default stop multiplier, uncapped (2026-09-08, see
     // risk/stops.ts's computeInitialStop) -- 10 x 1.5 = 15pt.
-    expect(withoutOverride.stopDistancePoints.toNumber()).toBeCloseTo(15, 5);
-    expect(withoutOverride.takeProfitPrice.minus(6000).abs().toNumber()).toBeCloseTo(15 * 3, 5); // stop x default takeProfitRMultiple(3.0)
+    // ...then x STOP_DISTANCE_WIDEN_FACTOR 1.5 (2026-11-08) = 22.5pt.
+    expect(withoutOverride.stopDistancePoints.toNumber()).toBeCloseTo(22.5, 5);
+    expect(withoutOverride.takeProfitPrice.minus(6000).abs().toNumber()).toBeCloseTo(22.5 * 3, 5); // stop x default takeProfitRMultiple(3.0)
   });
 });

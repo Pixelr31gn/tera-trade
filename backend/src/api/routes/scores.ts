@@ -4,7 +4,7 @@ import { prisma } from "../../db/client.js";
 import { requireApiKey } from "../../core/security.js";
 import { ACTIONABLE_STALE_MINUTES, computeActionability } from "../../scoring/actionability.js";
 import { computeTradePlan, RiskEngine, type RiskLimitsConfig } from "../../risk/index.js";
-import { MIN_REWARD_RISK_RATIO, roundAwayFromEntry, REQUIRE_DAILY_PLAN_SYMBOLS } from "../../risk/stops.js";
+import { MIN_REWARD_RISK_RATIO, roundAwayFromEntry, REQUIRE_DAILY_PLAN_SYMBOLS, takeProfitTickBandFor } from "../../risk/stops.js";
 import { computeSmartEntryPrice } from "../../analytics/smartEntry.js";
 import { computeSupportResistanceLevels, findNearestTargetLevel } from "../../analytics/supportResistance.js";
 import { DEFAULT_INSTRUMENTS, getInstrument } from "../../marketData/instruments.js";
@@ -83,6 +83,7 @@ async function wouldPassRiskEngine(score: Score, riskLimitsRow: RiskLimit, execu
     srProximityGateSuspended: isSrProximityGateSuspended(score.time),
     dailyPlanZones,
     requiresDailyPlan: REQUIRE_DAILY_PLAN_SYMBOLS.has(score.symbol),
+    takeProfitTickBand: takeProfitTickBandFor(score.symbol),
   });
   return assessment.approved;
 }

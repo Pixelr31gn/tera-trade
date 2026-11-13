@@ -80,6 +80,19 @@ export interface RecommendationScore {
   quantity: number;
 }
 
+/** GET /api/analytics/deciding-version -- which version's score triggers trades right now. */
+export interface DecidingVersionStatus {
+  session: string;
+  sessionStart: string;
+  mode: "session_best" | "cold_start_majority";
+  decidingVersion: RecommendationScore["strategyVersion"] | null;
+  countingVersions: RecommendationScore["strategyVersion"][];
+  rule: string;
+  thresholdPct: number;
+  minResolvedPerVersion: number;
+  versions: Array<{ version: RecommendationScore["strategyVersion"]; resolvedCount: number; winRate: number; eligible: boolean }>;
+}
+
 export interface ActionableRecommendation {
   id: number;
   time: string;
@@ -371,4 +384,30 @@ export interface TailorBlueprint {
   pitchTitle: string;
   pitchRatingAtGeneration: number;
   createdAt: string;
+}
+
+/** /api/analytics/ma-proximity -- the 20 MA entry checklist (2026-11-11). */
+export interface MaProximityRow {
+  label: string;
+  minutes: number;
+  ma: number | null;
+  ticks: number | null;
+  near: boolean;
+  source: "chart" | "bars";
+}
+
+export interface MaProximitySymbol {
+  symbol: string;
+  allowed: boolean;
+  reason: string;
+  price: number | null;
+  nearCount: number;
+  minNear: number;
+  maxTicks: number;
+  rows: MaProximityRow[];
+}
+
+export interface MaProximityStatus {
+  at: string;
+  symbols: MaProximitySymbol[];
 }

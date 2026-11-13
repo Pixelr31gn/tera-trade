@@ -39,6 +39,15 @@ export interface OrderWidget {
    * order (see setTrailDistanceTicks).
    */
   trailDistanceInput: Locator;
+  /**
+   * Only present once orderTypeSelect reads "Stop Market" (2026-11-12, hard
+   * stop). Selector inferred from the same `order-card-input-field-<name>`
+   * convention -- NOT confirmed live before the first real stop order (no
+   * flat window to check it in). setStopPrice verifies by reading the value
+   * back and, if the field isn't there, throws listing the input-field
+   * testids that ARE present, so nothing is submitted on a wrong guess.
+   */
+  stopPriceInput: Locator;
   /** Cancels every resting order for this symbol (not a single order by ID -- the ticket has no per-order cancel, only "Cancel Orders" for the whole symbol). */
   cancelOrdersButton: Locator;
 }
@@ -76,6 +85,7 @@ function buildOrderWidget(page: Page, buyButton: Locator, index: number): OrderW
     orderTypeSelect: page.locator('[data-testid="order-card-input-select-order-type"] [role="combobox"]').nth(index),
     limitPriceInput: page.locator('[data-testid="order-card-input-field-limit-price"] input').nth(index),
     trailDistanceInput: page.locator('[data-testid="order-card-input-field-trail-distance"] input').nth(index),
+    stopPriceInput: page.locator('[data-testid="order-card-input-field-stop-price"] input').nth(index),
     cancelOrdersButton: page.locator('[data-testid="order-card-click-button-cancel-orders"]').nth(index),
   };
 }
@@ -218,9 +228,10 @@ export async function setQuantity(widget: OrderWidget, quantity: number): Promis
   }
 }
 
-const ORDER_TYPE_LABEL: Record<"market" | "limit" | "trailingStop", string> = {
+const ORDER_TYPE_LABEL: Record<"market" | "limit" | "stopMarket" | "trailingStop", string> = {
   market: "Market",
   limit: "Limit",
+  stopMarket: "Stop Market",
   trailingStop: "Trailing Stop",
 };
 
@@ -230,7 +241,7 @@ const ORDER_TYPE_LABEL: Record<"market" | "limit" | "trailingStop", string> = {
  * (v1.3, see setTrailDistanceTicks) are used. No-ops if already on the
  * requested type, to avoid an unnecessary reopen-and-reselect on every call.
  */
-export async function setOrderType(widget: OrderWidget, orderType: "market" | "limit" | "trailingStop"): Promise<void> {
+export async function setOrderType(widget: OrderWidget, orderType: "market" | "limit" | "stopMarket" | "trailingStop"): Promise<void> {
   const label = ORDER_TYPE_LABEL[orderType];
   const currentText = (await widget.orderTypeSelect.textContent())?.trim();
   if (currentText === label) return;
@@ -282,6 +293,30 @@ export async function setTrailDistanceTicks(widget: OrderWidget, ticks: number):
   const value = await widget.trailDistanceInput.inputValue();
   if (Number(value) !== ticks) {
     throw new Error(`trail distance did not take effect -- input reads "${value}", expected ${ticks}`);
+  }
+}
+
+/**
+ * Fills a Stop Market order's stop price and verifies it by reading the
+ * input back (2026-11-12, hard stop). Only call after
+ * setOrderType(widget, "stopMarket"). If the inferred field isn't on the
+ * ticket, throws with the order-card input testids that are, so the caller
+ * rejects (nothing submitted) and the log names the real selector.
+ */
+export async function setStopPrice(widget: OrderWidget, price: Decimal, tickSize: Decimal): Promise<void> {
+  if (!(await widget.stopPriceInput.isVisible().catch(() => false))) {
+    const present = await widget.orderTypeSelect
+      .page()
+      .locator('[data-testid^="order-card-input-field-"]')
+      .evaluateAll((els) => [...new Set(els.map((e) => e.getAttribute("data-testid")))])
+      .catch(() => [] as Array<string | null>);
+    throw new Error(`stop price field not found on the Stop Market ticket -- input fields present: ${JSON.stringify(present)}`);
+  }
+  await widget.stopPriceInput.fill(price.toString());
+  await widget.stopPriceInput.press("Tab");
+  const value = new Decimal((await widget.stopPriceInput.inputValue()).replace(/,/g, "") || "NaN");
+  if (value.isNaN() || value.minus(price).abs().gt(tickSize.dividedBy(2))) {
+    throw new Error(`stop price did not take effect -- input reads "${value.toString()}", expected ${price.toString()}`);
   }
 }
 

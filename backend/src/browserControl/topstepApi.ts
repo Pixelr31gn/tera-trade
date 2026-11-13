@@ -61,3 +61,49 @@ export async function readApiOpenPosition(page: Page, contractPrefix: string): P
     return null;
   }
 }
+
+/** One resting order, as TopstepX's API reports it (2026-11-13). */
+export interface ApiOpenOrder {
+  id: number;
+  /** 1 = Limit, 4 = Stop (market), as seen live 2026-11-13 on chart-dragged orders. */
+  type: number;
+  /** 0 = buy, 1 = sell. */
+  side: number;
+  size: number;
+  limitPrice: number | null;
+  stopPrice: number | null;
+}
+
+const OPEN_ORDERS_SCRIPT = `(async (prefix) => {
+  const token = Object.keys(localStorage)
+    .map((k) => (localStorage.getItem(k) || "").replace(/"/g, ""))
+    .find((v) => v.startsWith("eyJ"));
+  if (!token) return null;
+  const activeKey = Object.keys(localStorage).find((k) => k.startsWith("activeAccount"));
+  const activeId = activeKey ? Number((localStorage.getItem(activeKey) || "").replace(/"/g, "")) : NaN;
+  if (!Number.isFinite(activeId)) return null;
+  const res = await fetch("https://api.topstepx.com/api/Order/searchOpen", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer " + token },
+    body: JSON.stringify({ accountId: activeId }),
+  });
+  if (!res.ok) return null;
+  const json = await res.json();
+  if (!json || !json.success || !Array.isArray(json.orders)) return null;
+  return json.orders
+    .filter((o) => o.contractId.includes("." + prefix + "."))
+    .map((o) => ({ id: o.id, type: o.type, side: o.side, size: o.size, limitPrice: o.limitPrice, stopPrice: o.stopPrice }));
+})`;
+
+/**
+ * Resting orders on the active account for a broker contract prefix (e.g.
+ * "MES"). Null means the API couldn't be read -- never treat that as "none".
+ * Read-only; added 2026-11-13 to verify chart-dragged stop/target orders.
+ */
+export async function readApiOpenOrders(page: Page, contractPrefix: string): Promise<ApiOpenOrder[] | null> {
+  try {
+    return (await page.evaluate(`${OPEN_ORDERS_SCRIPT}(${JSON.stringify(contractPrefix)})`)) as ApiOpenOrder[] | null;
+  } catch {
+    return null;
+  }
+}

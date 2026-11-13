@@ -6,6 +6,7 @@ import { fetcher } from "@/lib/api";
 import { RecommendationScore } from "@/lib/types";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
+import { DecidingVersionPanel, useDecidingVersion } from "@/components/DecidingVersionPanel";
 
 const VERSION_FILTERS = ["all", "v1", "v2", "v3", "v4", "v5", "v6", "v7"] as const;
 // v5/v6 (2026-07-21 / 2026-08-02) are deliberately NOT included here -- the
@@ -59,8 +60,20 @@ function groupSignals(rows: RecommendationScore[]): SignalGroup[] {
   return [...map.values()].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
 }
 
+/** A version's badge, plus a "decides" tag when that version's score is what triggers trades right now. */
+function VersionBadge({ version, decides }: { version: RecommendationScore["strategyVersion"]; decides: boolean }) {
+  return (
+    <span className="flex items-center gap-1">
+      <Badge text={version} tone={["v3", "v4", "v5", "v6", "v7"].includes(version) ? "good" : "neutral"} />
+      {decides && <Badge text="decides" tone="warn" />}
+    </span>
+  );
+}
+
 export default function RecommendationsPage() {
   const { data } = useSWR<RecommendationScore[]>("/api/recommendations?limit=300", fetcher, { refreshInterval: 8000 });
+  const { data: deciding } = useDecidingVersion();
+  const decides = (version: RecommendationScore["strategyVersion"]) => deciding?.countingVersions.includes(version) ?? false;
   const [versionFilter, setVersionFilter] = useState<(typeof VERSION_FILTERS)[number]>("all");
 
   // Rebuilds the Map/sort only when the underlying data or filter actually
@@ -74,6 +87,7 @@ export default function RecommendationsPage() {
 
   return (
     <div className="space-y-6">
+      <DecidingVersionPanel />
       <Panel
         title="Recommendation Feed"
         action={
@@ -93,20 +107,12 @@ export default function RecommendationsPage() {
         }
       >
         <p className="mb-3 text-xs text-gray-500">
-          Every signal is shadow-scored by v1/v2/v3/v5/v6/v7 -- see the Strategy page to compare their performance (v4
-          filter still works for historical rows from before it was removed 2026-07-15). &quot;Taken&quot; means that
-          version&apos;s own score cleared its threshold, not that a trade happened on its own.{" "}
-          <strong>As of 2026-08-07, both paper and live execute a signal once EITHER v3 alone clears 29.5% OR v6 alone
-          clears 29.55% -- no other version&apos;s agreement is required either way.</strong> (Replaces the earlier
-          v1/v2/v3-majority and v6-mandatory-plus-confirmation rules, then added the v3-solo leg alongside v6-solo the
-          same day; see engine/loop.ts&apos;s V3_SOLO_EXECUTION_THRESHOLD/V6_SOLO_EXECUTION_THRESHOLD for the full
-          history.) A nearby support/resistance level (currently suspended 24h, see the <code>open-gate</code> skill)
-          and passing risk sizing still have to clear too either way. A row only links to a real trade # once all of
-          that clears.{" "}
-          <strong>In the All tab</strong>, rows for the same signal are grouped together with a V1/V2/V3 completeness
-          badge -- filter to the <strong>V3</strong> or <strong>V6</strong> tabs to see the two versions that actually
-          decide execution. Continuous-scan rows (a running per-bar directional read, not a detected chart pattern)
-          share the exact same v3-or-v6-solo rule as a real strategy signal.
+          Every signal is scored by v1/v2/v3/v5/v6/v7, but only the version(s) tagged <strong>decides</strong> can
+          trigger a trade -- see <strong>Deciding now</strong> above: this session&apos;s best-performing version alone
+          at 65%+, or a v1/v2/v3 majority vote while the session is still warming up. &quot;Taken&quot; means that
+          version&apos;s own score cleared its threshold, not that a trade happened. A deciding score still has to pass
+          the Tilt, your chart box, the daily plan and the risk checks; a row only links to a trade # once all of that
+          clears.
         </p>
 
         {groups && (
@@ -141,8 +147,8 @@ export default function RecommendationsPage() {
                         .sort((a, b) => a.strategyVersion.localeCompare(b.strategyVersion))
                         .map((s) => (
                           <tr key={s.id}>
-                            <td className="w-16">
-                              <Badge text={s.strategyVersion} tone={["v3", "v4", "v5", "v6", "v7"].includes(s.strategyVersion) ? "good" : "neutral"} />
+                            <td className="w-28">
+                              <VersionBadge version={s.strategyVersion} decides={decides(s.strategyVersion)} />
                             </td>
                             <td className="w-16">{(s.probability * 100).toFixed(1)}%</td>
                             <td className="w-40">
@@ -191,7 +197,7 @@ export default function RecommendationsPage() {
                   <td className="font-medium text-white">{s.symbol}</td>
                   <td className="text-gray-400">{s.strategyId}</td>
                   <td>
-                    <Badge text={s.strategyVersion} tone={["v3", "v4", "v5", "v6", "v7"].includes(s.strategyVersion) ? "good" : "neutral"} />
+                    <VersionBadge version={s.strategyVersion} decides={decides(s.strategyVersion)} />
                   </td>
                   <td>
                     <Badge text={s.side} tone={s.side === "long" ? "good" : "bad"} />

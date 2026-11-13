@@ -3,8 +3,11 @@ import { prisma } from "../../db/client.js";
 import { requireApiKey } from "../../core/security.js";
 import { getOpeningRangeStats } from "../../engine/openingRangeCache.js";
 import { DEFAULT_INSTRUMENTS } from "../../marketData/instruments.js";
-import { TradingSession } from "../../analytics/session.js";
+import { classifySession, TradingSession } from "../../analytics/session.js";
+import { describeDecidingVersion } from "../../engine/loop.js";
+import { getSessionPerformanceSelection } from "../../engine/sessionPerformanceCache.js";
 import { MLScorer, MIN_TRAINING_ROWS_PER_SESSION } from "../../scoring/training.js";
+import { evaluateMaProximityForActiveSymbols } from "../../engine/maProximity.js";
 
 // Both session-performance and version-divergence scan every Score row in
 // the window -- unbounded, that scan (and the response) only ever gets
@@ -22,7 +25,16 @@ function analyticsLookbackSince(): Date {
 // Score table on every request -- previously happening every 30s from two
 // pages at once for session-performance alone -- was pure waste. A 24h TTL
 // still refreshes daily while cutting that DB load to near zero.
-const ANALYTICS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+//
+// 2026-10-14: 24h -> 2 minutes, operator report ("why aren't these filling
+// properly"). After the 2026-10-13 stats reset (scores archived and cleared)
+// the Strategy page kept showing a snapshot frozen from just after a 06:34
+// restart -- 14/217/1,181 setups per session -- while the table already held
+// 2,906 per version, most of them labeled. Measured with the reset table
+// (~26k rows): strategy-comparison 0.30s, session-performance 0.20s, so a
+// short TTL costs little. Revisit if the table grows back toward the old
+// ~140k rows and these get slow again.
+const ANALYTICS_CACHE_TTL_MS = 2 * 60 * 1000;
 const analyticsCache = new Map<string, { value: unknown; computedAt: number }>();
 export async function cached<T>(key: string, compute: () => Promise<T>): Promise<T> {
   const hit = analyticsCache.get(key);
@@ -54,6 +66,23 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
   // actually performed well within that session.
   app.get("/api/analytics/session-performance", async () => {
     return cached("session-performance", () => computeSessionPerformanceForAllSessions());
+  });
+
+  // Which version decides execution right now (2026-10-13, operator: "add an
+  // indicator as to which v that is so I can monitor it"). Live state, so NOT
+  // behind the 24h `cached` above -- it reads the engine's own 5-minute
+  // session-selection cache, the exact selection determineConsensus uses.
+  // 20 MA checklist (2026-11-11, operator request: "add that checklist to the
+  // dashboard"): the same multi-timeframe check the entry gate runs
+  // (engine/maProximity.ts), per active symbol, at the current price.
+  app.get("/api/analytics/ma-proximity", async () => {
+    const symbols = await evaluateMaProximityForActiveSymbols();
+    return { at: new Date().toISOString(), symbols };
+  });
+
+  app.get("/api/analytics/deciding-version", async () => {
+    const now = new Date();
+    return { session: classifySession(now), ...describeDecidingVersion(await getSessionPerformanceSelection(now)) };
   });
 
   // v1 vs v2 vs v3 side-by-side, per session -- all three versions are

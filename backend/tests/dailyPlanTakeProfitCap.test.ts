@@ -1,7 +1,7 @@
 import { Decimal } from "decimal.js";
 import { describe, expect, it } from "vitest";
 import { RiskEngine } from "../src/risk/engine.js";
-import { MIN_REWARD_RISK_RATIO } from "../src/risk/stops.js";
+import { MIN_REWARD_RISK_RATIO, takeProfitTickBandFor } from "../src/risk/stops.js";
 import { DEFAULT_CONFIDENCE_TIERS } from "../src/risk/sizing.js";
 import type { AccountRiskState, RiskLimitsConfig } from "../src/risk/circuitBreakers.js";
 import type { NewsRiskStatus } from "../src/news/risk.js";
@@ -77,6 +77,8 @@ describe("daily-plan take-profit cap", () => {
       srGateBypass: true,
       hardTakeProfitDollars: undefined,
       assistantTakeProfitCapPoints: cap,
+      // 2026-11-12: this fixture is an NQ trade (30000, $2/pt), so it gets NQ's band (120-300 ticks).
+      takeProfitTickBand: takeProfitTickBandFor("NQ"),
     });
   }
 
@@ -104,12 +106,12 @@ describe("daily-plan take-profit cap", () => {
 
     const reward = capped.takeProfitPrice!.minus(30000).abs();
     const risk = new Decimal(30000).minus(capped.stopPrice!).abs();
-    // Target pulled down to the cap (a tick of rounding away from entry).
-    expect(reward.minus(cap).abs().toNumber()).toBeLessThanOrEqual(0.25);
-    // Stop re-derived at cap/3 -- NOT left at its original, larger distance.
+    // 2026-11-08: the 30-75 tick take-profit band (stops.ts's TAKE_PROFIT_MAX_TICKS) is applied last, and the 3:1 / reward>risk floors are off (risk/engine.ts's ENFORCE_REWARD_RISK_FLOOR, REWARD_MUST_EXCEED_RISK).
+    // So the target lands on the band's 75-tick (18.75pt) maximum, not the cap.
+    // 2026-11-12: NQ's band is 120-300 ticks (30-75pts), so the 73.33 cap fits inside it (73.50 after rounding).
+    expect(reward.toNumber()).toBe(73.5);
+    // Stop still re-derived at cap/3 -- NOT left at its original, larger distance.
     expect(risk.minus(cap.dividedBy(MIN_REWARD_RISK_RATIO)).abs().toNumber()).toBeLessThanOrEqual(0.25);
-    // The invariant that makes re-deriving mandatory rather than optional.
-    expect(reward.gt(risk)).toBe(true);
     expect(capped.reason).toContain("capped at the assistant's session likely-move read");
   });
 
@@ -126,9 +128,11 @@ describe("daily-plan take-profit cap", () => {
 
     const reward = new Decimal(30000).minus(capped.takeProfitPrice!);
     const risk = capped.stopPrice!.minus(new Decimal(30000));
-    expect(reward.minus(cap).abs().toNumber()).toBeLessThanOrEqual(0.25);
-    expect(risk.minus(cap.dividedBy(MIN_REWARD_RISK_RATIO)).abs().toNumber()).toBeLessThanOrEqual(0.25);
-    expect(reward.gt(risk)).toBe(true);
+    // 2026-11-08: the 30-75 tick take-profit band (stops.ts's TAKE_PROFIT_MAX_TICKS) is applied last, and the 3:1 / reward>risk floors are off (risk/engine.ts's ENFORCE_REWARD_RISK_FLOOR, REWARD_MUST_EXCEED_RISK).
+    // A 5pt cap is under the band's 30-tick (7.5pt) minimum, so the target is pushed out to it.
+    // 2026-11-12: NQ's band minimum is 120 ticks (30pts), and the stop now follows the banded target (30/3).
+    expect(reward.toNumber()).toBe(30);
+    expect(risk.minus(reward.dividedBy(MIN_REWARD_RISK_RATIO)).abs().toNumber()).toBeLessThanOrEqual(0.25);
   });
 
   it("would have bounded live trade 121", () => {
@@ -136,14 +140,42 @@ describe("daily-plan take-profit cap", () => {
     // session cap of 73.33. A wide ATR reproduces that shape of plan.
     const cap = new Decimal("73.33");
     const uncapped = assess("long", null, new Decimal(107));
-    const rewardUncapped = uncapped.takeProfitPrice!.minus(30000).abs();
-    expect(rewardUncapped.gt(cap)).toBe(true); // the situation being fixed
+    // 2026-11-08: the 30-75 tick take-profit band (stops.ts's TAKE_PROFIT_MAX_TICKS) is applied last, and the 3:1 / reward>risk floors are off (risk/engine.ts's ENFORCE_REWARD_RISK_FLOOR, REWARD_MUST_EXCEED_RISK).
+    // The band alone already holds trade 121's 481.50pt target to 18.75pt.
+    // 2026-11-12: with no cap, the ~160pt ATR stop now sits against a 75pt banded
+    // target, and REWARD_MUST_EXCEED_RISK is back on -- so it is rejected outright.
+    expect(uncapped.approved).toBe(false);
+    expect(uncapped.reason).toContain("is not smaller than reward");
 
     const capped = assess("long", cap, new Decimal(107));
     const reward = capped.takeProfitPrice!.minus(30000).abs();
     const risk = new Decimal(30000).minus(capped.stopPrice!).abs();
     expect(reward.lte(cap.plus("0.25"))).toBe(true);
-    expect(risk.lt(rewardUncapped)).toBe(true); // stop tightened with the target
-    expect(reward.gt(risk)).toBe(true);
+    expect(risk.lt(new Decimal("481.50"))).toBe(true); // stop tightened with the cap, nowhere near trade 121's
+  });
+});
+
+// 2026-11-12, trade #602: NQ short, 5 MNQ, -$702.50. A 210.75pt likely-move
+// read gave a 70.25pt stop while the target was banded to 18.75pt. The stop
+// must follow the banded target, and NQ gets its own (wider) band.
+describe("trade #602 -- stop follows the banded target", () => {
+  it("never risks more than the banded target on the daily-plan branch", async () => {
+    const { takeProfitTickBandFor: bandFor } = await import("../src/risk/stops.js");
+    const entry = new Decimal("28401.5");
+    const run = (band?: ReturnType<typeof bandFor>) => new RiskEngine().assessNewTrade({
+      side: "short", entryPrice: entry, atrValue: new Decimal(60), structureSwingPrice: null, signalKind: "reversal", breakoutLevelPrice: null,
+      accountState: accountState(), limits: BASE_LIMITS, pointValue: new Decimal(2), tickSize: TICK, newsStatus: NO_NEWS,
+      bars: barsWithPivotLowNear(28300), averageProbability: 0.75, takeProfitRMultiple: MIN_REWARD_RISK_RATIO,
+      confidenceTiers: DEFAULT_CONFIDENCE_TIERS, srGateBypass: true, hardTakeProfitDollars: 5,
+      assistantTakeProfitCapPoints: new Decimal("210.75"), takeProfitTickBand: band,
+    });
+    for (const [band, expectedTarget] of [[undefined, 18.75], [bandFor("NQ"), 75]] as const) {
+      const a = run(band);
+      expect(a.approved).toBe(true);
+      const reward = entry.minus(a.takeProfitPrice!).toNumber();
+      const risk = a.stopPrice!.minus(entry).toNumber();
+      expect(reward).toBe(expectedTarget);
+      expect(risk).toBeLessThanOrEqual(reward / 3 + 0.25);
+    }
   });
 });

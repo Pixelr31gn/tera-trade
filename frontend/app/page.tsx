@@ -20,6 +20,8 @@ import { StatCard } from "@/components/StatCard";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/Badge";
 import { ActionBanner } from "@/components/ActionBanner";
+import { DecidingVersionPanel } from "@/components/DecidingVersionPanel";
+import { MaProximityPanel } from "@/components/MaProximityPanel";
 import { DailyPlanPanel } from "@/components/DailyPlanPanel";
 import { TradableSymbolsPanel } from "@/components/TradableSymbolsPanel";
 import { PpmSpeedGauge } from "@/components/PpmSpeedGauge";
@@ -100,6 +102,10 @@ export default function DashboardPage() {
       )}
 
       <ActionBanner />
+
+      <DecidingVersionPanel />
+
+      <MaProximityPanel />
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4 lg:grid-cols-6">
         <StatCard label="Account Equity" value={`$${latestEquity.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />

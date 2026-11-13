@@ -52,6 +52,8 @@ export async function applyMirrorCommand(broker: BrokerClient, cmd: MirrorComman
       return requireMethod(broker.placeTrailingStop, broker, cmd.kind)(cmd.symbol, cmd.side, cmd.quantity, cmd.trailTicks);
     case "placeTakeProfitOrder":
       return requireMethod(broker.placeTakeProfitOrder, broker, cmd.kind)(cmd.symbol, cmd.side, cmd.quantity, cmd.limitPrice);
+    case "placeStopOrder":
+      return requireMethod(broker.placeStopOrder, broker, cmd.kind)(cmd.symbol, cmd.side, cmd.quantity, cmd.stopPrice);
     case "cancelRestingOrder":
       return requireMethod(broker.cancelRestingOrder, broker, cmd.kind)(cmd.symbol);
     default: {
@@ -156,6 +158,9 @@ export class FanOutBroker implements BrokerClient {
   }
   placeTakeProfitOrder(symbol: string, side: "long" | "short", quantity: number, limitPrice: import("decimal.js").Decimal): Promise<OrderResult> {
     return this.mirror({ kind: "placeTakeProfitOrder", symbol, side, quantity, limitPrice });
+  }
+  placeStopOrder(symbol: string, side: "long" | "short", quantity: number, stopPrice: import("decimal.js").Decimal): Promise<OrderResult> {
+    return this.mirror({ kind: "placeStopOrder", symbol, side, quantity, stopPrice });
   }
   cancelRestingOrder(symbol: string): Promise<OrderResult> {
     return this.mirror({ kind: "cancelRestingOrder", symbol });

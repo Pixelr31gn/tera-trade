@@ -104,6 +104,25 @@ widened 2026-08-11 (60s -> 180s poll budget, 2s -> 8s per-fetch timeout) specifi
 busy cold-start backend was starving its own polling loop and spuriously giving up even when the
 frontend was fine.
 
+## Step 6: fill any bar gap from TopstepX (every launch where the backend was started)
+
+The backend only builds `bars_1m` while it's running, so any downtime leaves a hole -- and the
+entry gates read EMAs straight off that history (2026-11-11: two days down left the 5m/60m EMAs
+on Monday's prices, and the 20 MA / timeframe-alignment gates blocked every signal against
+numbers hundreds of points stale). Once the TopstepX tab is logged in (Step 4 done), run:
+
+```bash
+cd backend && npx tsx --env-file=.env scripts/backfillFromTopstep.ts        # last 48h
+cd backend && npx tsx --env-file=.env scripts/backfillFromTopstep.ts 120    # longer downtime: hours back
+```
+
+It pulls TopstepX's own 1-minute bars (MES/MNQ/MGC) through the logged-in tab, read-only, and
+inserts only minutes not already stored -- safe to run against a live backend and safe to re-run.
+Add `--dry` to see counts without writing. Report each symbol's "inserted N" line; inserted 0 just
+means there was no gap. If it prints "no TopstepX session token", the tab isn't logged in yet --
+that's Step 4, not a script problem. If the backend was already healthy and you started nothing,
+skip this step.
+
 ## What "done" looks like
 
 - `/health` returns `{"status":"ok"}`.
@@ -112,3 +131,4 @@ frontend was fine.
 - Frontend responds 200.
 - The debug Chrome window has both a TopstepX tab and a `localhost:3000` dashboard tab.
 - No duplicate backend/frontend processes (re-run Step 1's process check).
+- If the backend was started: Step 6's TopstepX backfill ran and its per-symbol counts were reported.

@@ -12,7 +12,7 @@
  *
  * Only these six methods change account state, so these are the only commands:
  *   placeOrder, requestClosePosition, flattenPosition,
- *   placeTrailingStop, placeTakeProfitOrder, cancelRestingOrder
+ *   placeTrailingStop, placeTakeProfitOrder, placeStopOrder (2026-11-12), cancelRestingOrder
  */
 import type { Decimal } from "decimal.js";
 import type { OrderRequest, OrderResult } from "../brokers/types.js";
@@ -23,6 +23,7 @@ export type MirrorCommand =
   | { kind: "flattenPosition"; symbol: string; side: "long" | "short"; quantity: number }
   | { kind: "placeTrailingStop"; symbol: string; side: "long" | "short"; quantity: number; trailTicks: number }
   | { kind: "placeTakeProfitOrder"; symbol: string; side: "long" | "short"; quantity: number; limitPrice: Decimal }
+  | { kind: "placeStopOrder"; symbol: string; side: "long" | "short"; quantity: number; stopPrice: Decimal }
   | { kind: "cancelRestingOrder"; symbol: string };
 
 export type MirrorCommandKind = MirrorCommand["kind"];

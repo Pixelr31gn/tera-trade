@@ -310,9 +310,9 @@ const READ_TOOLS: { tool: FunctionDeclaration; handler: ReadToolHandler }[] = [
 // AssistantAction row regardless of outcome, and broadcasts on the live feed.
 // ---------------------------------------------------------------------------
 
-type AuditOutcome = { ok: true; summary: string; raw?: unknown; tradeId?: number } | { ok: false; error: string };
+export type AuditOutcome = { ok: true; summary: string; raw?: unknown; tradeId?: number } | { ok: false; error: string };
 
-async function recordAssistantAction(toolName: string, input: unknown, outcome: AuditOutcome, assistantMessageId: number | null): Promise<void> {
+export async function recordAssistantAction(toolName: string, input: unknown, outcome: AuditOutcome, assistantMessageId: number | null): Promise<void> {
   const row = await prisma.assistantAction.create({
     data: {
       toolName,
@@ -603,6 +603,16 @@ const WRITE_TOOLS: { tool: FunctionDeclaration; handler: WriteToolHandler }[] = 
         }
         if (zones.length === 2) {
           const [lower, upper] = [...zones].sort((a, b) => a.priceLow - b.priceLow) as [DailyPlanZoneInput, DailyPlanZoneInput];
+          // risk/engine.ts's evaluateDailyPlanRange treats touching or
+          // overlapping zones as NO plan at all -- refuse them here instead of
+          // saving a plan that silently does nothing (2026-10-12: many
+          // "successful" model-written plans were exactly that).
+          if (!(Number(lower.priceHigh) < Number(upper.priceLow))) {
+            return {
+              ok: false,
+              error: `the two zones must not touch or overlap: support ${lower.priceLow}-${lower.priceHigh} must end below resistance ${upper.priceLow}-${upper.priceHigh} starts.`,
+            };
+          }
           const lastBar = (await loadRecentBars(symbol, 1)).at(-1);
           const price = lastBar && Date.now() - lastBar.time.getTime() < 15 * 60_000 ? lastBar.close : null;
           if (price !== null && !(Number(lower.priceLow) < price && Number(upper.priceHigh) > price)) {

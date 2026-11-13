@@ -23,7 +23,7 @@ import { classifySession } from "../analytics/session.js";
 import { classifyRegime } from "../regime/classifier.js";
 import { atr as computeAtr } from "../regime/indicators.js";
 import { getInstrument } from "../marketData/instruments.js";
-import { computeInitialStop, HARD_TAKE_PROFIT_DOLLARS, REQUIRE_DAILY_PLAN_SYMBOLS } from "../risk/stops.js";
+import { computeInitialStop, HARD_TAKE_PROFIT_DOLLARS, REQUIRE_DAILY_PLAN_SYMBOLS, takeProfitTickBandFor } from "../risk/stops.js";
 import { RiskEngine } from "../risk/engine.js";
 import { computeSmartEntryPrice } from "../analytics/smartEntry.js";
 import { buildSetupFeatures } from "../scoring/features.js";
@@ -292,6 +292,7 @@ export async function decideOnBar(params: {
         // REQUIRE_DAILY_PLAN_SYMBOLS is always blocked in a backtest too -- the honest reflection
         // of what live now does with no plan set, not a divergence between the two paths.
         requiresDailyPlan: REQUIRE_DAILY_PLAN_SYMBOLS.has(symbol),
+        takeProfitTickBand: takeProfitTickBandFor(symbol),
         hasConflictingCrossSymbolPosition,
       });
 

@@ -21,6 +21,7 @@ import { scoreSetupV6 } from "./ruleScorerV6.js";
 import { scoreSetupV7 } from "./ruleScorerV7.js";
 import { computeHistoricalAdjustment } from "./v3HistoricalAdjustment.js";
 import { applyTiltToProbability, computeTiltAdjustment, type TiltAdjustment } from "./tiltAdjustment.js";
+import { computePaperWeight } from "./paperWeight.js";
 import { MLScorer } from "./training.js";
 
 export interface GatedScore {
@@ -203,9 +204,13 @@ export async function evaluateSetup(
     // historical-similarity lookup. See ruleScorerV5.ts's header for where
     // its factors came from.
     const result = scoreSetupV5(features);
-    const probability = applyTiltToProbability(result.probability, tilt);
+    // Paper Weight (scoring/paperWeight.ts) -- v5 only: Time & Sales buy/sell
+    // pressure, plus a bonus when the opposing side's volume dries up.
+    const paperWeight = computePaperWeight(features.orderFlowSnapshot, features.side, at);
+    const probability = applyTiltToProbability(result.probability, { adjustmentPoints: tilt.adjustmentPoints + paperWeight.adjustmentPoints, description: "" });
     const decision: "taken" | "skipped_score" = probability >= settings.minScoreThreshold ? "taken" : "skipped_score";
-    return { probability, decision, factors: [...result.factors, tiltFactor(tilt)], modelUsed: "rule_v5", blockReason: null, v3Bucket: null };
+    const paperWeightFactor: FactorContribution = { name: "paperWeight", contribution: paperWeight.adjustmentPoints, description: paperWeight.description };
+    return { probability, decision, factors: [...result.factors, tiltFactor(tilt), paperWeightFactor], modelUsed: "rule_v5", blockReason: null, v3Bucket: null };
   }
 
   if (version === "v6") {

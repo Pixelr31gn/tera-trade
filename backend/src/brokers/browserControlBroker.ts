@@ -27,6 +27,7 @@
 import { Decimal } from "decimal.js";
 import type { Browser, Page } from "playwright-core";
 import { connectToChrome, findPage } from "../browserWatch/cdpClient.js";
+import { dragProtectiveOrderOnChart } from "../browserControl/chartDrag.js";
 import {
   findBlockingModalText,
   findOrSwitchToOrderWidget,
@@ -34,6 +35,7 @@ import {
   setLimitPrice,
   setOrderType,
   setQuantity,
+  setStopPrice,
   setTrailDistanceTicks,
   submitBuy,
   submitCancelOrders,
@@ -57,6 +59,13 @@ const logger = childLogger("browserControlBroker");
 // measured against a real distribution of fill latency yet. 4 attempts
 // 750ms apart (~3s total) trades a small amount of added latency on every
 // real entry for eliminating the phantom-trade failure mode entirely.
+// 2026-11-13: stop/take-profit orders are placed by dragging on the TopstepX chart first (see
+// tryChartDrag), falling back to the order ticket. false = ticket only, as before.
+// Was false until the supervised live test 2026-11-13 (MES 1-lot: stop moved 7517.25 -> 7539.50,
+// target moved 7589.50 -> 7574.25 by drag, both read back from TopstepX). On by operator direction
+// the same day: "you're supposed to set the tp and sl based on the tp and sl drag we just made".
+const CHART_DRAG_ENABLED = true;
+
 const FILL_CONFIRMATION_RETRIES = 4;
 const FILL_CONFIRMATION_DELAY_MS = 750;
 
@@ -366,7 +375,7 @@ export class BrowserControlBroker implements BrokerClient {
    * Unknown (API unreadable) is allowed through: leaving a real position
    * unprotected is the worse failure.
    */
-  private async protectiveOrderRefusal(page: Page, symbol: string, side: "long" | "short", contractPrefix: string, takeProfitLimit?: Decimal): Promise<string | null> {
+  private async protectiveOrderRefusal(page: Page, symbol: string, side: "long" | "short", contractPrefix: string, takeProfitLimit?: Decimal, stopTrigger?: Decimal): Promise<string | null> {
     const position = await readApiOpenPosition(page, contractPrefix);
     if (position === null) return null;
     if (position === "flat") return `${symbol} position is already flat -- not placing a protective order that would open a new position`;
@@ -375,6 +384,13 @@ export class BrowserControlBroker implements BrokerClient {
       const wrongSide = side === "long" ? takeProfitLimit.lte(position.averagePrice) : takeProfitLimit.gte(position.averagePrice);
       if (wrongSide) {
         return `${symbol} take-profit ${takeProfitLimit.toString()} is on the losing side of the ${position.averagePrice} entry -- it would fill instantly`;
+      }
+    }
+    if (stopTrigger) {
+      // A stop on the winning side of the entry isn't a stop-loss; refuse rather than guess.
+      const wrongSide = side === "long" ? stopTrigger.gte(position.averagePrice) : stopTrigger.lte(position.averagePrice);
+      if (wrongSide) {
+        return `${symbol} stop ${stopTrigger.toString()} is not on the losing side of the ${position.averagePrice} entry -- not placing it`;
       }
     }
     return null;
@@ -575,6 +591,9 @@ export class BrowserControlBroker implements BrokerClient {
         return { brokerOrderId: "", status: "rejected", error: refusal };
       }
 
+      const dragged = await this.tryChartDrag(page, symbol, side, "limit", limitPrice);
+      if (dragged) return dragged;
+
       await setOrderType(widget, "limit");
       await setLimitPrice(widget, limitPrice, instrument.tickSize);
       await setQuantity(widget, quantity);
@@ -597,6 +616,87 @@ export class BrowserControlBroker implements BrokerClient {
       return { brokerOrderId: `browser-tp-${Date.now()}`, status: "pending" };
     } catch (err) {
       logger.error({ symbol, err: String(err) }, "place_take_profit_order_failed");
+      return { brokerOrderId: "", status: "rejected", error: String(err) };
+    }
+  }
+
+  /**
+   * 2026-11-13 (operator: emulate the chart drag; "if it doesnt work then we can fall back to
+   * something else"): place a stop/take-profit by dragging from the position's tag on the TopstepX
+   * chart -- browserControl/chartDrag.ts. Returns an OrderResult when the drag decided the outcome,
+   * or null when the caller should fall back to the order ticket (nothing pressed, or the drag
+   * produced no order). Any order the drag DID create -- even a wrong one -- returns a result, so
+   * the ticket never adds a second order on top of it (the 2026-11-12 stacking incident).
+   */
+  private async tryChartDrag(page: Page, symbol: string, side: "long" | "short", kind: "stop" | "limit", price: Decimal): Promise<OrderResult | null> {
+    if (!CHART_DRAG_ENABLED || getSettings().dryRunOrders) return null;
+    const instrument = getInstrument(symbol);
+    const drag = await dragProtectiveOrderOnChart(page, { symbol, contractPrefix: instrument.brokerContractPrefix, side, kind, price, tickSize: instrument.tickSize }).catch(
+      (err: unknown) => ({ outcome: "no_order" as const, reason: `drag threw: ${String(err)}` }),
+    );
+    if (drag.outcome !== "order_created") {
+      logger.warn({ symbol, kind, price: price.toString(), reason: drag.reason }, "chart_drag_not_placed_falling_back_to_ticket");
+      return null;
+    }
+    if (!drag.matches) {
+      // Something real now rests on the account; don't stack another order on it. Logged loudly by chartDrag.ts.
+      logger.error({ symbol, kind, price: price.toString(), reason: drag.reason }, "chart_drag_created_unexpected_order_not_retrying");
+    }
+    return { brokerOrderId: `chart-drag-${drag.order.id}`, status: "pending" };
+  }
+
+  // 2026-11-12, hard stop: same plain-ticket shape as placeTakeProfitOrder, Stop Market instead of Limit.
+  placeStopOrder(symbol: string, side: "long" | "short", quantity: number, stopPrice: Decimal): Promise<OrderResult> {
+    return this.withTicket(() => this.placeStopOrderOnTicket(symbol, side, quantity, stopPrice));
+  }
+
+  private async placeStopOrderOnTicket(symbol: string, side: "long" | "short", quantity: number, stopPrice: Decimal): Promise<OrderResult> {
+    const settings = getSettings();
+    if (quantity <= 0) {
+      return { brokerOrderId: "", status: "rejected", error: "refusing to place a stop order with non-positive quantity" };
+    }
+    try {
+      const page = await this.getPage();
+
+      const blockingModal = await findBlockingModalText(page);
+      if (blockingModal) {
+        return { brokerOrderId: "", status: "rejected", error: `TopstepX is showing a blocking modal: "${blockingModal}"` };
+      }
+
+      const instrument = getInstrument(symbol);
+      const widget = await findOrSwitchToOrderWidget(page, instrument.brokerContractPrefix);
+      if (!widget) {
+        return { brokerOrderId: "", status: "rejected", error: `no order-entry widget found for contract prefix "${instrument.brokerContractPrefix}"` };
+      }
+
+      const refusal = await this.protectiveOrderRefusal(page, symbol, side, instrument.brokerContractPrefix, undefined, stopPrice);
+      if (refusal) {
+        logger.warn({ symbol, side, reason: refusal }, "stop_order_refused");
+        return { brokerOrderId: "", status: "rejected", error: refusal };
+      }
+
+      const dragged = await this.tryChartDrag(page, symbol, side, "stop", stopPrice);
+      if (dragged) return dragged;
+
+      await setOrderType(widget, "stopMarket");
+      await setStopPrice(widget, stopPrice, instrument.tickSize);
+      await setQuantity(widget, quantity);
+
+      // Protects an EXISTING position -- opposite side (sell-stop under a long, buy-stop over a short).
+      const result = side === "long" ? await submitSell(widget, settings.dryRunOrders) : await submitBuy(widget, settings.dryRunOrders);
+
+      if (result.dryRun) {
+        return {
+          brokerOrderId: "",
+          status: "rejected",
+          error: `DRY_RUN_ORDERS is enabled -- would have clicked "${result.buttonText}" for a stop order at ${stopPrice.toString()}. Set DRY_RUN_ORDERS=false to place real orders.`,
+        };
+      }
+
+      logger.info({ symbol, side, quantity, stopPrice: stopPrice.toString(), buttonText: result.buttonText }, "stop_order_clicked");
+      return { brokerOrderId: `browser-stop-${Date.now()}`, status: "pending" };
+    } catch (err) {
+      logger.error({ symbol, err: String(err) }, "place_stop_order_failed");
       return { brokerOrderId: "", status: "rejected", error: String(err) };
     }
   }

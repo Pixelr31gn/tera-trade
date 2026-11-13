@@ -167,7 +167,21 @@ export interface OrderFlowSnapshot {
   /** The panel's "Longs avg price" / "Shorts avg price" -- recorded for analysis (Score.features), not used in decisions. */
   tiltLongsAvgPrice?: number | null;
   tiltShortsAvgPrice?: number | null;
+  /**
+   * Time & Sales tape over rolling windows, for v5's "Paper Weight" factor
+   * (2026-10-13, scoring/paperWeight.ts): aggressor buy/sell volume in the
+   * last TAPE_WINDOW_MS and in the window before it, as of tapeAtMs (the
+   * flush that built them). Optional so existing snapshot literals stay valid.
+   */
+  tapeBuyRecent?: number;
+  tapeSellRecent?: number;
+  tapeBuyPrior?: number;
+  tapeSellPrior?: number;
+  tapeAtMs?: number;
 }
+
+/** Length of each Time & Sales window Paper Weight compares (recent vs the one before it). */
+export const TAPE_WINDOW_MS = 60_000;
 
 function emptyState(): SymbolState {
   return {
@@ -186,6 +200,27 @@ function emptyState(): SymbolState {
     tiltShortsAvgPrice: null,
     tiltUpdatedAtMs: null,
   };
+}
+
+export interface TapeSlice {
+  atMs: number;
+  buy: number;
+  sell: number;
+}
+
+/**
+ * Pure: sums flush slices into the recent window (atMs in (now - W, now]) and
+ * the prior window ((now - 2W, now - W]). Exported for tests.
+ */
+export function summarizeTape(slices: TapeSlice[], nowMs: number, windowMs: number = TAPE_WINDOW_MS) {
+  let buyRecent = 0, sellRecent = 0, buyPrior = 0, sellPrior = 0;
+  for (const s of slices) {
+    const age = nowMs - s.atMs;
+    if (age < 0) continue;
+    if (age < windowMs) { buyRecent += s.buy; sellRecent += s.sell; }
+    else if (age < 2 * windowMs) { buyPrior += s.buy; sellPrior += s.sell; }
+  }
+  return { buyRecent, sellRecent, buyPrior, sellPrior };
 }
 
 export type OrderFlowFlushHandler = (snapshot: OrderFlowSnapshot) => Promise<void>;
@@ -210,6 +245,7 @@ export class OrderFlowListener {
   private cdp: CDPSession | undefined;
   private flushTimer: ReturnType<typeof setInterval> | undefined;
   private state = new Map<string, SymbolState>();
+  private tapeSlices = new Map<string, TapeSlice[]>();
   private warnedUnmappedRoots = new Set<string>();
 
   constructor(
@@ -312,7 +348,7 @@ export class OrderFlowListener {
         this.handleDom(msg.arguments as [string, Array<{ price: number; volume: number; type: number }>]);
         break;
       case "RealTimeTradeLogWithSpeed":
-        this.handleTradeLog(msg.arguments as [string, Array<{ price: number; volume: number }>]);
+        this.handleTradeLog(msg.arguments as [string, Array<{ price: number; volume: number; type?: number }>]);
         break;
       case "RealTimeTilt":
         this.handleTilt(msg.arguments as [Array<TiltRow>]);
@@ -349,7 +385,7 @@ export class OrderFlowListener {
     }
   }
 
-  private handleTradeLog(args: [string, Array<{ price: number; volume: number }>]): void {
+  private handleTradeLog(args: [string, Array<{ price: number; volume: number; type?: number }>]): void {
     const [contractRef, trades] = args;
     const symbol = this.resolveContractSymbol(contractRef);
     if (!symbol || !Array.isArray(trades)) return;
@@ -358,10 +394,21 @@ export class OrderFlowListener {
     for (const trade of trades) {
       if (!trade) continue;
       state.tradeCount += 1;
-      // Tick-rule aggressor classification: a print at/above the resting
-      // ask is buyer-initiated, at/below the resting bid is seller-initiated.
-      // This is the standard Lee-Ready approach and doesn't depend on
-      // guessing an undocumented "buy/sell" code from the feed itself.
+      // The feed's own aggressor flag first (2026-10-13): checked live against
+      // the tick rule below, type 0 printed at the ask (buy) and type 1 at the
+      // bid (sell) ~97% of the time by contracts -- and unlike the tick rule
+      // it also labels prints between the bid and ask, which were dropped.
+      if (trade.type === 0) {
+        state.buyVolume += trade.volume;
+        continue;
+      }
+      if (trade.type === 1) {
+        state.sellVolume += trade.volume;
+        continue;
+      }
+      // Fallback, tick-rule aggressor classification: a print at/above the
+      // resting ask is buyer-initiated, at/below the resting bid is
+      // seller-initiated (standard Lee-Ready).
       if (state.bestAskPrice !== null && trade.price >= state.bestAskPrice) {
         state.buyVolume += trade.volume;
       } else if (state.bestBidPrice !== null && trade.price <= state.bestBidPrice) {
@@ -392,8 +439,21 @@ export class OrderFlowListener {
   }
 
   private async flush(): Promise<void> {
+    const nowMs = Date.now();
     for (const [symbol, state] of this.state) {
-      const snapshot: OrderFlowSnapshot = { symbol, ...state };
+      // Keep each flush's buy/sell as a slice for Paper Weight's rolling
+      // Time & Sales windows (two windows' worth, then drop).
+      const slices = this.tapeSlices.get(symbol) ?? [];
+      slices.push({ atMs: nowMs, buy: state.buyVolume, sell: state.sellVolume });
+      while (slices.length > 0 && nowMs - slices[0]!.atMs >= 2 * TAPE_WINDOW_MS) slices.shift();
+      this.tapeSlices.set(symbol, slices);
+      const tape = summarizeTape(slices, nowMs);
+      const snapshot: OrderFlowSnapshot = {
+        symbol, ...state,
+        tapeBuyRecent: tape.buyRecent, tapeSellRecent: tape.sellRecent,
+        tapeBuyPrior: tape.buyPrior, tapeSellPrior: tape.sellPrior,
+        tapeAtMs: nowMs,
+      };
       await this.onFlush(snapshot);
       // Point-in-time fields (best bid/ask, tilt) carry forward unchanged;
       // only the accumulated-over-the-window trade counters reset.

@@ -26,6 +26,10 @@
  * the entry -- otherwise a dead feed would silently turn the rule off.
  *
  * Pure: the caller passes the snapshot and the current time.
+ *
+ * 2026-11-08 (operator: "remove the tilt gate"): checkTiltAlignment is no
+ * longer called by the engine. tiltReading/tiltFavoredSide still feed the
+ * Tilt score factor (scoring/tiltAdjustment.ts).
  */
 import type { OrderFlowSnapshot } from "../browserWatch/orderFlowListener.js";
 

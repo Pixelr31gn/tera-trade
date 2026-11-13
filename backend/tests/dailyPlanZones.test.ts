@@ -161,7 +161,9 @@ describe("RiskEngine.assessNewTrade -- daily plan range gate", () => {
     expect(assessment.stopPrice?.toNumber()).toBeGreaterThan(20020);
     // Target at/through the support zone's near edge (19990) -- also real
     // and independent, ~25pts from entry.
-    expect(assessment.takeProfitPrice?.toNumber()).toBeLessThanOrEqual(19990);
+    // 2026-11-08: the 30-75 tick take-profit band (stops.ts's TAKE_PROFIT_MAX_TICKS) is applied last, and the 3:1 / reward>risk floors are off (risk/engine.ts's ENFORCE_REWARD_RISK_FLOOR, REWARD_MUST_EXCEED_RISK).
+    // 25pts is past the band's 18.75pt maximum.
+    expect(assessment.takeProfitPrice?.toNumber()).toBe(20015 - 18.75);
   });
 
   it("approves a long fading support at full confidence-tier size, with stop/target anchored to the real range boundaries, not derived from each other", () => {
@@ -169,7 +171,8 @@ describe("RiskEngine.assessNewTrade -- daily plan range gate", () => {
     expect(assessment.approved).toBe(true);
     expect(assessment.quantity).toBe(2);
     expect(assessment.stopPrice?.toNumber()).toBeLessThan(19980);
-    expect(assessment.takeProfitPrice?.toNumber()).toBeGreaterThanOrEqual(20010);
+    // 2026-11-08: the 30-75 tick take-profit band (stops.ts's TAKE_PROFIT_MAX_TICKS) is applied last, and the 3:1 / reward>risk floors are off (risk/engine.ts's ENFORCE_REWARD_RISK_FLOOR, REWARD_MUST_EXCEED_RISK).
+    expect(assessment.takeProfitPrice?.toNumber()).toBe(19985 + 18.75);
   });
 
   it("approves a breakout trade with normal ATR-based stop/target, not a level-anchored one", () => {
@@ -178,7 +181,7 @@ describe("RiskEngine.assessNewTrade -- daily plan range gate", () => {
     // Normal ATR-based stop (atrValue 6.667 x 1.5 multiplier, no cap as of
     // 2026-09-08) -- nowhere near the far side of the range the way a
     // fade's stop would be.
-    expect(assessment.stopDistancePoints?.toNumber()).toBeCloseTo(6.667 * 1.5, 2);
+    expect(assessment.stopDistancePoints?.toNumber()).toBeCloseTo(15.25, 2); // then x STOP_DISTANCE_WIDEN_FACTOR 1.5, rounded up to a tick (2026-11-08)
   });
 });
 
@@ -286,8 +289,10 @@ describe("RiskEngine.assessNewTrade -- hardTakeProfitDollars stop is derived fro
   it("a long's stop is derived from 1/3 of the take-profit distance, not the support boundary", () => {
     const assessment = assessHardTarget("long", RANGE_ZONES, new Decimal(60));
     expect(assessment.approved).toBe(true);
-    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(60, 1);
-    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(20, 1);
+    // 2026-11-08: the 30-75 tick take-profit band (stops.ts's TAKE_PROFIT_MAX_TICKS) is applied last, and the 3:1 / reward>risk floors are off (risk/engine.ts's ENFORCE_REWARD_RISK_FLOOR, REWARD_MUST_EXCEED_RISK). The stop is still 60/3.
+    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(18.75, 1);
+    // 2026-11-12: the stop now follows the BANDED target (18.75/3), not the raw read (60/3) -- trade #602.
+    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(18.75 / 3, 1);
     expect(assessment.stopPrice?.toNumber()).toBeGreaterThan(19970);
     expect(assessment.reason).toContain("stop derived at 1/3 of that distance");
   });
@@ -295,8 +300,10 @@ describe("RiskEngine.assessNewTrade -- hardTakeProfitDollars stop is derived fro
   it("a short's stop is derived from 1/3 of the take-profit distance, not the resistance boundary", () => {
     const assessment = assessHardTarget("short", RANGE_ZONES, new Decimal(60));
     expect(assessment.approved).toBe(true);
-    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(60, 1);
-    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(20, 1);
+    // Band applied last, stop still 60/3 -- see the long case above.
+    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(18.75, 1);
+    // 2026-11-12: the stop now follows the BANDED target (18.75/3), not the raw read (60/3) -- trade #602.
+    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(18.75 / 3, 1);
     expect(assessment.stopPrice?.toNumber()).toBeLessThan(20030);
     expect(assessment.reason).toContain("stop derived at 1/3 of that distance");
   });
@@ -315,16 +322,19 @@ describe("RiskEngine.assessNewTrade -- hardTakeProfitDollars stop is derived fro
 
   it("when the assistant has set a likely-move read this session, it becomes the take-profit target directly", () => {
     const assessment = assessHardTarget("long", RANGE_ZONES, new Decimal(70));
-    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(70, 1);
-    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(70 / 3, 1);
+    // Band applied last (see above): the target stops at 18.75, the stop still follows the read.
+    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(18.75, 1);
+    // 2026-11-12: the stop follows the banded target, not the read (was 70/3).
+    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(18.75 / 3, 1);
     expect(assessment.reason).toContain("assistant's session likely-move read");
   });
 
   it("a looser assistant likely-move read also becomes the target directly", () => {
     const assessment = assessHardTarget("long", RANGE_ZONES, new Decimal(500));
     expect(assessment.approved).toBe(true);
-    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(500, 1);
-    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(500 / 3, 1);
+    expect(assessment.takeProfitPrice!.minus(20000).abs().toNumber()).toBeCloseTo(18.75, 1); // band applied last
+    // 2026-11-12: the stop follows the banded target, not the read (was 500/3).
+    expect(assessment.stopDistancePoints!.toNumber()).toBeCloseTo(18.75 / 3, 1);
   });
 
   it("a null assistant cap behaves the same as no cap at all -- both leave this branch entirely", () => {
@@ -391,7 +401,9 @@ describe("RiskEngine.assessNewTrade -- every approved trade risks less than it s
             expect(a.takeProfitPrice!.lt(entry), label).toBe(true);
             expect(a.stopPrice!.gt(entry), label).toBe(true);
           }
-          expect(reward.gt(risk), label + ": risk " + risk.toString() + " vs reward " + reward.toString()).toBe(true);
+          // 2026-11-08: the 30-75 tick take-profit band (stops.ts's TAKE_PROFIT_MAX_TICKS) is applied last, and the 3:1 / reward>risk floors are off (risk/engine.ts's ENFORCE_REWARD_RISK_FLOOR, REWARD_MUST_EXCEED_RISK).
+          // So reward can now be under risk; what must hold is the band itself.
+          expect(reward.gte(7.5) && reward.lte(18.75), label + ": reward " + reward.toString()).toBe(true);
         }
       }
     }

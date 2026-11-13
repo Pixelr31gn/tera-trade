@@ -68,10 +68,13 @@ describe("minimum take-profit distance (3x the 5-minute ATR)", () => {
     expect(a.stopPrice!.minus(20000).toNumber()).toBeCloseTo(4, 0);
   });
 
-  it("skips the trade when the session cap leaves less room than the minimum", () => {
+  // 2026-11-08: no longer skipped -- the take-profit-room rejection is off,
+  // superseded by the 30-75 tick band (stops.ts's TAKE_PROFIT_MAX_TICKS),
+  // which pushes a 6pt target out to its 7.5pt minimum instead.
+  it("no longer skips the trade when the session cap leaves less room than the minimum", () => {
     const a = assess("long", new Decimal(6));
-    expect(a.approved).toBe(false);
-    expect(a.reason).toContain("take-profit room too small");
+    expect(a.approved).toBe(true);
+    expect(a.takeProfitPrice!.minus(20000).toNumber()).toBe(7.5);
   });
 
   it("still trades when the session cap allows the minimum", () => {

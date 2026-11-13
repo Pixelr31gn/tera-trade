@@ -113,8 +113,10 @@ describe.skipIf(!hasRealDb)("replay equivalence (Phase 1 definition of done)", (
     ({ prisma } = await import("../src/db/client.js"));
     const loopModule = await import("../src/engine/loop.js");
     ({ TradingEngine } = loopModule);
-    loopModule.setTiltGateEnabled(false); // synthetic bars, no TopstepX Tilt feed
-    loopModule.setChartZoneGateEnabled(false); // ...and no TopstepX chart
+    loopModule.setEmaProximityGateEnabled(false); // synthetic bars sit wherever they sit relative to the 20 EMA
+    loopModule.setChartZoneGateEnabled(false); // no TopstepX chart
+    loopModule.setTimeframeAlignmentGateEnabled(false); // ...and no real multi-timeframe history
+    loopModule.setTrendStrengthGateEnabled(false); // ...or a strong trend
     ({ SimulatedBroker } = await import("../src/brokers/simulatedBroker.js"));
     ({ ensureDefaultAccount } = await import("../src/engine/bootstrap.js"));
     ({ decideOnBar } = await import("../src/replay/decisionCore.js"));

@@ -45,6 +45,80 @@ export function fiveMinuteAtrPoints(oneMinuteBars: OhlcBar[]): Decimal | null {
   return last === undefined || last <= 0 ? null : new Decimal(last);
 }
 
+/**
+ * Every initial stop distance (swing, structure or ATR basis) is multiplied by
+ * this before the target is set from it (2026-11-08, operator request, live
+ * and unvalidated: "entry and exit rules for high probability executions").
+ * Why: in the 2026-11-08 analysis the median stopped trade lasted 1.1
+ * minutes, 64% were stopped within 2 minutes, and stopped trades ran ~14.7
+ * points against them on average with NQ's ATR ~10.7 -- stops sitting inside
+ * ordinary noise. 1.5 is a hand-set first value, not fitted. The target
+ * stays takeProfitRMultiple x the widened distance, so it moves out too.
+ * Append any retune here.
+ */
+export const STOP_DISTANCE_WIDEN_FACTOR = new Decimal("1.5");
+
+/**
+ * Time exit (same request and evidence source): a trade still open this many
+ * minutes after entry, with no trailing stop armed yet, is closed at market.
+ * In that analysis trades held 10-30 minutes averaged -$7.81/contract and 30+
+ * minutes -$5.74, against roughly breakeven under 3 minutes -- a hypothesis,
+ * not a validated edge. Append any retune here.
+ */
+export const TIME_EXIT_MINUTES = 10;
+
+/**
+ * Take-profit distance band, in ticks (2026-11-08, operator: "tp ticks should
+ * be 30-75 max"; ES/NQ 7.5-18.75pts, GC 3-7.5pts). Applied by
+ * risk/engine.ts's assessNewTrade as the LAST step, after every other target
+ * source (R-multiple, S/R level, 5m-ATR minimum, daily-plan cap), and the
+ * stop is left where that source put it -- the operator chose "keep current
+ * stop, drop 3:1" over shrinking the stop to target/3, so reward:risk can now
+ * be well under 1:1. Replayed on 428 real NQ entries (10-minute time exit,
+ * net of costs) before the change: every stop/target pair in this band came
+ * out negative or within noise of zero (best: 16.5pt stop / 75-tick target,
+ * +$1.20 +/- 1.50 per contract). Append any retune here.
+ */
+export const TAKE_PROFIT_MIN_TICKS = 30;
+export const TAKE_PROFIT_MAX_TICKS = 75;
+
+export interface TakeProfitTickBand {
+  minTicks: number;
+  maxTicks: number;
+}
+
+/**
+ * Per-symbol overrides of the 30-75 tick band. NQ 4x -> 120-300 ticks
+ * (30-75pts) (2026-11-12, operator: "fix that however you can", after trade
+ * #602: NQ short, 5 MNQ, -$702.50). The flat 75-tick cap held NQ's target to
+ * 18.75pts while its stop -- derived from the uncapped 210.75pt likely-move
+ * read -- sat 70.25pts away, so it risked $702.50 to make $187.50. NQ trades
+ * ~3.7x ES's price, so the same tick count is a much smaller move on NQ; 4x
+ * keeps NQ's band at the same 30-75 *points* the operator's ES band is in
+ * ticks/4. Not harness-validated. The stop on the daily-plan branches is now
+ * derived from the banded target (risk/engine.ts), not the raw read.
+ */
+export const TAKE_PROFIT_TICK_BAND_BY_SYMBOL: Readonly<Record<string, TakeProfitTickBand>> = {
+  NQ: { minTicks: 120, maxTicks: 300 },
+};
+export const DEFAULT_TAKE_PROFIT_TICK_BAND: TakeProfitTickBand = { minTicks: TAKE_PROFIT_MIN_TICKS, maxTicks: TAKE_PROFIT_MAX_TICKS };
+export function takeProfitTickBandFor(symbol: string): TakeProfitTickBand {
+  return TAKE_PROFIT_TICK_BAND_BY_SYMBOL[symbol] ?? DEFAULT_TAKE_PROFIT_TICK_BAND;
+}
+
+/** `takeProfitPrice` moved so its distance from entry sits inside the band (default [TAKE_PROFIT_MIN_TICKS, TAKE_PROFIT_MAX_TICKS]) ticks, on the trade's own side. */
+export function clampTakeProfitTicks(entryPrice: Decimal, takeProfitPrice: Decimal, side: "long" | "short", tickSize: Decimal, band: TakeProfitTickBand = DEFAULT_TAKE_PROFIT_TICK_BAND): Decimal {
+  const ticks = takeProfitPrice.minus(entryPrice).times(side === "long" ? 1 : -1).dividedBy(tickSize);
+  const clamped = Decimal.min(Decimal.max(ticks, band.minTicks), band.maxTicks).round();
+  const distance = clamped.times(tickSize);
+  return side === "long" ? entryPrice.plus(distance) : entryPrice.minus(distance);
+}
+
+/** True once a trade with no trailing stop armed has been open TIME_EXIT_MINUTES or longer. */
+export function isPastTimeExit(entryTime: Date, now: Date, trailingStopArmed: boolean, minutes: number = TIME_EXIT_MINUTES): boolean {
+  return !trailingStopArmed && now.getTime() - entryTime.getTime() >= minutes * 60_000;
+}
+
 export interface StopPlan {
   stopPrice: Decimal;
   stopDistancePoints: Decimal;
@@ -186,7 +260,31 @@ export function computeInitialStop(
   side: "long" | "short",
   atrValue: Decimal,
   structureSwingPrice: Decimal | null,
-  opts: { atrMultiplier?: Decimal; takeProfitRMultiple?: Decimal; tickSize?: Decimal; chandelierAtrMultiplier?: Decimal; recentBars?: OhlcBar[] } = {}
+  opts: { atrMultiplier?: Decimal; takeProfitRMultiple?: Decimal; tickSize?: Decimal; chandelierAtrMultiplier?: Decimal; recentBars?: OhlcBar[]; stopWidenFactor?: Decimal } = {}
+): StopPlan {
+  const plan = computeUnwidenedStop(entryPrice, side, atrValue, structureSwingPrice, opts);
+  const widenFactor = opts.stopWidenFactor ?? STOP_DISTANCE_WIDEN_FACTOR;
+  if (widenFactor.eq(1)) return plan;
+  // Widen, rounded up to a whole tick so the stop stays a valid price.
+  const tickSize = opts.tickSize ?? new Decimal("0.25");
+  const takeProfitRMultiple = opts.takeProfitRMultiple ?? new Decimal("3.0");
+  const raw = plan.stopDistancePoints.times(widenFactor);
+  const distance = tickSize.gt(0) ? raw.dividedBy(tickSize).ceil().times(tickSize) : raw;
+  const direction = side === "long" ? -1 : 1;
+  return {
+    ...plan,
+    stopDistancePoints: distance,
+    stopPrice: entryPrice.plus(distance.times(direction)),
+    takeProfitPrice: entryPrice.minus(distance.times(takeProfitRMultiple).times(direction)),
+  };
+}
+
+function computeUnwidenedStop(
+  entryPrice: Decimal,
+  side: "long" | "short",
+  atrValue: Decimal,
+  structureSwingPrice: Decimal | null,
+  opts: { atrMultiplier?: Decimal; takeProfitRMultiple?: Decimal; tickSize?: Decimal; chandelierAtrMultiplier?: Decimal; recentBars?: OhlcBar[] }
 ): StopPlan {
   const atrMultiplier = opts.atrMultiplier ?? new Decimal("1.5");
   // 3.0 (not the more common 2.0) so the point-based target already satisfies

@@ -50,6 +50,15 @@ describe("wireCodec — commands", () => {
     expect(out.limitPrice.equals(precise)).toBe(true);
   });
 
+  it("round-trips a hard-stop placeStopOrder command (2026-11-12)", () => {
+    const stop = new Decimal("7628.75");
+    const out = roundTripCommand({ kind: "placeStopOrder", symbol: "ES", side: "long", quantity: 5, stopPrice: stop });
+    if (out.kind !== "placeStopOrder") throw new Error("kind");
+    expect(out.stopPrice.equals(stop)).toBe(true);
+    expect(out.side).toBe("long");
+    expect(out.quantity).toBe(5);
+  });
+
   it("round-trips the plain symbol/side/qty commands", () => {
     expect(roundTripCommand({ kind: "requestClosePosition", symbol: "ES" })).toEqual({ kind: "requestClosePosition", symbol: "ES" });
     expect(roundTripCommand({ kind: "flattenPosition", symbol: "ES", side: "short", quantity: 2 })).toEqual({
