@@ -200,6 +200,11 @@ const EnvSchema = z.object({
   // reliability -- disqualifying for a path that executes real trades with
   // zero human confirmation).
   GEMINI_API_KEY: z.string().default(""),
+  // Claude for the assistant (ASSISTANT_PROVIDER="claude", assistant/claudeLoop.ts),
+  // added 2026-11-14 on operator request. Its own model setting, since
+  // ASSISTANT_MODEL holds the Gemini model name.
+  ANTHROPIC_API_KEY: z.string().default(""),
+  ANTHROPIC_MODEL: z.string().default("claude-opus-5-5"),
   // Pinned to a specific version, not the "-latest" alias -- confirmed live
   // 2026-08-28 that the alias currently resolves to gemini-3.7-flash, a
   // days-old release returning consistent 503 "high demand" errors, while
@@ -229,7 +234,7 @@ const EnvSchema = z.object({
   // per-feature provider knob. Defaults to "gemini" so an unset .env is
   // unchanged behavior; switching requires deliberately setting this AND
   // pointing OLLAMA_BASE_URL at wherever Qwen is actually reachable.
-  ASSISTANT_PROVIDER: z.enum(["gemini", "ollama"]).default("gemini"),
+  ASSISTANT_PROVIDER: z.enum(["gemini", "ollama", "claude"]).default("gemini"),
   // Ollama's server address for the active ASSISTANT_PROVIDER="ollama" path.
   // Defaults to a local server for safety (a fresh checkout with the
   // provider flipped on but no address configured should fail loudly, not
@@ -410,10 +415,12 @@ export interface Settings {
   tradeseaMaxConsecutiveLosses: number | undefined;
   tradeseaMaxDailyTrades: number | undefined;
   geminiApiKey: string;
+  anthropicApiKey: string;
+  anthropicModel: string;
   assistantModel: string;
   assistantEnabled: boolean;
   assistantActionsConfirmed: boolean;
-  assistantProvider: "gemini" | "ollama";
+  assistantProvider: "gemini" | "ollama" | "claude";
   ollamaBaseUrl: string;
   ollamaModel: string;
   scoutEnabled: boolean;
@@ -512,6 +519,8 @@ export function getSettings(): Settings {
     tradeseaMaxConsecutiveLosses: env.TRADESEA_MAX_CONSECUTIVE_LOSSES,
     tradeseaMaxDailyTrades: env.TRADESEA_MAX_DAILY_TRADES,
     geminiApiKey: env.GEMINI_API_KEY,
+    anthropicApiKey: env.ANTHROPIC_API_KEY,
+    anthropicModel: env.ANTHROPIC_MODEL,
     assistantModel: env.ASSISTANT_MODEL,
     assistantEnabled: env.ASSISTANT_ENABLED,
     assistantActionsConfirmed: env.ASSISTANT_ACTIONS_CONFIRMED,

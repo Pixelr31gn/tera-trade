@@ -30,6 +30,7 @@ import { prisma } from "../db/client.js";
 import { SYSTEM_PROMPT } from "./systemPrompt.js";
 import { executeTool, getAvailableTools } from "./tools.js";
 import { sendOllamaChatMessageUnserialized } from "./ollamaLoop.js";
+import { sendClaudeChatMessageUnserialized } from "./claudeLoop.js";
 import { childLogger } from "../core/logger.js";
 
 const logger = childLogger("assistantClient");
@@ -212,7 +213,10 @@ async function generateContentWithRetry(
 // otherwise, same as the forced-Gemini path always has) -- if it's not set,
 // the original Ollama error is what the caller sees, not a confusing
 // "Gemini not configured" one.
-async function sendChatMessageWithFallback(userText: string, provider: "gemini" | "ollama"): Promise<ChatResult> {
+async function sendChatMessageWithFallback(userText: string, provider: "gemini" | "ollama" | "claude"): Promise<ChatResult> {
+  // 2026-11-14: Claude (assistant/claudeLoop.ts). No silent fallback to another
+  // provider -- a Claude failure surfaces as itself.
+  if (provider === "claude") return sendClaudeChatMessageUnserialized(userText);
   if (provider !== "ollama") return sendGeminiChatMessageUnserialized(userText);
   try {
     return await sendOllamaChatMessageUnserialized(userText);
@@ -240,7 +244,7 @@ async function sendChatMessageWithFallback(userText: string, provider: "gemini" 
 // from corrupting interleaved history writes -- see the comment above
 // chatQueue's declaration) applies identically to either provider's history
 // table rows.
-export function sendChatMessage(userText: string, forceProvider?: "gemini" | "ollama"): Promise<ChatResult> {
+export function sendChatMessage(userText: string, forceProvider?: "gemini" | "ollama" | "claude"): Promise<ChatResult> {
   const result = chatQueue.then(() => {
     const provider = forceProvider ?? getSettings().assistantProvider;
     return sendChatMessageWithFallback(userText, provider);

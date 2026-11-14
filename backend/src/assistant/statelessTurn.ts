@@ -39,6 +39,7 @@
  * takes `number | null`) because there is no message row to point at.
  */
 import { runGeminiToolLoop } from "../agentCore/geminiToolLoop.js";
+import { runClaudeStatelessTurn } from "./claudeLoop.js";
 import { runOllamaToolLoop, type OllamaToolDeclaration } from "../agentCore/ollamaToolLoop.js";
 import { getSettings } from "../core/config.js";
 import { childLogger } from "../core/logger.js";
@@ -98,6 +99,9 @@ export async function runStatelessAssistantTurn(userPrompt: string, options: Sta
   const tools = options.toolNames ? allTools.filter((t) => options.toolNames!.includes(t.name)) : allTools;
   // Null messageId: there is no AssistantMessage row for a stateless turn.
   const execute = (name: string, input: Record<string, unknown>) => executeTool(name, input, null);
+
+  // 2026-11-14: Claude (assistant/claudeLoop.ts) -- same tools, same executeTool path.
+  if (settings.assistantProvider === "claude") return await runClaudeStatelessTurn(userPrompt, options.toolNames);
 
   if (settings.assistantProvider === "ollama") {
     try {

@@ -18,9 +18,9 @@ import { isDailyPlanRequest } from "../../assistant/planIntent.js";
  * minutes after it had been. The dashboard renders both shapes.
  */
 async function recordChatExchange(userText: string, replyText: string): Promise<number> {
-  const ollama = getSettings().assistantProvider === "ollama";
+  const provider = getSettings().assistantProvider;
   const row = (role: "user" | "assistant", text: string) =>
-    ollama ? { __provider: "ollama", messages: [{ role, content: text }] } : [{ text }];
+    provider === "ollama" || provider === "claude" ? { __provider: provider, messages: [{ role, content: text }] } : [{ text }];
   await prisma.assistantMessage.create({ data: { role: "user", content: row("user", userText) } });
   const saved = await prisma.assistantMessage.create({ data: { role: "assistant", content: row("assistant", replyText) } });
   return saved.id;

@@ -39,6 +39,28 @@ function normalizeContent(content: unknown): AssistantContentPart[] {
         .map((m) => ({ text: m.content }));
     }
   }
+  // 2026-11-14: Claude rows (backend assistant/claudeLoop.ts) -- {"__provider":
+  // "claude", messages: [{role, content: string | block[]}]}. Mapped onto the
+  // Gemini part shape this page already renders; thinking blocks are skipped.
+  if (content && typeof content === "object" && (content as { __provider?: unknown }).__provider === "claude") {
+    const messages = (content as { messages?: unknown }).messages;
+    if (!Array.isArray(messages)) return [];
+    const parts: AssistantContentPart[] = [];
+    for (const m of messages) {
+      const c = (m as { content?: unknown })?.content;
+      if (typeof c === "string") {
+        parts.push({ text: c });
+        continue;
+      }
+      if (!Array.isArray(c)) continue;
+      for (const b of c as Array<Record<string, unknown>>) {
+        if (b.type === "text" && typeof b.text === "string") parts.push({ text: b.text });
+        else if (b.type === "tool_use" && typeof b.name === "string") parts.push({ functionCall: { name: b.name, args: (b.input as Record<string, unknown>) ?? {} } });
+        else if (b.type === "tool_result") parts.push({ functionResponse: { name: "tool result", response: b.is_error ? { error: String(b.content) } : { output: String(b.content) } } });
+      }
+    }
+    return parts;
+  }
   return [];
 }
 
