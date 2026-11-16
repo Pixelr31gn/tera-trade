@@ -119,7 +119,13 @@ export class BrowserControlBroker implements BrokerClient {
 
   private async getPage(): Promise<Page> {
     const settings = getSettings();
-    if (!this.browser) this.browser = await connectToChrome(settings.browserCdpUrl);
+    // 2026-11-15: a Chrome restart leaves this.browser pointing at a dead
+    // connection, and findPage on it finds no tabs forever. Seen on the
+    // laptop executor: every mirrored order failed with "No open Chrome tab"
+    // while /prepare, which asks connectToChrome each time, worked.
+    // connectToChrome hands back its cached connection while that is alive,
+    // so this only reconnects when the old one is gone.
+    if (!this.browser || !this.browser.isConnected()) this.browser = await connectToChrome(settings.browserCdpUrl);
     const page = await findPage(this.browser, settings.browserUrlMatch);
     if (!page) throw new Error(`No open Chrome tab matching "${settings.browserUrlMatch}"`);
     return page;
